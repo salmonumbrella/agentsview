@@ -739,13 +739,6 @@ func dailyUsageRowSelectFromRowsWithMachine(
 		rowsSQL, includeMachine, "u.session_id", false)
 }
 
-func dailyUsageRowSelectFromSnapshotRowsWithMachine(
-	rowsSQL string, includeMachine bool,
-) string {
-	return dailyUsageRowSelectFromRowsWithSession(
-		rowsSQL, includeMachine, "u.snapshot_attribution_session_id", true)
-}
-
 func dailyUsageRowSelectFromRowsWithSession(
 	rowsSQL string, includeMachine bool, sessionColumn string,
 	reloadSessionMetadata bool,
@@ -937,14 +930,6 @@ func usageRowQuery(f UsageFilter) (string, []any) {
 	rowsSQL, args := usageRowsSQLForBounds(f, usageBoundsForFilter(f))
 	query := dailyUsageRowSelectFromRows(rowsSQL)
 	return query, args
-}
-
-func topSessionsUsageRowQuery(f UsageFilter) (string, []any) {
-	rowsSQL, args := usageRowsSQLForBounds(
-		usageSnapshotInputFilter(f), usageBoundsForFilter(f))
-	rowsSQL, snapshotArgs := snapshotRankedDailyUsageRowsSQL(rowsSQL, f)
-	args = append(args, snapshotArgs...)
-	return dailyUsageRowSelectFromSnapshotRowsWithMachine(rowsSQL, false), args
 }
 
 func usageSnapshotInputFilter(f UsageFilter) UsageFilter {

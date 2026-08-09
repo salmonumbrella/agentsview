@@ -142,25 +142,19 @@ func (s *BunStore) bunActivityReportUsageFrom(
 	if loc == nil {
 		loc = time.UTC
 	}
-	rows, err := s.loadDailyUsageRowsFrom(ctx, store, UsageFilter{
+	projections, err := s.loadBunUsageProjections(ctx, store, UsageFilter{
 		From:     q.RangeStart.In(loc).Format("2006-01-02"),
 		To:       q.RangeEnd.In(loc).Format("2006-01-02"),
 		Timezone: q.Timezone,
-	}, false, false)
+	}, false, "")
 	if err != nil {
 		return nil, nil, err
-	}
-	allowed := make(map[string]struct{}, len(ids))
-	for _, id := range ids {
-		allowed[id] = struct{}{}
 	}
 	lower, lowerErr := parseTimestamp(lowerBound)
 	upper, upperErr := parseTimestamp(upperBound)
 	var candidates []activityReportUsageCandidate
-	for _, row := range rows {
-		if _, ok := allowed[row.sessionID]; !ok {
-			continue
-		}
+	for _, projection := range projections {
+		row := usageProjectionToDailyRow(projection)
 		parsed, parseErr := parseTimestamp(row.ts)
 		if parseErr == nil {
 			if lowerErr == nil && parsed.Before(lower) {
@@ -189,10 +183,18 @@ func (s *BunStore) bunActivityReportUsageFrom(
 	sortActivityReportUsageCandidates(candidates)
 	baseRows := make([]activity.UsageRow, len(candidates))
 	for i := range candidates {
+		_, outputTokens, _, _, _ := dailyUsageRowTokens(candidates[i].scan)
+		candidates[i].row.OutputTokens = outputTokens
+		candidates[i].row.WebSearchRequests = usageRowWebSearchRequests(
+			candidates[i].scan.usageSource, candidates[i].scan.tokenJSON,
+		)
 		baseRows[i] = candidates[i].row
 	}
-	mask := activity.UsageSurvivorMask(
-		q.RangeStart, q.RangeEnd, q.EffectiveEnd, baseRows,
+	mask, attribution, webSearchRequests :=
+		activity.UsageSurvivorSelectionForSessions(
+			q.RangeStart, q.RangeEnd, q.EffectiveEnd, baseRows, ids,
+		)
+	return materializeActivityReportUsageCandidates(
+		candidates, mask, attribution, webSearchRequests, rateResolver,
 	)
-	return materializeActivityReportUsageCandidates(candidates, mask, rateResolver)
 }
