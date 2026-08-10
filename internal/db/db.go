@@ -414,6 +414,9 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // inline reference, and terminal command fields in shapes the parser previously
 // skipped. Existing VS Code Copilot and Positron rows need re-parsing so their
 // structured tool calls and visible file references are restored.)
+// Canonical message timestamp validation also ships at data version 86. The
+// same full resync blanks unsupported archived timestamps across live,
+// orphaned, and trashed sessions before replication can read them.
 const dataVersion = 86
 
 const tokenCoverageRepairStatsKey = "token_coverage_repair_v1"

@@ -1022,7 +1022,7 @@ func TestMigration_ToolResultEventsTable(t *testing.T) {
 
 func TestCurrentDataVersionUsageReparses(t *testing.T) {
 	assert.Equal(t, 86, CurrentDataVersion(),
-		"Codex replay accounting and VS Code Copilot response items require sequential reparses")
+		"parser accounting and canonical timestamps require the current full resync")
 }
 
 func TestInsertMessages_PreservesToolResultEvents(t *testing.T) {
