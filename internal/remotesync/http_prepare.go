@@ -239,6 +239,7 @@ func (hs HTTPSync) prepare(
 	if err := validateTargetSetPaths(targets); err != nil {
 		return nil, err
 	}
+	retainedTargets := disabledProviderTargets(targets, hs.DisabledAgents)
 	targets = FilterDisabledTargets(targets, hs.DisabledAgents)
 
 	prepared := &PreparedHTTP{
@@ -295,6 +296,7 @@ func (hs HTTPSync) prepare(
 	err = hs.prepareMirror(ctx, client, splitTargets{
 		dirScoped:  dirScoped,
 		fileScoped: fileScoped,
+		retained:   retainedTargets,
 	}, manifest, mirrorRoot)
 	if err != nil {
 		return nil, err
@@ -386,6 +388,7 @@ func (hs HTTPSync) reportLegacyFallback() {
 type splitTargets struct {
 	dirScoped  TargetSet
 	fileScoped TargetSet
+	retained   TargetSet
 }
 
 // prepareMirror applies the manifest delta to the persistent mirror. The
@@ -398,7 +401,7 @@ func (hs HTTPSync) prepareMirror(
 	manifest Manifest,
 	mirrorRoot string,
 ) error {
-	delta, err := MirrorDiff(mirrorRoot, manifest)
+	delta, err := MirrorDiffRetainingTargets(mirrorRoot, manifest, targets.retained)
 	if err != nil {
 		return err
 	}
