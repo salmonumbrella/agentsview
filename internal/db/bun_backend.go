@@ -61,8 +61,6 @@ type BackendCapabilities struct {
 	Semantic         SemanticCapability
 	HybridLexical    HybridLexicalCapability
 	SearchDialect    BunSearchDialect
-	LexicalDialect   BunLexicalDialect
-	VectorDialect    BunVectorDialect
 	Writes           map[WriteOperation]bool
 	ArchiveWrites    ArchiveWriteAdapter
 	SessionMutations SessionMutationAdapter
