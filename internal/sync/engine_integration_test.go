@@ -14886,3 +14886,88 @@ func TestSyncSingleSessionChildCaptureFailurePreservesEdges(t *testing.T) {
 	assert.Equal(t, 1, edgeCount,
 		"failed capture must not remove the sole spawn edge")
 }
+
+// A stored Claude session the current parser no longer derives from its
+// transcript (e.g. a fork branch an older parser split out) makes the
+// path map to multiple DB sessions, so GetSessionForIncremental declines
+// and every append full-parses the whole file, forever — re-parsing can
+// never re-emit the stale ID. A complete full parse must tombstone such
+// rows as source-missing so the incremental path recovers; a later parse
+// that re-emits the ID revives the row.
+func TestSyncAllTombstonesStaleClaudeForkRow(t *testing.T) {
+	env := setupTestEnv(t)
+	content := testjsonl.NewSessionBuilder().
+		AddClaudeUser(tsEarly, "hello there", "/workspace/api").
+		String()
+	path := env.writeClaudeSession(
+		t, "-workspace-api", "main-sess.jsonl", content,
+	)
+	require.Equal(t, 1, env.engine.SyncAll(t.Context(), nil).Synced)
+
+	staleID := "main-sess-11111111-2222-4333-8444-555555555555"
+	parentID := "main-sess"
+	result, err := env.db.WriteSessionBatch([]db.SessionBatchWrite{{
+		Session: db.Session{
+			ID:               staleID,
+			Project:          "api",
+			Machine:          "local",
+			Agent:            "claude",
+			ParentSessionID:  &parentID,
+			RelationshipType: "fork",
+			FilePath:         &path,
+		},
+	}})
+	require.NoError(t, err, "seed stale fork row")
+	require.Equal(t, 1, result.WrittenSessions, "seed stale fork row")
+	// Zero data_version mirrors fork rows written before data-version
+	// stamping existed.
+	require.NoError(t, env.db.SetSessionDataVersion(staleID, 0))
+	// Real fork rows carry a source-ownership baseline from earlier
+	// discovery passes; the tombstone requires that deletion authority.
+	require.NoError(t, env.db.BaselineActiveSessionSourcePaths(
+		t.Context(), "local",
+		[]db.SessionSourcePath{{Agent: "claude", FilePath: path}},
+	))
+
+	appendLine := func(line string) {
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+		require.NoError(t, err, "open transcript for append")
+		_, writeErr := f.WriteString(line + "\n")
+		f.Close()
+		require.NoError(t, writeErr, "append transcript line")
+	}
+
+	// The stale sibling forces this append onto the full-parse path; the
+	// complete parse no longer emits the fork ID and must tombstone it.
+	appendLine(testjsonl.ClaudeAssistantJSON(
+		[]map[string]any{{"type": "text", "text": "first append"}},
+		tsEarlyS1,
+	))
+	require.Equal(t, 1, env.engine.SyncAll(t.Context(), nil).Synced)
+
+	var deletedAt, cause sql.NullString
+	require.NoError(t, env.db.Reader().QueryRow(
+		`SELECT deleted_at, deletion_cause FROM sessions WHERE id = ?`,
+		staleID,
+	).Scan(&deletedAt, &cause), "query stale fork row")
+	assert.True(t, deletedAt.Valid,
+		"stale fork row should be tombstoned as source-missing")
+	assert.Equal(t, "source_missing", cause.String)
+
+	// With the transcript mapping to a single active session again, the
+	// next append stays on the incremental path instead of re-parsing
+	// the whole file.
+	appendLine(testjsonl.ClaudeAssistantJSON(
+		[]map[string]any{{"type": "text", "text": "second append"}},
+		tsEarlyS5,
+	))
+	require.Equal(t, 1, env.engine.SyncAll(t.Context(), nil).Synced)
+
+	var lastWriteIncremental bool
+	require.NoError(t, env.db.Reader().QueryRow(
+		`SELECT last_write_incremental FROM sessions WHERE id = ?`,
+		"main-sess",
+	).Scan(&lastWriteIncremental), "query incremental marker")
+	assert.True(t, lastWriteIncremental,
+		"append after tombstone should take the incremental path")
+}

@@ -9054,6 +9054,23 @@ func (e *Engine) processProviderFile(
 				retentionLease: lease,
 			}, true
 		}
+	} else if file.Agent == parser.AgentClaude &&
+		outcome.ResultSetComplete && len(outcome.SourceErrors) == 0 &&
+		parsedCount > 0 {
+		missingMembers, err =
+			e.claudeSourceMissingSessionOwnershipsForCompleteResult(
+				ctx, outcome, parsedResults,
+			)
+		if err != nil {
+			return processResult{
+				err:            err,
+				mtime:          fingerprint.MTimeNS,
+				cacheSkip:      cacheSkip,
+				cacheKey:       cacheKey,
+				noCacheSkip:    true,
+				retentionLease: lease,
+			}, true
+		}
 	}
 	filteredResults := e.dropUnchangedSharedSQLiteResults(
 		file, parsedResults, providerSemantics.UnchangedResults,
@@ -9294,6 +9311,78 @@ func (e *Engine) providerSourceMissingSessionOwnershipsForCompleteResult(
 		missing = append(missing, member)
 	}
 	return missing, nil
+}
+
+// claudeSourceMissingSessionOwnershipsForCompleteResult lists stored active
+// Claude sessions tracked under this transcript's exact stored path that a
+// complete full parse no longer derives from it — e.g. fork branches an
+// older parser split out of the DAG. Such rows can never be re-stamped by
+// re-parsing the file, so they pin the path's minimum data_version at a
+// stale value and defeat the unchanged-source skip on every sweep.
+// Tombstoning them as source-missing lets the skip converge; a later parse
+// that re-emits an ID revives the row. Unlike the provider-scope variant
+// above, the lookup is bound to the results' own file paths: a Claude
+// source scope must never widen to sibling transcripts, whose sessions are
+// legitimately absent from this parse.
+func (e *Engine) claudeSourceMissingSessionOwnershipsForCompleteResult(
+	ctx context.Context,
+	outcome parser.ParseOutcome,
+	results []parser.ParseResult,
+) ([]sourceMissingMember, error) {
+	present := make(map[string]struct{}, len(results))
+	paths := make(map[string]struct{}, 1)
+	for _, result := range results {
+		if id := applyIDPrefixToID(e.idPrefix, result.Session.ID); id != "" {
+			present[id] = struct{}{}
+		}
+		path := result.Session.File.Path
+		if path == "" {
+			continue
+		}
+		if e.pathRewriter != nil {
+			path = e.pathRewriter(path)
+		}
+		paths[path] = struct{}{}
+	}
+	// Excluded IDs are owned by the parser-exclusion deletion path.
+	for _, id := range e.applyIDPrefixToSessionIDs(outcome.ExcludedSessionIDs) {
+		present[id] = struct{}{}
+	}
+	var members []sourceMissingMember
+	var sessionIDs []string
+	for path := range paths {
+		storedIDs, err := e.db.ListSessionIDsByFilePath(
+			path, string(parser.AgentClaude),
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"list stored claude sessions for %s: %w", path, err,
+			)
+		}
+		for _, id := range storedIDs {
+			if _, ok := present[id]; ok {
+				continue
+			}
+			members = append(members, sourceMissingMember{
+				sessionID: id,
+				filePath:  path,
+			})
+			sessionIDs = append(sessionIDs, id)
+		}
+	}
+	if len(members) == 0 {
+		return nil, nil
+	}
+	storedMachines, err := e.db.ListSessionMachinesByID(ctx, sessionIDs)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"list stored claude session machines: %w", err,
+		)
+	}
+	for i := range members {
+		members[i].machine = storedMachines[members[i].sessionID]
+	}
+	return members, nil
 }
 
 // applyProviderFilePathPolicies reproduces the DB-aware, file-path-scoped
