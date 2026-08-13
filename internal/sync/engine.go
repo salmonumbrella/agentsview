@@ -9314,16 +9314,17 @@ func (e *Engine) providerSourceMissingSessionOwnershipsForCompleteResult(
 }
 
 // claudeSourceMissingSessionOwnershipsForCompleteResult lists stored active
-// Claude sessions tracked under this transcript's exact stored path that a
-// complete full parse no longer derives from it — e.g. fork branches an
-// older parser split out of the DAG. Such rows can never be re-stamped by
-// re-parsing the file, so they pin the path's minimum data_version at a
-// stale value and defeat the unchanged-source skip on every sweep.
-// Tombstoning them as source-missing lets the skip converge; a later parse
-// that re-emits an ID revives the row. Unlike the provider-scope variant
-// above, the lookup is bound to the results' own file paths: a Claude
-// source scope must never widen to sibling transcripts, whose sessions are
-// legitimately absent from this parse.
+// Claude fork sessions written by an older parser version under this
+// transcript's exact stored path that a complete full parse no longer derives
+// from it. The stale data version and fork relationship together prove the row
+// is a legacy DAG branch artifact rather than a current parser presence
+// regression. Such rows can never be re-stamped by re-parsing the file, so
+// they pin the path's minimum data_version at a stale value and defeat the
+// unchanged-source skip on every sweep. Tombstoning them as source-missing
+// lets the skip converge; a later parse that re-emits an ID revives the row.
+// Unlike the provider-scope variant above, the lookup is bound to the results'
+// own file paths: a Claude source scope must never widen to sibling
+// transcripts, whose sessions are legitimately absent from this parse.
 func (e *Engine) claudeSourceMissingSessionOwnershipsForCompleteResult(
 	ctx context.Context,
 	outcome parser.ParseOutcome,
@@ -9351,12 +9352,12 @@ func (e *Engine) claudeSourceMissingSessionOwnershipsForCompleteResult(
 	var members []sourceMissingMember
 	var sessionIDs []string
 	for path := range paths {
-		storedIDs, err := e.db.ListSessionIDsByFilePath(
+		storedIDs, err := e.db.ListStaleForkSessionIDsByFilePath(
 			path, string(parser.AgentClaude),
 		)
 		if err != nil {
 			return nil, fmt.Errorf(
-				"list stored claude sessions for %s: %w", path, err,
+				"list stale claude fork sessions for %s: %w", path, err,
 			)
 		}
 		for _, id := range storedIDs {

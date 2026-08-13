@@ -14971,3 +14971,75 @@ func TestSyncAllTombstonesStaleClaudeForkRow(t *testing.T) {
 	assert.True(t, lastWriteIncremental,
 		"append after tombstone should take the incremental path")
 }
+
+func TestSyncAllPreservesUnprovenClaudeMissingRows(t *testing.T) {
+	tests := []struct {
+		name             string
+		relationshipType string
+		dataVersion      int
+	}{
+		{
+			name:             "current fork",
+			relationshipType: "fork",
+			dataVersion:      db.CurrentDataVersion(),
+		},
+		{
+			name:             "stale root",
+			relationshipType: "root",
+			dataVersion:      0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := setupTestEnv(t)
+			content := testjsonl.NewSessionBuilder().
+				AddClaudeUser(tsEarly, "hello there", "/workspace/api").
+				String()
+			path := env.writeClaudeSession(
+				t, "-workspace-api", "main-sess.jsonl", content,
+			)
+			require.Equal(t, 1, env.engine.SyncAll(t.Context(), nil).Synced)
+
+			missingID := "missing-session"
+			parentID := "main-sess"
+			result, err := env.db.WriteSessionBatch([]db.SessionBatchWrite{{
+				Session: db.Session{
+					ID:               missingID,
+					Project:          "api",
+					Machine:          "local",
+					Agent:            "claude",
+					ParentSessionID:  &parentID,
+					RelationshipType: tt.relationshipType,
+					FilePath:         &path,
+				},
+			}})
+			require.NoError(t, err, "seed missing row")
+			require.Equal(t, 1, result.WrittenSessions, "seed missing row")
+			require.NoError(t,
+				env.db.SetSessionDataVersion(missingID, tt.dataVersion))
+			require.NoError(t, env.db.BaselineActiveSessionSourcePaths(
+				t.Context(), "local",
+				[]db.SessionSourcePath{{Agent: "claude", FilePath: path}},
+			))
+
+			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+			require.NoError(t, err, "open transcript for append")
+			_, writeErr := f.WriteString(testjsonl.ClaudeAssistantJSON(
+				[]map[string]any{{"type": "text", "text": "append"}},
+				tsEarlyS1,
+			) + "\n")
+			require.NoError(t, f.Close(), "close transcript")
+			require.NoError(t, writeErr, "append transcript line")
+			require.Equal(t, 1, env.engine.SyncAll(t.Context(), nil).Synced)
+
+			var deletedAt, cause sql.NullString
+			require.NoError(t, env.db.Reader().QueryRow(
+				`SELECT deleted_at, deletion_cause FROM sessions WHERE id = ?`,
+				missingID,
+			).Scan(&deletedAt, &cause), "query preserved row")
+			assert.False(t, deletedAt.Valid,
+				"missing row without both legacy and fork evidence must survive")
+			assert.False(t, cause.Valid, "preserved row must not gain a cause")
+		})
+	}
+}

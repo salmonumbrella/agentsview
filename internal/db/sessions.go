@@ -3054,6 +3054,45 @@ func (db *DB) ListSessionIDsByFilePath(path, agent string) ([]string, error) {
 	return ids, nil
 }
 
+// ListStaleForkSessionIDsByFilePath returns active fork rows written by an
+// older parser data version for one provider-owned source path. Both signals
+// are required before a caller may treat a row omitted by a current complete
+// parse as a legacy fork artifact rather than parser presence drift.
+func (db *DB) ListStaleForkSessionIDsByFilePath(
+	path, agent string,
+) ([]string, error) {
+	rows, err := db.getReader().Query(
+		"SELECT id FROM sessions"+
+			" WHERE file_path = ? AND agent = ? AND deleted_at IS NULL"+
+			" AND relationship_type = 'fork' AND data_version < ?"+
+			" ORDER BY id",
+		path, agent, dataVersion,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"listing stale fork session IDs by file path: %w", err,
+		)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf(
+				"scanning stale fork session ID by file path: %w", err,
+			)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf(
+			"iterating stale fork session IDs by file path: %w", err,
+		)
+	}
+	return ids, nil
+}
+
 const sessionMachineBatchSize = 500
 
 // SessionWriteIdentity is the stored evidence used to decide whether a copied
