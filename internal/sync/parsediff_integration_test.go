@@ -2284,9 +2284,8 @@ func TestParseDiffEngineRefusesWrites(t *testing.T) {
 		"refused scans must not persist secret findings")
 }
 
-func TestParseDiffPresenceSweep(t *testing.T) {
-
-	t.Run("current-version row no longer emitted", func(t *testing.T) {
+func TestParseDiffClaudeMissingRowsAreTombstoneBound(t *testing.T) {
+	t.Run("current-version row", func(t *testing.T) {
 		env := setupSingleAgentTestEnv(t, parser.AgentClaude)
 		path := env.writeClaudeSession(t, "test-proj", "pd-real.jsonl",
 			parseDiffClaudeContent("real prompt", "real reply"))
@@ -2294,8 +2293,9 @@ func TestParseDiffPresenceSweep(t *testing.T) {
 			TotalSessions: 1, Synced: 1,
 		})
 
-		// A current-version row under the same source file with an ID
-		// today's parser never derives: the loudest drift signal.
+		// A current-version legacy fork row under the same transcript has
+		// already been processed by this parser version, but a complete parse
+		// no longer derives its old branch ID.
 		require.NoError(t, env.db.UpsertSession(db.Session{
 			ID: "pd-phantom", Project: "test-proj", Machine: "local",
 			Agent: "claude", FilePath: &path,
@@ -2307,21 +2307,20 @@ func TestParseDiffPresenceSweep(t *testing.T) {
 
 		report := runParseDiff(t, env, sync.ParseDiffOptions{})
 		assert.Equal(t, sync.ParseDiffTotals{
-			Examined: 2, Identical: 1, Changed: 1,
+			Examined: 1, Identical: 1, ExcludedByParser: 1,
 		}, report.Totals, "totals")
-		assert.Equal(t, map[string]int{sync.FieldPresence: 1},
-			report.FieldCounts, "field counts")
+		assert.Empty(t, report.FieldCounts,
+			"tombstone-bound rows are not parser drift")
 
 		sd := findSessionDiff(report, "pd-phantom")
 		require.NotNil(t, sd, "phantom session not listed")
-		assert.Equal(t, sync.DiffChanged, sd.Class, "class")
-		assert.Contains(t, sessionDiffFieldNames(sd, false),
-			sync.FieldPresence, "presence diff")
-		assert.True(t, report.HasFailures(),
-			"a current-version presence drop is parser drift")
+		assert.Equal(t, sync.DiffExcluded, sd.Class, "class")
+		assert.Equal(t, "member source missing (would tombstone)", sd.Reason)
+		assert.False(t, report.HasFailures(),
+			"an intentional source-missing tombstone must not trip --fail-on-change")
 	})
 
-	t.Run("stale row no longer emitted is pending resync", func(t *testing.T) {
+	t.Run("stale row", func(t *testing.T) {
 		env := setupSingleAgentTestEnv(t, parser.AgentClaude)
 		path := env.writeClaudeSession(t, "test-proj", "pd-real.jsonl",
 			parseDiffClaudeContent("real prompt", "real reply"))
@@ -2338,18 +2337,16 @@ func TestParseDiffPresenceSweep(t *testing.T) {
 
 		report := runParseDiff(t, env, sync.ParseDiffOptions{})
 		assert.Equal(t, sync.ParseDiffTotals{
-			Examined: 2, Identical: 1, PendingResync: 1,
+			Examined: 1, Identical: 1, ExcludedByParser: 1,
 		}, report.Totals, "totals")
 		assert.Empty(t, report.FieldCounts,
-			"stale presence is pipeline history, not drift")
+			"tombstone-bound rows are not parser drift")
 
 		sd := findSessionDiff(report, "pd-zombie")
 		require.NotNil(t, sd, "zombie session not listed")
-		assert.Equal(t, sync.DiffPendingResync, sd.Class, "class")
-		assert.Contains(t, sessionDiffFieldNames(sd, true),
-			sync.FieldPresence,
-			"presence field attached for drill-down")
+		assert.Equal(t, sync.DiffExcluded, sd.Class, "class")
+		assert.Equal(t, "member source missing (would tombstone)", sd.Reason)
 		assert.False(t, report.HasFailures(),
-			"stale rows must not trip --fail-on-change")
+			"an intentional source-missing tombstone must not trip --fail-on-change")
 	})
 }

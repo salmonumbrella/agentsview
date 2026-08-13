@@ -14818,12 +14818,12 @@ func TestSyncSingleSessionRepairFailurePersistsFormerChildForRetry(t *testing.T)
 		"retry must repair a child no longer discoverable from the removed edge")
 }
 
-// TestSyncSingleSessionChildCaptureFailurePreservesEdges pins the fail-closed
+// TestSyncSingleSessionPreWriteReadFailurePreservesEdges pins the fail-closed
 // boundary before a full rewrite. The rewritten spawner transcript is about to
-// remove its sole spawn edge; if the engine cannot first capture the affected
-// child, it must return that read failure before any exclusion or replacement
-// can erase the evidence needed to repair the hierarchy.
-func TestSyncSingleSessionChildCaptureFailurePreservesEdges(t *testing.T) {
+// remove its sole spawn edge; if any pre-write archive read fails, the engine
+// must return before an exclusion or replacement can erase the evidence needed
+// to repair the hierarchy.
+func TestSyncSingleSessionPreWriteReadFailurePreservesEdges(t *testing.T) {
 	env := setupTestEnv(t)
 
 	env.writeClaudeSession(
@@ -14873,7 +14873,7 @@ func TestSyncSingleSessionChildCaptureFailurePreservesEdges(t *testing.T) {
 	require.NoError(t, env.db.CloseConnections(), "close database connections")
 	syncErr := env.engine.SyncSingleSession("agent-spawner")
 	require.NoError(t, env.db.Reopen(), "reopen database")
-	require.ErrorContains(t, syncErr, "list pre-write subagent children")
+	require.ErrorContains(t, syncErr, "database is closed")
 
 	spawner, err := env.db.GetSession(context.Background(), "agent-spawner")
 	require.NoError(t, err, "get spawner after failed sync")
