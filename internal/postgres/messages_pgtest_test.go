@@ -690,15 +690,21 @@ func TestGetMessagesToolCallFilePathAndCallIndex(t *testing.T) {
 			('tc-fields-001', 0, 'assistant', 'tools',
 			 '2026-03-16T10:00:00Z'::timestamptz, 5, TRUE)`)
 	require.NoError(t, err, "insert message")
-	// Three tool calls on one message, call_index 0/1/2, distinct file_path.
+	// Three tool calls on one message with sparse call indexes and distinct paths.
 	_, err = pg.Exec(`
 		INSERT INTO tool_calls
 			(session_id, tool_name, category, call_index,
-			 message_ordinal, file_path)
+			 message_ordinal, file_path, result_content_length)
 		VALUES
-			('tc-fields-001', 'Read', 'Read', 0, 0, 'a.go'),
-			('tc-fields-001', 'Edit', 'Edit', 1, 0, 'b.go'),
-			('tc-fields-001', 'Write', 'Write', 2, 0, 'c.go')`)
+			('tc-fields-001', 'Read', 'Read', 0, 0, 'a.go', 0),
+			('tc-fields-001', 'Edit', 'Edit', 3, 0, 'b.go', 0),
+			('tc-fields-001', 'Write', 'Write', 7, 0, 'c.go', 13);
+		INSERT INTO tool_result_events
+			(session_id, tool_call_message_ordinal, call_index,
+			 event_index, source, status, content, content_length)
+		VALUES
+			('tc-fields-001', 0, 7, 2, 'tool_result', 'completed',
+			 'sparse result', 13)`)
 	require.NoError(t, err, "insert tool_calls")
 
 	store, err := NewStore(pgURL, schema, true)
@@ -710,12 +716,14 @@ func TestGetMessagesToolCallFilePathAndCallIndex(t *testing.T) {
 	require.Len(t, all, 1)
 	calls := all[0].ToolCalls
 	require.Len(t, calls, 3)
-	for i, tc := range calls {
-		assert.Equal(t, i, tc.CallIndex, "call %d index", i)
-	}
+	assert.Equal(t, []int{0, 3, 7}, []int{calls[0].CallIndex, calls[1].CallIndex, calls[2].CallIndex})
 	assert.Equal(t, "a.go", calls[0].FilePath)
 	assert.Equal(t, "b.go", calls[1].FilePath)
 	assert.Equal(t, "c.go", calls[2].FilePath)
+	require.Len(t, calls[2].ResultEvents, 1)
+	assert.Equal(t, 2, calls[2].ResultEvents[0].EventIndex)
+	assert.Equal(t, "sparse result", calls[2].ResultEvents[0].Content)
+	assert.Equal(t, "sparse result", calls[2].ResultContent, "single-event summaries are restored on the live getter")
 }
 
 // TestGetMessagesIDPopulated regresses #439: scanPGMessages must
