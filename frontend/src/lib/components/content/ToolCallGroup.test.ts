@@ -8,6 +8,8 @@ import ToolCallGroup from "./ToolCallGroup.svelte";
 
 function makeToolMessage(ordinal: number): Message {
   return {
+    content_layout: null,
+    tool_result_text: "",
     id: ordinal + 1,
     session_id: "s1",
     ordinal,
@@ -26,6 +28,7 @@ function makeToolMessage(ordinal: number): Message {
     has_output_tokens: false,
     tool_calls: [
       {
+        rendering: "",
         category: "",
         tool_name: "bash",
       },
@@ -65,6 +68,7 @@ describe("ToolCallGroup", () => {
       const message = makeToolMessage(1);
       message.tool_calls = [
         {
+          rendering: "",
           tool_use_id: "call-1",
           tool_name: "Bash",
           category: "Bash",

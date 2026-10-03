@@ -4288,7 +4288,11 @@ func TestUploadSessionVariants(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, msgs, 2)
 		assert.Equal(t, "Hello [31mupload", msgs[0].Content)
-		assert.Equal(t, len("Hello [31mupload"), msgs[0].ContentLength)
+		// Native ranges use sanitized bytes; work counts can retain the two
+		// controls removed by the composer before archive sanitization.
+		assert.Equal(t, 18, msgs[0].ContentLength)
+		require.NotNil(t, msgs[0].ContentLayout)
+		assert.Equal(t, []parser.ContentBlock{{Kind: "text", End: 16}}, msgs[0].ContentLayout.Blocks)
 		assert.Len(t, msgs[1].Model, 128)
 		assert.Equal(t, db.MaxPlausibleTokens, msgs[1].ContextTokens)
 		assert.Equal(t, db.MaxPlausibleTokens, msgs[1].OutputTokens)

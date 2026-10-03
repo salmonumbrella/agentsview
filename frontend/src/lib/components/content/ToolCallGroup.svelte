@@ -5,16 +5,17 @@
   import { formatDuration } from "../../utils/duration.js";
   import { copyToClipboard } from "../../utils/clipboard.js";
   import { formatMessageForCopy } from "../../utils/copy-message.js";
-  import { parseContent, enrichSegments } from "../../utils/content-parser.js";
+  import { messageSegments } from "../../utils/content-parser.js";
   import { liveTick } from "../../stores/liveTick.svelte.js";
   import { sessionTiming } from "../../stores/sessionTiming.svelte.js";
   import ToolBlock from "./ToolBlock.svelte";
   import ThinkingBlock from "./ThinkingBlock.svelte";
-  import { collectSearchBlocks } from "../../search/block-text.js";
+  import { collectSearchBlocks, blockKey } from "../../search/block-text.js";
+  import { searchBlock } from "../../search/session-block.svelte.js";
   import { ui } from "../../stores/ui.svelte.js";
   import ParallelGroup from "./ParallelGroup.svelte";
   import { CopyButton } from "@kenn-io/kit-ui";
-  import { displayToolName } from "../../utils/toolDisplay.js";
+  import { displayToolName, displayToolResult } from "../../utils/toolDisplay.js";
   import { SettingsIcon } from "../../icons.js";
   import { m } from "../../i18n/index.js";
 
@@ -30,12 +31,7 @@
   let copied = $state(false);
 
   function messageToolCount(message: Message): number {
-    const structured = message.tool_calls?.length ?? 0;
-    if (structured > 0) return structured;
-    return enrichSegments(
-      parseContent(message.content, message.has_tool_use, message.id, message.content_length),
-      message.tool_calls,
-    ).filter((segment) => segment.type === "tool").length;
+    return messageSegments(message).filter((segment) => segment.type === "tool").length;
   }
 
   let totalCalls = $derived(messages.reduce((n, message) => n + messageToolCount(message), 0));
@@ -109,6 +105,21 @@
       {@const calls = message.tool_calls ?? []}
       {@const turn = turnByMessage.get(message.id)}
       <div data-message-ordinal={message.ordinal}>
+        {#if message.content_layout != null}
+          {#each messageSegments(message) as segment, segmentIndex}
+            {#if segment.type === "thinking" && ui.isBlockVisible("thinking")}
+              <ThinkingBlock content={segment.content} searchKey={searchable ? blockKey(message.ordinal, "thinking", segmentIndex) : undefined} />
+            {:else if segment.type === "tool" && ui.isBlockVisible("tool")}
+              {@const call = segment.toolCall!}
+              <ToolBlock toolCall={call} content={segment.content} label={displayToolName(call)}
+                durationLabel={soloDurationLabel(callByToolUseID.get(call.tool_use_id ?? ""), turn, message)}
+                isRunning={isRunningTurn(message)}
+                searchScope={searchable ? { ordinal: message.ordinal, callIdx: segment.callIndex! } : undefined} />
+            {:else if segment.type === "tool_result" && ui.isBlockVisible("tool")}
+              <pre class="tool-content output-content" {@attach searchBlock(searchable ? blockKey(message.ordinal, "tool-output", `seg${segmentIndex}`) : undefined)}>{displayToolResult(segment.content)}</pre>
+            {/if}
+          {/each}
+        {:else}
         {#if ui.isBlockVisible("thinking")}
           {#each collectSearchBlocks(message).filter((block) => block.kind === "thinking") as block (block.key)}
             <ThinkingBlock content={block.text} searchKey={searchable ? block.key : undefined} />
@@ -136,7 +147,7 @@
             searchOrdinal={searchable ? message.ordinal : undefined}
           />
         {:else}
-          {#each enrichSegments(parseContent(message.content, message.has_tool_use, message.id, message.content_length), message.tool_calls).filter((s) => s.type === "tool") as seg, segIdx (`${message.id}-${segIdx}`)}
+          {#each messageSegments(message).filter((s) => s.type === "tool") as seg, segIdx (`${message.id}-${segIdx}`)}
             <ToolBlock
               content={seg.content}
               label={seg.label}
@@ -144,6 +155,7 @@
               searchScope={searchable ? { ordinal: message.ordinal, callIdx: `seg${segIdx}` } : undefined}
             />
           {/each}
+        {/if}
         {/if}
       </div>
     {/each}

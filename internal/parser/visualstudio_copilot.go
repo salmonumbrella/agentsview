@@ -902,13 +902,13 @@ func visualStudioCopilotTraceMessages(
 		if prompt := visualStudioCopilotChatPrompt(span); prompt != "" {
 			promptKey := visualStudioCopilotPromptKey(span, prompt)
 			if _, seen := seenUserPrompts[promptKey]; !seen {
-				messages = append(messages, ParsedMessage{
+				messages = append(messages, (ParsedMessage{
 					Ordinal:       len(messages),
 					Role:          RoleUser,
 					Content:       prompt,
 					Timestamp:     span.start,
 					ContentLength: len(prompt),
-				})
+				}).withPlainBody())
 				seenUserPrompts[promptKey] = struct{}{}
 			}
 			if content, toolCalls := visualStudioCopilotChatOutput(span, executedToolIDs); content != "" || len(toolCalls) > 0 {
@@ -957,6 +957,18 @@ func visualStudioCopilotTraceMessages(
 			ContentLength: len(content),
 			ToolCalls:     toolCalls,
 		}
+		if len(toolCalls) > 0 {
+			var body MessageContentBuilder
+			for _, call := range toolCalls {
+				body.AddToolCall(call)
+			}
+			message.Content = ""
+			message = message.withBody(body.Message())
+			message.ContentLength = len(content)
+		} else {
+			message.IsSystem = true
+			message = message.withPlainBody()
+		}
 		visualStudioCopilotApplyUsage(&message, contentSpan)
 		if message.HasToolUse {
 			message.Ordinal = len(messages)
@@ -1004,6 +1016,10 @@ func visualStudioCopilotAppendChatOutput(
 		ContentLength: len(content),
 		ToolCalls:     toolCalls,
 	}
+	body := visualStudioCopilotChatBody(emitSpan, executedToolIDs)
+	message.Content = body.Content
+	message = message.withBody(body)
+	message.ContentLength = len(content)
 	visualStudioCopilotApplyUsage(&message, emitSpan)
 	return append(messages, message)
 }
@@ -1100,6 +1116,10 @@ func visualStudioCopilotAppendChatTurnUsage(
 		Timestamp:     span.end,
 		ContentLength: len(content),
 	}
+	message.Content = ""
+	var body MessageContentBuilder
+	message = message.withBody(body.Message())
+	message.ContentLength = len(content)
 	visualStudioCopilotApplyUsage(&message, usageSpan)
 	return append(messages, message)
 }
@@ -1803,6 +1823,38 @@ func visualStudioCopilotChatOutput(
 		}
 	}
 	return content, toolCalls
+}
+
+// visualStudioCopilotChatBody follows the persisted parts array. Executed calls
+// remain owned by their execute_tool spans, matching the existing deduplication.
+func visualStudioCopilotChatBody(span vsCopilotSpan, executedToolIDs map[string]struct{}) ParsedMessage {
+	var body MessageContentBuilder
+	var messages []vsCopilotChatMessage
+	if err := json.Unmarshal([]byte(span.attrMap["gen_ai.output.messages"]), &messages); err != nil {
+		return body.Message()
+	}
+	for _, message := range messages {
+		if message.Role != "assistant" {
+			continue
+		}
+		for _, part := range message.Parts {
+			switch part.Type {
+			case "text":
+				body.addText(strings.TrimSpace(part.Content), "\n\n")
+			case "tool_call":
+				if part.Name == "" {
+					continue
+				}
+				if _, ok := executedToolIDs[part.ID]; ok {
+					continue
+				}
+				calls := []ParsedToolCall{{ToolUseID: part.ID, ToolName: part.Name, Category: visualStudioCopilotToolCategory(part.Name), InputJSON: visualStudioCopilotChatToolInput(part.Name, part.Arguments)}}
+				formatVSCodeCopilotToolCalls(calls)
+				body.AddToolCall(calls[0])
+			}
+		}
+	}
+	return body.Message()
 }
 
 func visualStudioCopilotChatToolInput(

@@ -2,7 +2,7 @@
   import type { Session } from "../../api/types.js";
 import type { DbMessage as Message } from "../../api/generated/index.js";
   import type { DbCallTiming as CallTiming, DbTurnTiming as TurnTiming } from "../../api/generated/index.js";
-  import { parseContent, enrichSegments } from "../../utils/content-parser.js";
+  import { messageSegments } from "../../utils/content-parser.js";
   import { formatTimestamp, formatTokenUsage } from "../../utils/format.js";
   import { formatDuration } from "../../utils/duration.js";
   import { copyToClipboard } from "../../utils/clipboard.js";
@@ -28,7 +28,7 @@ import type { DbMessage as Message } from "../../api/generated/index.js";
   import { searchBlock } from "../../search/session-block.svelte.js";
   import { highlightCodeFences } from "../../utils/highlight-fences.js";
   import { loadAssetImages, renderMarkdown } from "../../utils/markdown.js";
-  import { displayToolName } from "../../utils/toolDisplay.js";
+  import { displayToolName, displayToolResult } from "../../utils/toolDisplay.js";
   import { ChevronDownIcon, ChevronRightIcon, CirclePlayIcon, PinIcon } from "../../icons.js";
   import { m } from "../../i18n/index.js";
 
@@ -42,10 +42,7 @@ import type { DbMessage as Message } from "../../api/generated/index.js";
   }
   let { message, session, isSubagentContext = false, searchOrdinal, compact = false, allowMutations = true }: Props = $props();
   let copied = $state(false);
-  let segments = $derived(enrichSegments(
-    parseContent(message.content, message.has_tool_use, message.id, message.content_length),
-    message.tool_calls,
-  ));
+  let segments = $derived(messageSegments(message));
   // Embedded subagents have their own ordinal namespace and are never searched here.
   let activeSearchOrdinal = $derived(isSubagentContext ? undefined : searchOrdinal);
   let hasSearchQuery = $derived(activeSearchOrdinal !== undefined && inSessionSearch.isActive);
@@ -269,14 +266,25 @@ import type { DbMessage as Message } from "../../api/generated/index.js";
   </div>
   <div class="message-body">
     {#each segments as segment, segmentIndex}
-      {@const searchKey = activeSearchOrdinal === undefined || segment.type === "tool"
+      {@const searchKey = activeSearchOrdinal === undefined || segment.type === "tool" || segment.type === "tool_result"
         ? undefined : blockKey(activeSearchOrdinal, segment.type, segmentIndex)}
       {#if segment.type === "thinking"}
         {#if ui.isBlockVisible("thinking")}
           <ThinkingBlock content={segment.content} {searchKey} />
         {/if}
       {:else if segment.type === "tool"}
-        <!-- Structured and legacy tool calls are rendered after prose. -->
+        {#if message.content_layout != null && ui.isBlockVisible("tool")}
+          {@const call = segment.toolCall!}
+          {@const turn = turnByMessage.get(message.id)}
+          <ToolBlock toolCall={call} content={segment.content} label={displayToolName(call)}
+            durationLabel={soloDurationLabel(callByToolUseID.get(call.tool_use_id ?? ""), turn, message)}
+            isRunning={isRunningTurn(message)}
+            searchScope={activeSearchOrdinal === undefined ? undefined : { ordinal: activeSearchOrdinal, callIdx: segment.callIndex! }} />
+        {/if}
+      {:else if segment.type === "tool_result"}
+        {#if ui.isBlockVisible("tool")}
+          <pre class="tool-content output-content" {@attach searchBlock(activeSearchOrdinal === undefined ? undefined : blockKey(activeSearchOrdinal, "tool-output", `seg${segmentIndex}`))}>{displayToolResult(segment.content)}</pre>
+        {/if}
       {:else if segment.type === "code"}
         {@const codeLabel = segment.label?.trim().toLowerCase()}
         {@const language = segment.label?.trim() ?? ""}
@@ -330,7 +338,7 @@ import type { DbMessage as Message } from "../../api/generated/index.js";
         {/if}
       {/if}
     {/each}
-    {#if ui.isBlockVisible("tool")}
+    {#if message.content_layout == null && ui.isBlockVisible("tool")}
       {@const turn = turnByMessage.get(message.id)}
       {@const structuredCalls = message.tool_calls ?? []}
       {#if structuredCalls.length === 1}
