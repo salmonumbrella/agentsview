@@ -7,6 +7,17 @@ description: Release history for AgentsView
 The latest release is
 [0.46.1](https://github.com/kenn-io/agentsview/releases/tag/v0.46.1).
 
+## Unreleased
+
+**Improvements**
+
+- PostgreSQL push watchers can collect configured remote hosts, including hubs
+  with no local session roots. Incremental pulls have a configurable timeout,
+  and committed sessions still reach the push and embedding queues after a
+  partial import fails.
+- Scheduled daemon pulls also use the ten-minute incremental timeout. Set
+  `sync_timeout = "0s"` in a remote-host entry to keep those pulls unbounded.
+
 ## 0.46.1
 
 <small>2026-10-22</small>
