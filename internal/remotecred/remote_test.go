@@ -52,7 +52,20 @@ func TestURLPolicy(t *testing.T) {
 		url          string
 		insecure, ok bool
 	}{
-		{"https://hub.example/path?secret=value", false, true}, {"http://hub.example", false, false}, {"http://hub.example", true, true}, {"http://127.0.0.1", false, true}, {"http://[::1]", false, true}, {"http://localhost", false, true}, {"https://user:password@hub.example", false, false}, {"ftp://hub.example", true, false}, {"https:///path", false, false},
+		{"https://hub.example/path", false, true},
+		{"http://hub.example", false, false},
+		{"http://hub.example", true, true},
+		{"http://127.0.0.1", false, true},
+		{"http://[::1]", false, true},
+		{"http://localhost", false, true},
+		{"https://user:password@hub.example", false, false},
+		{"ftp://hub.example", true, false},
+		{"https:///path", false, false},
+		{"https://hub.example/path?secret=value", false, false},
+		{"https://hub.example/path?", false, false},
+		{"https://hub.example/path#fragment", false, false},
+		{"https://hub.example/path#", false, false},
+		{"https://hub.example/path%23part", false, true},
 	} {
 		_, err := Client(tc.url, tc.insecure)
 		require.Equal(t, tc.ok, err == nil, tc.url)
@@ -110,7 +123,7 @@ func TestTokenModeProperty(t *testing.T) {
 }
 
 func TestRedirectPolicyProperty(t *testing.T) {
-	client, err := Client("https://HUB.example/private?secret=value", false)
+	client, err := Client("https://HUB.example/private", false)
 	require.NoError(t, err)
 	hegel.Test(t, func(ht *hegel.T) {
 		same := hegel.Draw(ht, hegel.Booleans())
@@ -175,7 +188,7 @@ func TestResponsePolicyPreservesTypedFailuresProperty(t *testing.T) {
 		}
 
 		switch status {
-		case http.StatusConflict, http.StatusServiceUnavailable:
+		case http.StatusNotImplemented, http.StatusConflict, http.StatusServiceUnavailable:
 			require.NoError(ht, err)
 			require.NotNil(ht, got)
 			require.Equal(ht, status, got.StatusCode)
@@ -187,15 +200,16 @@ func TestResponsePolicyPreservesTypedFailuresProperty(t *testing.T) {
 			if status == http.StatusConflict {
 				require.JSONEq(ht, `{"code":"source_changed"}`, string(gotBody))
 			} else {
-				require.Equal(ht, "remote request failed", string(gotBody))
+				require.JSONEq(ht, `{"error":"remote request failed"}`, string(gotBody))
 			}
-		case http.StatusNotFound, http.StatusNotImplemented:
+		case http.StatusNotFound:
 			require.NoError(ht, err)
 			require.NotNil(ht, got)
 			require.Equal(ht, status, got.StatusCode)
 			gotBody, readErr := io.ReadAll(got.Body)
 			require.NoError(ht, readErr)
 			require.NoError(ht, got.Body.Close())
+			require.JSONEq(ht, `{"error":"remote endpoint unavailable; try --local"}`, string(gotBody))
 			require.NotContains(ht, string(gotBody), "private")
 			require.NotContains(ht, string(gotBody), "secret")
 		default:
