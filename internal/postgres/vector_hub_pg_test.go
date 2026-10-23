@@ -6,7 +6,12 @@ import (
 	"context"
 	"encoding/json/v2"
 	"fmt"
+	"math"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -167,6 +172,100 @@ func TestVectorHubLookupPagination(t *testing.T) {
 	assert.NotEmpty(t, generation.Unavailable)
 }
 
+func TestVectorHubLookupSparseChunks(t *testing.T) {
+	sync, local, pg := newVectorPushTestSync(t, testPGURL(t), "agentsview_vector_hub_sparse_test")
+	seedVectorSession(t, local, "A")
+	source := hubRecipeSource("sparse", map[string]string{"max_input_chars": "8192"})
+	source.docs["A"] = []storage.VectorPushDoc{vdoc("A", "o:A:0", 0, "content", "hash", []float32{1, 0, 0, 0})}
+	sync.vectorSource = source
+	_, err := sync.Push(t.Context(), false, nil)
+	require.NoError(t, err)
+	id, _, _, err := LookupVectorGeneration(t.Context(), pg, "sparse")
+	require.NoError(t, err)
+	store := &Store{pg: pg}
+	setHubTestSearcher(t, store, id)
+	table := vectorChunkTable(id)
+	identity := vector.HubIdentity{SessionID: "A", UnitKind: "user", ContentHash: "hash"}
+	hegel.Test(t, func(ht *hegel.T) {
+		// Bound the materialized document size while drawing the full stored index domain.
+		n := 1 + hegel.Draw(ht, hegel.Integers(0, math.MaxInt32))%8
+		indices := make([]int, n)
+		for i := range indices {
+			indices[i] = hegel.Draw(ht, hegel.Integers(0, math.MaxInt32))
+		}
+		slices.Sort(indices)
+		indices = slices.Compact(indices)
+		switch hegel.Draw(ht, hegel.Integers(0, 4)) {
+		case 0:
+			indices = []int{0, 2}
+		case 1:
+			indices = []int{3, 7, 15}
+		case 2:
+			indices = []int{42}
+		}
+		_, err := pg.ExecContext(ht.Context(), "DELETE FROM "+table)
+		require.NoError(ht, err)
+		expected := make([]vector.HubChunk, len(indices))
+		for i, index := range indices {
+			_, err = pg.ExecContext(ht.Context(), fmt.Sprintf("INSERT INTO %s (doc_key,chunk_index,embedding) VALUES ('o:A:0',$1,$2)", table), index, fmt.Sprintf("[%d,0,0,0]", i+1))
+			require.NoError(ht, err)
+			encoded, err := vector.EncodeHubVector([]float32{float32(i + 1), 0, 0, 0})
+			require.NoError(ht, err)
+			expected[i] = vector.HubChunk{Index: 0, ChunkIndex: index, ChunkCount: len(indices), Vector: encoded}
+		}
+		req := vector.HubLookupRequest{Fingerprint: "sparse", Identities: []vector.HubIdentity{identity}}
+		full, err := store.LookupHubVectors(ht.Context(), req)
+		require.NoError(ht, err)
+		require.Equal(ht, expected, full.Chunks)
+		// Repeated and absent identities exercise resets between sparse documents.
+		missing := identity
+		missing.ContentHash = "missing"
+		req.Identities = []vector.HubIdentity{missing, identity, missing, identity}
+		var actual []vector.HubChunk
+		var absent []int
+		for pages := 0; ; pages++ {
+			require.Less(ht, pages, 2*len(indices)+4)
+			page, err := store.lookupHubVectors(ht.Context(), req, 2200)
+			require.NoError(ht, err)
+			actual = append(actual, page.Chunks...)
+			absent = append(absent, page.Absent...)
+			if page.NextCursor == "" {
+				break
+			}
+			require.NotEqual(ht, req.Cursor, page.NextCursor)
+			req.Cursor = page.NextCursor
+		}
+		want := make([]vector.HubChunk, 0, 2*len(expected))
+		for _, position := range []int{1, 3} {
+			for _, chunk := range expected {
+				chunk.Index = position
+				want = append(want, chunk)
+			}
+		}
+		require.Equal(ht, want, actual)
+		require.Equal(ht, []int{0, 2}, absent)
+	}, hegel.WithTestCases(1000))
+}
+
+func TestVectorHubRejectsNegativeChunkIndex(t *testing.T) {
+	sync, local, pg := newVectorPushTestSync(t, testPGURL(t), "agentsview_vector_hub_negative_test")
+	seedVectorSession(t, local, "A")
+	source := hubRecipeSource("negative", map[string]string{"max_input_chars": "8192"})
+	source.docs["A"] = []storage.VectorPushDoc{vdoc("A", "o:A:0", 0, "content", "hash", []float32{1, 0, 0, 0})}
+	sync.vectorSource = source
+	_, err := sync.Push(t.Context(), false, nil)
+	require.NoError(t, err)
+	id, _, _, err := LookupVectorGeneration(t.Context(), pg, "negative")
+	require.NoError(t, err)
+	store := &Store{pg: pg}
+	setHubTestSearcher(t, store, id)
+	_, err = pg.ExecContext(t.Context(), fmt.Sprintf("UPDATE %s SET chunk_index=-1", vectorChunkTable(id)))
+	require.NoError(t, err)
+	identity := vector.HubIdentity{SessionID: "A", UnitKind: "user", ContentHash: "hash"}
+	_, err = store.LookupHubVectors(t.Context(), vector.HubLookupRequest{Fingerprint: "negative", Identities: []vector.HubIdentity{identity}})
+	require.EqualError(t, err, "invalid vector chunk sequence")
+}
+
 func TestVectorHubRejectsCrossGenerationRevision(t *testing.T) {
 	sync, local, pg := newVectorPushTestSync(t, testPGURL(t), "agentsview_vector_hub_revision_test")
 	seedVectorSession(t, local, "A")
@@ -237,6 +336,235 @@ func TestVectorHubRejectsCrossGenerationRevision(t *testing.T) {
 
 }
 
+func TestVectorHubLookupCompatibilityGate(t *testing.T) {
+	sync, local, pg := newVectorPushTestSync(t, testPGURL(t), "agentsview_vector_hub_lookup_gate_test")
+	seedVectorSession(t, local, "A")
+	source := hubRecipeSource("lookup-gate", map[string]string{"max_input_chars": "8192"})
+	source.docs["A"] = []storage.VectorPushDoc{vdoc("A", "u:A:unit", 0, "content", "hash", []float32{1, 0, 0, 0})}
+	source.docs["A"][0].SourceUUID = "unit"
+	sync.vectorSource = source
+	result, err := sync.Push(t.Context(), false, nil)
+	require.NoError(t, err)
+	store := &Store{pg: pg}
+	setHubTestSearcher(t, store, result.Vectors.GenerationID)
+	hegel.Test(t, func(ht *hegel.T) {
+		_, err := pg.ExecContext(ht.Context(), "DELETE FROM vector_generation_machines")
+		require.NoError(ht, err)
+		n := hegel.Draw(ht, hegel.Integers(0, math.MaxInt32)) % 5
+		agree := hegel.Draw(ht, hegel.Booleans())
+		commonVersion := hegel.Draw(ht, hegel.Integers(1, math.MaxInt32))
+		commonScope := hegel.Draw(ht, hegel.Booleans())
+		params := []string{`{"max_input_chars":"8192"}`, "null", "[]", `{"max_input_chars":8192}`}
+		paramClass := hegel.Draw(ht, hegel.Integers(0, len(params)-1))
+		_, err = pg.ExecContext(ht.Context(), "UPDATE vector_generations SET params=$2::jsonb WHERE id=$1", result.Vectors.GenerationID, params[paramClass])
+		require.NoError(ht, err)
+		available := n > 0 && paramClass == 0
+		var firstVersion int
+		var firstScope bool
+		for i := range n {
+			version := hegel.Draw(ht, hegel.Integers(math.MinInt32, math.MaxInt32))
+			if hegel.Draw(ht, hegel.Booleans()) {
+				version = db.CurrentDataVersion()
+			}
+			scope := hegel.Draw(ht, hegel.Booleans())
+			var storedVersion *int
+			if hegel.Draw(ht, hegel.Booleans()) {
+				storedVersion = &version
+			}
+			var storedScope *bool
+			if hegel.Draw(ht, hegel.Booleans()) {
+				storedScope = &scope
+			}
+			if agree {
+				version, scope = commonVersion, commonScope
+				storedVersion, storedScope = &version, &scope
+			}
+			_, err = pg.ExecContext(ht.Context(), `INSERT INTO vector_generation_machines
+			(generation_id,machine,last_push_at,data_version,include_automated) VALUES ($1,$2,now(),$3,$4)`,
+				result.Vectors.GenerationID, strconv.Itoa(i), storedVersion, storedScope)
+			require.NoError(ht, err)
+			available = available && storedVersion != nil && version > 0 && storedScope != nil &&
+				(i == 0 || version == firstVersion && scope == firstScope)
+			if i == 0 {
+				firstVersion, firstScope = version, scope
+			}
+		}
+		identity := vector.HubIdentity{SessionID: "A", UnitKind: "user", SourceUUID: "unit", Occurrence: 1, ContentHash: "hash"}
+		absent := hegel.Draw(ht, hegel.Booleans())
+		if absent {
+			identity.ContentHash = "different"
+		}
+		req := vector.HubLookupRequest{Fingerprint: "lookup-gate", Identities: []vector.HubIdentity{identity}}
+		if hegel.Draw(ht, hegel.Booleans()) {
+			req.Cursor = makeHubLookupCursor(req, 0, 0)
+		}
+		// Lookup must enforce this policy without a preceding discovery request.
+		reply, err := store.LookupHubVectors(ht.Context(), req)
+		generation, discoveryErr := store.HubVectorGeneration(ht.Context())
+		require.NoError(ht, discoveryErr)
+		require.Equal(ht, available, generation.Unavailable == "")
+		if !available {
+			require.ErrorIs(ht, err, vector.ErrHubGenerationChanged)
+			require.Empty(ht, reply.Chunks)
+			return
+		}
+		require.NoError(ht, err)
+		if absent {
+			require.Equal(ht, []int{0}, reply.Absent)
+			require.Empty(ht, reply.Chunks)
+		} else {
+			require.Empty(ht, reply.Absent)
+			require.Len(ht, reply.Chunks, 1)
+			values, err := vector.DecodeHubVector(reply.Chunks[0].Vector, 4)
+			require.NoError(ht, err)
+			require.Equal(ht, []float32{1, 0, 0, 0}, values)
+		}
+	}, hegel.WithTestCases(1000))
+}
+
+func TestVectorHubCompatibilityWitnessTrust(t *testing.T) {
+	sync, local, pg := newVectorPushTestSync(t, testPGURL(t), "agentsview_vector_hub_witness_test")
+	seedVectorSession(t, local, "A")
+	source := hubRecipeSource("witness-trust", map[string]string{"max_input_chars": "8192"})
+	sync.vectorSource = source
+	result, err := sync.Push(t.Context(), false, nil)
+	require.NoError(t, err)
+	key, err := sync.vectorGenerationWitnessKey(t.Context())
+	require.NoError(t, err)
+	hegel.Test(t, func(ht *hegel.T) {
+		version := hegel.Draw(ht, hegel.Integers(math.MinInt32, math.MaxInt32))
+		if hegel.Draw(ht, hegel.Booleans()) {
+			version = db.CurrentDataVersion()
+		}
+		var storedVersion *int
+		if hegel.Draw(ht, hegel.Booleans()) {
+			storedVersion = &version
+		}
+		var storedScope *bool
+		if hegel.Draw(ht, hegel.Booleans()) {
+			value := hegel.Draw(ht, hegel.Booleans())
+			storedScope = &value
+		}
+		var requestedScope *bool
+		if hegel.Draw(ht, hegel.Booleans()) {
+			value := hegel.Draw(ht, hegel.Booleans())
+			requestedScope = &value
+		}
+		missing := hegel.Draw(ht, hegel.Booleans())
+		_, err := pg.ExecContext(ht.Context(), "DELETE FROM vector_generation_machines")
+		require.NoError(ht, err)
+		if !missing {
+			_, err = pg.ExecContext(ht.Context(), `INSERT INTO vector_generation_machines
+			(generation_id,machine,last_push_at,data_version,include_automated) VALUES ($1,$2,now(),$3,$4)`,
+				result.Vectors.GenerationID, key, storedVersion, storedScope)
+			require.NoError(ht, err)
+		}
+		info := source.gen
+		info.IncludeAutomated = requestedScope
+		resolved, err := sync.resolveVectorGeneration(ht.Context(), info, key)
+		require.NoError(ht, err)
+		lookedUp, found, err := sync.lookupVectorGeneration(ht.Context(), info.Fingerprint, key, requestedScope)
+		require.NoError(ht, err)
+		require.True(ht, found)
+		sameScope := storedScope == nil && requestedScope == nil || storedScope != nil && requestedScope != nil && *storedScope == *requestedScope
+		expected := !missing && storedVersion != nil && *storedVersion == db.CurrentDataVersion() && sameScope
+		require.Equal(ht, expected, resolved.machineRecorded)
+		require.Equal(ht, expected, lookedUp.machineRecorded)
+	}, hegel.WithTestCases(1000))
+}
+
+func TestVectorHubLegacyCompatibilityRewritesCoverage(t *testing.T) {
+	for _, witness := range []string{"unknown", "missing", "old version", "changed scope", "resumed full", "legacy machine"} {
+		t.Run(witness, func(t *testing.T) {
+			sync, local, pg := newVectorPushTestSync(t, testPGURL(t), "agentsview_vector_hub_upgrade_test")
+			seedVectorSession(t, local, "A")
+			first := hubRecipeSource("legacy-a", map[string]string{"max_input_chars": "8192"})
+			first.hashes["A"] = "aggregate-a"
+			first.docs["A"] = []storage.VectorPushDoc{vdoc("A", "o:A:0", 0, "old content", "old-hash", []float32{1, 0, 0, 0})}
+			sync.vectorSource = first
+			result, err := sync.Push(t.Context(), false, nil)
+			require.NoError(t, err)
+			generation := result.Vectors.GenerationID
+			table := vectorChunkTable(generation)
+			_, err = pg.ExecContext(t.Context(), "CREATE TABLE legacy_chunks AS SELECT * FROM "+table)
+			require.NoError(t, err)
+			_, err = pg.ExecContext(t.Context(), "CREATE TABLE legacy_state AS SELECT * FROM vector_push_state WHERE generation_id=$1", generation)
+			require.NoError(t, err)
+			second := hubRecipeSource("legacy-b", map[string]string{"max_input_chars": "8192"})
+			second.hashes["A"] = "aggregate-b"
+			second.docs["A"] = []storage.VectorPushDoc{vdoc("A", "o:A:0", 0, "new content", "new-hash", []float32{0, 1, 0, 0})}
+			sync.vectorSource = second
+			_, err = sync.Push(t.Context(), false, nil)
+			require.NoError(t, err)
+			// Older writers updated shared documents without retiring other generations'
+			// chunks and delta hashes. Restore that reachable pre-upgrade database state.
+			_, err = pg.ExecContext(t.Context(), "INSERT INTO "+table+" SELECT * FROM legacy_chunks")
+			require.NoError(t, err)
+			_, err = pg.ExecContext(t.Context(), "INSERT INTO vector_push_state SELECT * FROM legacy_state")
+			require.NoError(t, err)
+			switch witness {
+			case "legacy machine":
+				_, err = pg.ExecContext(t.Context(), "DELETE FROM vector_generation_machines WHERE generation_id=$1", generation)
+				require.NoError(t, err)
+				_, err = pg.ExecContext(t.Context(), `INSERT INTO vector_generation_machines
+				(generation_id,machine,last_push_at) VALUES ($1,$2,now())`, generation, sync.machine)
+			case "unknown":
+				_, err = pg.ExecContext(t.Context(), "UPDATE vector_generation_machines SET data_version=NULL,include_automated=NULL WHERE generation_id=$1", generation)
+			case "missing":
+				_, err = pg.ExecContext(t.Context(), "DELETE FROM vector_generation_machines WHERE generation_id=$1", generation)
+			case "changed scope":
+				_, err = pg.ExecContext(t.Context(), "UPDATE vector_generation_machines SET include_automated=true WHERE generation_id=$1", generation)
+			case "resumed full":
+				_, err = pg.ExecContext(t.Context(), "UPDATE vector_generation_machines SET data_version=NULL,include_automated=NULL WHERE generation_id=$1", generation)
+				sync.fullRun = &fullPushRunTracker{run: fullPushRun{VectorGeneration: generation, Vectors: map[string]string{"A": "aggregate-a"}}, lastSaved: time.Now(), interval: time.Hour}
+			case "old version":
+				_, err = pg.ExecContext(t.Context(), "UPDATE vector_generation_machines SET data_version=$2 WHERE generation_id=$1", generation, db.CurrentDataVersion()-1)
+			}
+			require.NoError(t, err)
+			sync.vectorSource = first
+			// A failed session must not be hidden by the legacy equal-hash skip.
+			deferred, err := sync.pushVectors(t.Context(), witness == "resumed full", nil, 0, map[string]struct{}{"A": {}}, nil)
+			require.NoError(t, err)
+			assert.Equal(t, 1, deferred.SessionsDeferred)
+			store := &Store{pg: pg}
+			setHubTestSearcher(t, store, generation)
+			pending, err := store.HubVectorGeneration(t.Context())
+			require.NoError(t, err)
+			assert.NotEmpty(t, pending.Unavailable)
+			if witness == "legacy machine" {
+				assert.Equal(t, 1, countRows(t, pg, "SELECT count(*) FROM vector_generation_machines WHERE generation_id=$1 AND machine=$2", generation, sync.machine), "deferred reconciliation retains the legacy witness")
+			}
+			blocked, lookupErr := store.LookupHubVectors(t.Context(), vector.HubLookupRequest{Fingerprint: "legacy-a", Identities: []vector.HubIdentity{{SessionID: "A", UnitKind: "user", ContentHash: "new-hash"}}})
+			require.ErrorIs(t, lookupErr, vector.ErrHubGenerationChanged)
+			assert.Empty(t, blocked.Chunks, "unverified legacy chunks cannot bypass discovery")
+			result.Vectors, err = sync.pushVectors(t.Context(), witness == "resumed full", nil, 0, nil, nil)
+			require.NoError(t, err)
+			assert.Equal(t, 1, result.Vectors.SessionsPushed, "first certification repairs historical coverage even when its aggregate hash matches")
+			recipe, err := store.HubVectorGeneration(t.Context())
+			require.NoError(t, err)
+			assert.Empty(t, recipe.Unavailable)
+			identity := vector.HubIdentity{SessionID: "A", UnitKind: "user", ContentHash: "new-hash"}
+			reply, err := store.LookupHubVectors(t.Context(), vector.HubLookupRequest{Fingerprint: "legacy-a", Identities: []vector.HubIdentity{identity}})
+			require.NoError(t, err)
+			assert.Empty(t, reply.Chunks, "old vectors must never be served under another generation's newer content hash")
+			assert.Equal(t, []int{0}, reply.Absent)
+			identity.ContentHash = "old-hash"
+			reply, err = store.LookupHubVectors(t.Context(), vector.HubLookupRequest{Fingerprint: "legacy-a", Identities: []vector.HubIdentity{identity}})
+			require.NoError(t, err)
+			require.Len(t, reply.Chunks, 1)
+			values, err := vector.DecodeHubVector(reply.Chunks[0].Vector, 4)
+			require.NoError(t, err)
+			assert.Equal(t, []float32{1, 0, 0, 0}, values)
+			again, err := sync.pushVectors(t.Context(), false, nil, 0, nil, nil)
+			require.NoError(t, err)
+			assert.Equal(t, 1, again.SessionsUnchanged, "verified publishers retain ordinary delta skips")
+			failed, err := sync.pushVectors(t.Context(), false, nil, 0, map[string]struct{}{"A": {}}, nil)
+			require.NoError(t, err)
+			assert.Equal(t, 1, failed.SessionsDeferred, "failed session writes cannot be hidden by verified delta skips")
+		})
+	}
+}
+
 func hubRecipeSource(fingerprint string, params map[string]string) *fakeVectorSource {
 	source := recipeSource(fingerprint, params)
 	value := false
@@ -268,6 +596,74 @@ func TestVectorHubScopedCompatibilityChangePromotesReconciliation(t *testing.T) 
 	var hash string
 	require.NoError(t, pg.QueryRow(`SELECT content_hash FROM vector_documents WHERE session_id='B'`).Scan(&hash))
 	assert.Equal(t, "b2", hash, "scope change reconciles the whole corpus")
+}
+
+func TestVectorHubLegacyWitnessRetirement(t *testing.T) {
+	sync, local, pg := newVectorPushTestSync(t, testPGURL(t), "agentsview_vector_hub_alias_test")
+	seedVectorSession(t, local, "A")
+	source := hubRecipeSource("legacy-alias", map[string]string{"max_input_chars": "8192"})
+	sync.vectorSource = source
+	_, err := sync.Push(t.Context(), false, nil)
+	require.NoError(t, err)
+	initialKey, err := sync.vectorGenerationWitnessKey(t.Context())
+	require.NoError(t, err)
+	suffix := strings.TrimPrefix(initialKey, sync.machine)
+	generation, err := sync.resolveVectorGeneration(t.Context(), source.gen, initialKey)
+	require.NoError(t, err)
+	foreignGeneration, err := ensureVectorGeneration(t.Context(), pg, "foreign-alias", "m", 4)
+	require.NoError(t, err)
+	hegel.Test(t, func(ht *hegel.T) {
+		current := fmt.Sprintf("current-%d", hegel.Draw(ht, hegel.Integers(math.MinInt32, math.MaxInt32)))
+		previous := fmt.Sprintf("previous-λ|%d", hegel.Draw(ht, hegel.Integers(math.MinInt32, math.MaxInt32)))
+		key := current + suffix
+		unrelated := previous + "-other"
+		otherScope := previous + suffix + "-other"
+		before := []string{previous, current, previous + suffix, unrelated, otherScope}
+		_, err := pg.ExecContext(ht.Context(), "DELETE FROM vector_generation_machines")
+		require.NoError(ht, err)
+		for _, name := range before {
+			_, err = pg.ExecContext(ht.Context(), `INSERT INTO vector_generation_machines
+			(generation_id,machine,last_push_at) VALUES ($1,$2,now())`, generation.id, name)
+			require.NoError(ht, err)
+		}
+		_, err = pg.ExecContext(ht.Context(), `INSERT INTO vector_generation_machines
+		(generation_id,machine,last_push_at) VALUES ($1,$2,now())`, foreignGeneration, previous)
+		require.NoError(ht, err)
+		ctx := ht.Context()
+		canceled := hegel.Draw(ht, hegel.Booleans())
+		if canceled {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithCancel(ctx)
+			cancel()
+		}
+		ok, err := sync.recordVectorGenerationMachine(ctx, source.gen.Fingerprint, generation, key, source.gen.IncludeAutomated)
+		want := []string{key, unrelated, otherScope}
+		if canceled {
+			require.Error(ht, err)
+			require.False(ht, ok)
+			want = before
+		} else {
+			require.NoError(ht, err)
+			require.True(ht, ok)
+			ok, err = sync.recordVectorGenerationMachine(ctx, source.gen.Fingerprint, generation, key, source.gen.IncludeAutomated)
+			require.NoError(ht, err)
+			require.True(ht, ok, "repeated certification is idempotent")
+		}
+		rows, err := pg.QueryContext(ht.Context(), "SELECT machine FROM vector_generation_machines WHERE generation_id=$1", generation.id)
+		require.NoError(ht, err)
+		defer rows.Close()
+		var got []string
+		for rows.Next() {
+			var name string
+			require.NoError(ht, rows.Scan(&name))
+			got = append(got, name)
+		}
+		require.NoError(ht, rows.Err())
+		require.ElementsMatch(ht, want, got)
+		var foreignCount int
+		require.NoError(ht, pg.QueryRowContext(ht.Context(), "SELECT count(*) FROM vector_generation_machines WHERE generation_id=$1 AND machine=$2", foreignGeneration, previous).Scan(&foreignCount))
+		require.Equal(ht, 1, foreignCount, "another generation's plain witness remains untouched")
+	}, hegel.WithTestCases(1000))
 }
 
 func TestVectorHubMachineRenameRetiresCompatibilityWitness(t *testing.T) {

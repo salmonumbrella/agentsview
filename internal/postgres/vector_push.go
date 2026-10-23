@@ -598,14 +598,17 @@ func (s *Sync) applyVectorDeltas(
 			res.Conflicts++
 			continue
 		}
+		if _, failed := failedSessions[sessionID]; failed {
+			res.DeferSession(sessionID)
+			continue
+		}
 		_, repair := s.fullVectorSessions[sessionID]
+		// Unverified publishers may retain legacy hashes for stale chunks.
+		// Rebuild coverage before certifying it, including resumed full pushes.
+		repair = repair || !gen.machineRecorded
 		if !repair && hasState && prev.docAggHash == agg &&
 			(!full || s.fullRun.vectorDone(gen.id, sessionID, agg)) {
 			res.SessionsUnchanged++
-			continue
-		}
-		if _, failed := failedSessions[sessionID]; failed {
-			res.DeferSession(sessionID)
 			continue
 		}
 		outcome, err := s.pushVectorSession(ctx, scope, export, sessionID, agg)
@@ -901,9 +904,9 @@ func (s *Sync) registerVectorGeneration(
 }
 
 // resolveVectorGeneration registers the generation, creates its chunk table,
-// and reads whether this machine has already completed a generation-wide push
-// against it. Its id is the generation
-// instance's identity, which a scoped push compares against the last one it
+// and reads whether this machine has completed a generation-wide push with
+// the current parser version and automated-session scope. Its id identifies the
+// generation instance, which a scoped push compares against the last one it
 // reconciled generation-wide to decide whether to promote; whether this
 // scoped witness predated this call is captured first, because that record is
 // the incarnation witness the promotion check falls back on when a recreated
@@ -929,8 +932,9 @@ func (s *Sync) resolveVectorGeneration(
 	if err := s.pg.QueryRowContext(ctx, `
 SELECT EXISTS (
     SELECT 1 FROM vector_generation_machines
-     WHERE generation_id = $1 AND machine = $2)`,
-		genID, witnessKey).Scan(&machineRecorded); err != nil {
+     WHERE generation_id = $1 AND machine = $2
+       AND data_version = $3 AND include_automated IS NOT DISTINCT FROM $4)`,
+		genID, witnessKey, db.CurrentDataVersion(), gen.IncludeAutomated).Scan(&machineRecorded); err != nil {
 		return vectorGeneration{}, fmt.Errorf("reading vector push machine record: %w", err)
 	}
 	return vectorGeneration{
@@ -994,12 +998,17 @@ ON CONFLICT (generation_id, machine) DO UPDATE SET last_push_at = EXCLUDED.last_
 		return false, nil
 	}
 	// The marker and filter scope identify this publisher across machine renames.
-	// Publish its new compatibility and retire aliases in one transaction.
+	// Publish its new compatibility and retire scoped and legacy plain-machine
+	// aliases in one transaction. Scoped aliases identify prior machine names.
 	suffix := witnessKey[strings.LastIndex(witnessKey, "|"+pushMarkerKeyPrefix):]
 	if _, err := tx.ExecContext(ctx, `
 DELETE FROM vector_generation_machines
  WHERE generation_id = $1 AND machine <> $2
-   AND right(machine, length($3)) = $3`, gen.id, witnessKey, suffix); err != nil {
+   AND (right(machine, length($3)) = $3 OR machine IN (
+       SELECT left(alias.machine, length(alias.machine) - length($3))
+         FROM vector_generation_machines alias
+        WHERE alias.generation_id = $1 AND right(alias.machine, length($3)) = $3
+   ))`, gen.id, witnessKey, suffix); err != nil {
 		return false, fmt.Errorf("retiring renamed vector push witnesses: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

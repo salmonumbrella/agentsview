@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"go.kenn.io/agentsview/internal/vector"
 )
@@ -24,7 +23,12 @@ func (s *Store) HubVectorGeneration(ctx context.Context) (vector.HubGeneration, 
 	if !ok || selected.fingerprint == "" || selected.createdAt.IsZero() {
 		return unavailable, nil
 	}
-	rows, err := s.pg.QueryContext(ctx, `SELECT g.fingerprint,g.model,g.dimension,to_jsonb(g)->>'params',
+	return readHubVectorGeneration(ctx, s.pg, selected)
+}
+
+func readHubVectorGeneration(ctx context.Context, reader pgSessionQueryer, selected *vectorSearcher) (vector.HubGeneration, error) {
+	unavailable := vector.HubGeneration{Unavailable: "selected vector generation unavailable"}
+	rows, err := reader.QueryContext(ctx, `SELECT g.fingerprint,g.model,g.dimension,to_jsonb(g)->>'params',
  (to_jsonb(m)->>'data_version')::integer,(to_jsonb(m)->>'include_automated')::boolean
  FROM vector_generations g LEFT JOIN vector_generation_machines m ON m.generation_id=g.id
  WHERE g.id=$1 AND g.fingerprint=$2 AND g.created_at=$3 AND g.dimension=$4
@@ -89,17 +93,14 @@ func (s *Store) lookupHubVectors(ctx context.Context, req vector.HubLookupReques
 		return reply, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var fingerprint string
-	var createdAt time.Time
-	var dimension int
-	err = tx.QueryRowContext(ctx, `SELECT fingerprint,created_at,dimension FROM vector_generations
- WHERE id=$1 AND to_regclass($2) IS NOT NULL`, selected.genID, selected.chunkTable).Scan(&fingerprint, &createdAt, &dimension)
-	if errors.Is(err, sql.ErrNoRows) || isUndefinedTable(err) || err == nil &&
-		(fingerprint != selected.fingerprint || !createdAt.Equal(selected.createdAt) || dimension != selected.dimension) {
-		return reply, vector.ErrHubGenerationChanged
-	}
+	// Compatibility and chunks must come from the same pinned snapshot. Direct
+	// lookups and continuation pages cannot rely on a prior discovery response.
+	generation, err := readHubVectorGeneration(ctx, tx, selected)
 	if err != nil {
 		return reply, err
+	}
+	if generation.Unavailable != "" {
+		return reply, vector.ErrHubGenerationChanged
 	}
 	// Reserve bounded framing, all absent indices and a continuation cursor.
 	size := 2048
@@ -117,6 +118,7 @@ func (s *Store) lookupHubVectors(ctx context.Context, req vector.HubLookupReques
 		}
 		defer rows.Close()
 		count := 0
+		previousIndex := -1
 		for rows.Next() {
 			var chunk vector.HubChunk
 			var literal string
@@ -125,10 +127,12 @@ func (s *Store) lookupHubVectors(ctx context.Context, req vector.HubLookupReques
 				rows.Close()
 				return reply, err
 			}
-			if chunk.ChunkIndex != count || chunkStart >= chunk.ChunkCount {
+			// Splitters omit blank windows, so stored chunk indices can have gaps.
+			if chunk.ChunkIndex <= previousIndex {
 				rows.Close()
 				return reply, errors.New("invalid vector chunk sequence")
 			}
+			previousIndex = chunk.ChunkIndex
 			count++
 			if chunk.ChunkIndex < chunkStart {
 				continue
