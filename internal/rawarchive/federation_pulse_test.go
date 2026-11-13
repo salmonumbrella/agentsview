@@ -1,6 +1,7 @@
 package rawarchive
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -14,10 +15,11 @@ import (
 
 // Both managed copy paths must preserve the original publication constraint.
 func TestManagedCopiesKeepFederationPulseHistory(t *testing.T) {
-	for _, method := range []string{"restore", "seed", "restore-old-seed", "restore-old-after-revoke"} {
+	for _, method := range []string{"restore", "seed", "restore-old-seed", "restore-old-after-revoke", "restore-without-authority"} {
 		t.Run(method, func(t *testing.T) {
 			ctx := t.Context()
-			t.Setenv("HOME", t.TempDir())
+			home := t.TempDir()
+			t.Setenv("HOME", home)
 			opts := captureFixture(t)
 			opts.Roots[0].Provider = "files"
 			dbtest.WriteTestFile(t, filepath.Join(opts.DataDir, "telemetry-install-id"), []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
@@ -41,13 +43,13 @@ func TestManagedCopiesKeepFederationPulseHistory(t *testing.T) {
 			_, err = database.CommitFederationBatch(ctx, "e-a", "s-a", "h-a", "policy", 1, 2, "batch-2", []db.FederationHubRecord{record})
 			require.NoError(t, err)
 			var oldBackupPath, oldSnapshot string
-			if method == "seed" || method == "restore-old-seed" || method == "restore-old-after-revoke" {
+			if method == "seed" || method == "restore-old-seed" || method == "restore-old-after-revoke" || method == "restore-without-authority" {
 				// Capture the source before any pulse publication. The later seed
 				// must join the authority that the original creates afterward.
 				require.NoError(t, database.Close())
 				_, err = Capture(ctx, opts)
 				require.NoError(t, err)
-				if method == "restore-old-seed" || method == "restore-old-after-revoke" {
+				if method == "restore-old-seed" || method == "restore-old-after-revoke" || method == "restore-without-authority" {
 					seed := filepath.Join(t.TempDir(), "seed")
 					_, err = Seed(ctx, filepath.Join(opts.Destination, "capture.json"), seed, nil)
 					require.NoError(t, err)
@@ -96,8 +98,12 @@ func TestManagedCopiesKeepFederationPulseHistory(t *testing.T) {
 					require.NoError(t, err)
 				}
 				require.NoError(t, database.Close())
+				if method == "restore-without-authority" {
+					require.NoError(t, os.Rename(home, filepath.Join(t.TempDir(), "held-home")))
+					require.NoError(t, os.Mkdir(home, 0o700))
+				}
 				_, err = Restore(ctx, oldBackupPath, oldSnapshot, target, nil)
-				if method == "restore-old-after-revoke" && err != nil {
+				if (method == "restore-old-after-revoke" || method == "restore-without-authority") && err != nil {
 					assert.NoDirExists(t, target)
 					return
 				}
@@ -115,6 +121,12 @@ func TestManagedCopiesKeepFederationPulseHistory(t *testing.T) {
 				assert.Nil(t, olderRevoked)
 			}
 			later, err := copied.FederationPulse(ctx, day.AddDate(0, 0, -1).Format("2006-01-02"), 3)
+			if method == "restore-without-authority" {
+				require.Error(t, err)
+				assert.Empty(t, later.Projects)
+				assert.Nil(t, later.Totals)
+				return
+			}
 			if err != nil {
 				assert.Empty(t, later.Projects)
 				assert.Nil(t, later.Totals)
