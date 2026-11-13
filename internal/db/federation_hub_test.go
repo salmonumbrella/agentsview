@@ -601,4 +601,13 @@ func TestFederationSameHashAttachesLaterOwnedParent(t *testing.T) {
 	result, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 4, "repeat", []FederationHubRecord{child})
 	require.NoError(t, err)
 	assert.False(t, result.Changed)
+	childID := "a-child"
+	parentRecord.Write.Session.ParentSessionID = &childID
+	parentRecord.Write.Session.RelationshipType = "subagent"
+	parentRecord.Hash = "parent-cycle"
+	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 5, "cycle", []FederationHubRecord{parentRecord})
+	require.NoError(t, err)
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT coalesce(parent_session_id,''),relationship_type FROM sessions WHERE id='z-parent'`).Scan(&gotParent, &relationship))
+	assert.Empty(t, gotParent)
+	assert.Empty(t, relationship)
 }
