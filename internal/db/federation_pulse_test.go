@@ -1265,6 +1265,13 @@ func TestFederationPulseRejectedDuplicateDoesNotChangeCostCompleteness(t *testin
 	for _, cell := range day.Hours[9].Joint.Cells {
 		assert.Zero(t, cell.Pricing.UnpricedRows)
 	}
+	// A larger, newer ordinary copy must not participate in the owned scope's
+	// survivor selection.
+	insertSession(t, d, "unowned", "example/repo", func(s *Session) { s.Agent = "claude"; s.StartedAt = &start; s.MessageCount = 1 })
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO messages(session_id,ordinal,role,content,timestamp,model,token_usage,claude_message_id,claude_request_id) VALUES('unowned',0,'assistant','','2026-07-28T09:03:00Z','fixture-priced','{"input_tokens":1000000}','message-a','request')`)
+		return err
+	}))
 	pulse, err := d.readFederationPulse(ctx, "2026-07-28", 3, now)
 	require.NoError(t, err)
 	assert.False(t, pulse.Suppressed)
