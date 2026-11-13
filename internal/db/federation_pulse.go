@@ -520,8 +520,11 @@ func (db *DB) readFederationPulse(ctx context.Context, since string, minimum int
 						accumulator.unsafeProjects[attributed.project] = true
 						continue
 					}
-					usageSeen[id] = true
-					rememberModel(id, key.model)
+					// Export charges the survivor to the attributed session. Keep
+					// its session/model coverage there while numeric support remains
+					// tied to the source that supplied the observation.
+					usageSeen[identity.attributed] = true
+					rememberModel(identity.attributed, key.model)
 					for _, amount := range []int64{contribution.usage.inputTokens, contribution.usage.outputTokens, contribution.usage.cacheCreationTokens, contribution.usage.cacheReadTokens} {
 						for _, group := range [][2]string{{"total", ""}, {"agent", key.agent}, {"model", key.model}} {
 							accumulator.add(id, group[0], group[1], "tokens", amount)

@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"encoding/json/jsontext"
 	"testing"
 	"time"
 
@@ -338,6 +339,102 @@ func TestFederationPulseCrossProjectScopedExportParity(t *testing.T) {
 	}
 	assert.Equal(t, map[string]int64{"example/alpha": 60, "example/beta": 150}, projectUsage)
 	assert.Equal(t, map[string]int64{"example/alpha": 6, "example/beta": 15}, projectCost)
+}
+
+func TestFederationPulseSurvivorUsesAttributedSessionForModelCoverage(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	scope := map[string]struct{}{}
+	for _, id := range []string{"a", "b", "c"} {
+		enrollment, spoke, share := "enr-"+id, "spoke-"+id, "share-"+id
+		require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: id, CredentialSHA256: "digest-" + id}))
+		_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+		require.NoError(t, err)
+		started, parent, child := "2026-07-28T09:00:00Z", "parent-"+id, "child-"+id
+		scope[parent], scope[child] = struct{}{}, struct{}{}
+		messageID := "snapshot-" + id
+		makeRecord := func(sessionID, timestamp, model, usage string) FederationHubRecord {
+			return FederationHubRecord{UID: sessionID, Hash: "hash", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{
+				Session: Session{ID: sessionID, Project: "example/repo", Agent: "claude", StartedAt: &started, MessageCount: 1}, Signals: SessionSignalUpdate{Outcome: "unknown"},
+				Messages: []Message{{SessionID: sessionID, Ordinal: 0, Role: "assistant", Timestamp: timestamp, Model: model, TokenUsage: jsontext.Value(usage), ClaudeMessageID: messageID, ClaudeRequestID: "request"}}, ReplaceMessages: true,
+			}}
+		}
+		first := makeRecord(parent, "2026-07-28T09:05:00Z", "partial-model", `{"input_tokens":10,"output_tokens":5}`)
+		winner := makeRecord(child, "2026-07-28T09:06:00Z", "complete-model", `{"input_tokens":1000,"output_tokens":631}`)
+		_, err = d.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", []FederationHubRecord{first, winner})
+		require.NoError(t, err)
+	}
+	date := time.Date(2026, 7, 28, 0, 0, 0, 0, time.UTC)
+	tx, err := d.getReader().BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	require.NoError(t, err)
+	source, err := d.loadReportingExportSourceScoped(ctx, tx, date, date.Add(24*time.Hour), export.ReportingJointSchemaVersion, scope)
+	require.NoError(t, err)
+	hours, err := reportingHoursFromSource(ctx, source.forDate(date, date.Add(24*time.Hour)), date, 24, export.ReportingJointSchemaVersion, nil, time.Hour)
+	require.NoError(t, err)
+	assert.EqualValues(t, 3000, hours[9].Usage.Totals.InputTokens)
+	assert.EqualValues(t, 1893, hours[9].Usage.Totals.OutputTokens)
+	assert.NoError(t, tx.Rollback())
+	pulse, err := d.readFederationPulse(ctx, "2026-07-28", 3, time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	require.False(t, pulse.Suppressed)
+	assert.Equal(t, Ptr(int64(6)), pulse.Totals["sessions"].Value)
+	assert.Equal(t, Ptr(int64(4893)), pulse.Totals["tokens"].Value)
+	assert.Equal(t, Ptr(int64(3)), pulse.Totals["usage_observed_sessions"].Value)
+	require.Len(t, pulse.Models, 2)
+	assert.Equal(t, "complete-model", pulse.Models[0].Key)
+	assert.Equal(t, Ptr(int64(6)), pulse.Models[0].Metrics["sessions"].Value)
+	assert.Equal(t, "partial-model", pulse.Models[1].Key)
+	assert.Equal(t, Ptr(int64(3)), pulse.Models[1].Metrics["sessions"].Value)
+}
+
+func TestFederationPulseCrossProjectSurvivorWithholdsConflictingAuthority(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	scope := map[string]struct{}{}
+	for _, member := range []string{"a", "b", "c"} {
+		for _, f := range []struct{ role, project, timestamp, model, usage string }{
+			{"parent", "private-parent", "2026-07-28T09:05:00Z", "partial-model", `{"input_tokens":10,"output_tokens":5}`},
+			{"child", "private-child", "2026-07-28T09:06:00Z", "complete-model", `{"input_tokens":1000,"output_tokens":631}`},
+			{"safe", "safe-project", "2026-07-28T09:07:00Z", "safe-model", `{"input_tokens":10}`},
+		} {
+			id := f.role + "-" + member
+			scope[id] = struct{}{}
+			enrollment, spoke, share := "enr-"+id, "spoke-"+id, "share-"+id
+			remote := "example/" + f.project
+			require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: member, CredentialSHA256: "digest-" + id}))
+			_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: remote, ProjectKey: f.project, Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+			require.NoError(t, err)
+			started := "2026-07-28T09:00:00Z"
+			message := Message{SessionID: id, Ordinal: 0, Role: "assistant", Timestamp: f.timestamp, Model: f.model, TokenUsage: jsontext.Value(f.usage)}
+			if f.role != "safe" {
+				message.ClaudeMessageID, message.ClaudeRequestID = "snapshot-"+member, "request"
+			}
+			record := FederationHubRecord{UID: id, Hash: "hash", Remote: remote, ProjectKey: f.project, Write: SessionBatchWrite{Session: Session{ID: id, Project: remote, Agent: "claude", StartedAt: &started, MessageCount: 1}, Signals: SessionSignalUpdate{Outcome: "unknown"}, Messages: []Message{message}, ReplaceMessages: true}}
+			_, err = d.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", []FederationHubRecord{record})
+			require.NoError(t, err)
+		}
+	}
+	date := time.Date(2026, 7, 28, 0, 0, 0, 0, time.UTC)
+	tx, err := d.getReader().BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	require.NoError(t, err)
+	source, err := d.loadReportingExportSourceScoped(ctx, tx, date, date.Add(24*time.Hour), export.ReportingJointSchemaVersion, scope)
+	require.NoError(t, err)
+	hours, err := reportingHoursFromSource(ctx, source.forDate(date, date.Add(24*time.Hour)), date, 24, export.ReportingJointSchemaVersion, nil, time.Hour)
+	require.NoError(t, err)
+	assert.EqualValues(t, 3030, hours[9].Usage.Totals.InputTokens)
+	assert.EqualValues(t, 1893, hours[9].Usage.Totals.OutputTokens)
+	assert.NoError(t, tx.Rollback())
+	pulse, err := d.readFederationPulse(ctx, "2026-07-28", 3, date.Add(24*time.Hour))
+	require.NoError(t, err)
+	assert.True(t, pulse.Suppressed)
+	assert.Nil(t, pulse.Totals["tokens"].Value)
+	require.Len(t, pulse.Projects, 1)
+	assert.Equal(t, "safe-project", pulse.Projects[0].Key)
+	assert.Equal(t, Ptr(int64(30)), pulse.Projects[0].Totals["tokens"].Value)
+	encoded, err := json.Marshal(pulse)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "private-parent")
+	assert.NotContains(t, string(encoded), "private-child")
 }
 
 func TestFederationPulseUnionsSessionsAcrossDaysAndClipsCutoff(t *testing.T) {
