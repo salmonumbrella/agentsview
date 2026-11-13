@@ -2345,7 +2345,7 @@ func (s *Sync) reconcilePGMissingSessions(
 				continue
 			}
 			paged = append(paged, id)
-			if !s.inScope(page.ID, page.Project) {
+			if projectFailsFilter(page.Project, s.projects, s.excludeProjects) {
 				excluded[id] = *page
 				continue
 			}

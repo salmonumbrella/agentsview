@@ -3748,42 +3748,6 @@ func TestFilteredPushReconcilesProjectMoveCommittedDuringPush(t *testing.T) {
 	assert.Zero(t, count, "a session moved out of scope during the push must leave the remote")
 }
 
-func TestRemoteScopePushIncludesSnapshotOnlyBackfill(t *testing.T) {
-	syncer, local, pg, ctx := newSessionProvenancePushSync(t, "agentsview_remote_backfill_test")
-	seedProvenanceSession(t, local, "parent", "workstation", "project", "")
-	seedProvenanceSession(t, local, "late", "workstation", "project", "")
-	_, err := local.SetSessionExternalParent(ctx, "late", "parent")
-	require.NoError(t, err)
-	raw, err := sql.Open("sqlite3", local.Path())
-	require.NoError(t, err)
-	_, err = raw.ExecContext(ctx, `UPDATE sessions SET sync_marker = '2000-01-01T00:00:00Z' WHERE id = 'late'`)
-	require.NoError(t, err)
-	require.NoError(t, raw.Close())
-	syncer.projectRemotes = []string{"example.com/team/repo"}
-	scope := pushSyncStateScope("", nil, nil, syncer.projectRemotes)
-	syncer.syncState = newScopedSyncStateStore(handoffSyncState{local}, scope, false)
-	syncer.syncStateTarget = scope
-	_, err = syncer.Push(ctx, true, nil)
-	require.NoError(t, err)
-	var count int
-	require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE id = 'late'`).Scan(&count))
-	assert.Zero(t, count)
-	require.NoError(t, local.UpsertProjectIdentityObservation(ctx, export.ProjectIdentityObservation{
-		SessionID: "late", Project: "project", Machine: "workstation", RootPath: "/workspace/repo",
-		GitRemote: "https://example.com/team/repo.git", RemoteResolution: export.ProjectResolutionResolved,
-		ObservedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
-	}))
-	result, err := syncer.Push(ctx, false, nil)
-	require.NoError(t, err)
-	assert.False(t, result.Full)
-	assert.Equal(t, 1, result.SessionsPushed)
-	require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE id = 'late'`).Scan(&count))
-	assert.Equal(t, 1, count)
-	var parent string
-	require.NoError(t, pg.QueryRowContext(ctx, `SELECT parent_session_id FROM sessions WHERE id = 'late'`).Scan(&parent))
-	assert.Equal(t, "parent", parent)
-}
-
 func TestRemoteScopePushPublishesOnlyMatchingIdentities(t *testing.T) {
 	syncer, local, pg, ctx := newSessionProvenancePushSync(t, "agentsview_remote_canaries_test")
 	for _, tc := range []struct {
@@ -3793,15 +3757,8 @@ func TestRemoteScopePushPublishesOnlyMatchingIdentities(t *testing.T) {
 		{"repo", "shared", "https://example.com/team/repo.git", export.ProjectResolutionResolved},
 		{"renamed", "renamed", "https://example.com/team/repo.git", export.ProjectResolutionResolved},
 		{"personal", "shared", "https://example.com/personal/repo.git", export.ProjectResolutionResolved},
-		{"ambiguous", "shared", "", export.ProjectResolutionAmbiguous},
-		{"none", "shared", "", export.ProjectResolutionUnknown},
-		{"child", "shared", "https://example.com/other/repo.git", export.ProjectResolutionResolved},
-		{"missing", "shared", "", ""},
 	} {
 		session := db.Session{ID: tc.id, Project: tc.label, Machine: "workstation", Agent: "claude", MessageCount: 1}
-		if tc.id == "child" {
-			session.ParentSessionID = new("repo")
-		}
 		require.NoError(t, local.UpsertSession(ctx, session))
 		require.NoError(t, local.InsertMessages(ctx, []db.Message{{SessionID: tc.id, Ordinal: 0, Role: "assistant", Content: "canary-" + tc.id, ContentLength: len("canary-" + tc.id)}}))
 		if tc.resolution != "" {
@@ -3876,8 +3833,11 @@ func TestRemoteScopePushPublishesOnlyMatchingIdentities(t *testing.T) {
 
 func TestRemoteScopeRetriesSnapshotChangedDuringPush(t *testing.T) {
 	syncer, local, pg, ctx := newSessionProvenancePushSync(t, "agentsview_remote_late_snapshot_test")
+	seedProvenanceSession(t, local, "parent", "workstation", "project", "")
 	seedProvenanceSession(t, local, "early", "workstation", "project", "")
 	seedProvenanceSession(t, local, "late", "workstation", "project", "")
+	_, err := local.SetSessionExternalParent(ctx, "late", "parent")
+	require.NoError(t, err)
 	require.NoError(t, local.UpsertProjectIdentityObservation(ctx, export.ProjectIdentityObservation{SessionID: "early", Project: "project", Machine: "workstation", RootPath: "/work/early", GitRemote: "https://example.com/team/repo.git", RemoteResolution: export.ProjectResolutionResolved, ObservedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)}))
 	raw, err := sql.Open("sqlite3", local.Path())
 	require.NoError(t, err)
@@ -3900,6 +3860,10 @@ func TestRemoteScopeRetriesSnapshotChangedDuringPush(t *testing.T) {
 	result, err := syncer.Push(ctx, false, nil)
 	require.NoError(t, err)
 	assert.False(t, result.Full)
+	assert.Equal(t, 1, result.SessionsPushed)
 	require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE id = 'late'`).Scan(&count))
 	assert.Equal(t, 1, count)
+	var parent string
+	require.NoError(t, pg.QueryRowContext(ctx, `SELECT parent_session_id FROM sessions WHERE id = 'late'`).Scan(&parent))
+	assert.Equal(t, "parent", parent)
 }

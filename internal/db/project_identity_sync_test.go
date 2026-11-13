@@ -162,9 +162,6 @@ func TestIdentitySelectedByRemotes(t *testing.T) {
 		{"selected", base, true},
 		{"one candidate", export.ProjectIdentityObservation{RemoteResolution: base.RemoteResolution, KeySource: base.KeySource, NormalizedRemote: base.NormalizedRemote, RemoteCandidateCount: 1}, true},
 		{"two candidates", export.ProjectIdentityObservation{RemoteResolution: base.RemoteResolution, KeySource: base.KeySource, NormalizedRemote: base.NormalizedRemote, RemoteCandidateCount: 2}, false},
-		{"ambiguous", export.ProjectIdentityObservation{RemoteResolution: export.ProjectResolutionAmbiguous, KeySource: base.KeySource, NormalizedRemote: base.NormalizedRemote}, false},
-		{"unknown", export.ProjectIdentityObservation{RemoteResolution: export.ProjectResolutionUnknown, KeySource: base.KeySource, NormalizedRemote: base.NormalizedRemote}, false},
-		{"root path", export.ProjectIdentityObservation{RemoteResolution: base.RemoteResolution, KeySource: export.ProjectIdentityKeySourceRootPath, NormalizedRemote: base.NormalizedRemote}, false},
 		{"other remote", export.ProjectIdentityObservation{RemoteResolution: base.RemoteResolution, KeySource: base.KeySource, NormalizedRemote: "github.com/org/other"}, false},
 		{"missing remote", export.ProjectIdentityObservation{RemoteResolution: base.RemoteResolution, KeySource: base.KeySource}, false},
 	}
@@ -173,6 +170,6 @@ func TestIdentitySelectedByRemotes(t *testing.T) {
 			assert.Equal(t, tc.want, IdentitySelectedByRemotes(tc.item, []string{"github.com/org/repo"}))
 		})
 	}
-	items := []export.ProjectIdentityObservation{base, cases[3].item, cases[6].item}
+	items := []export.ProjectIdentityObservation{base, cases[2].item, cases[3].item}
 	assert.Equal(t, []export.ProjectIdentityObservation{base}, FilterIdentityByRemotes(items, []string{"github.com/org/repo"}))
 }

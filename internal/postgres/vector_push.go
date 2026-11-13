@@ -744,7 +744,7 @@ func (s *Sync) scopeEvictionCandidatesByLocalProject(
 			absent = append(absent, id)
 			continue
 		}
-		if !s.inScope(id, project) {
+		if projectFailsFilter(project, s.projects, s.excludeProjects) {
 			out[id] = struct{}{}
 		}
 	}
@@ -774,7 +774,7 @@ func (s *Sync) localOutOfScopeVectorSessions(
 		if !ok {
 			continue
 		}
-		if !s.inScope(id, project) {
+		if projectFailsFilter(project, s.projects, s.excludeProjects) {
 			out[id] = struct{}{}
 		}
 	}

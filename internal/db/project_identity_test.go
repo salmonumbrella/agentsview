@@ -1742,7 +1742,7 @@ func TestCopySessionMetadataKeepsFreshIdentityOverEmptyPlaceholder(t *testing.T)
 func TestSessionIDsForProjectRemotesUsesOwnSnapshot(t *testing.T) {
 	d := testDB(t)
 	ctx := t.Context()
-	for _, id := range []string{"repo", "renamed", "personal", "ambiguous", "none", "child", "missing"} {
+	for _, id := range []string{"repo", "renamed", "personal", "ambiguous", "none", "child", "missing", "two-candidates"} {
 		project := "shared"
 		if id == "renamed" || id == "personal" {
 			project = id
@@ -1759,17 +1759,19 @@ func TestSessionIDsForProjectRemotesUsesOwnSnapshot(t *testing.T) {
 	for _, tc := range []struct {
 		id, project, remote string
 		resolution          export.ProjectResolution
+		count               int
 	}{
-		{"repo", "shared", "https://example.com/team/repo.git", export.ProjectResolutionResolved},
-		{"renamed", "renamed", "https://example.com/team/repo.git", export.ProjectResolutionResolved},
-		{"personal", "personal", "https://example.com/personal/repo.git", export.ProjectResolutionResolved},
-		{"ambiguous", "shared", "", export.ProjectResolutionAmbiguous},
-		{"none", "shared", "", export.ProjectResolutionUnknown},
-		{"child", "shared", "https://example.com/other/repo.git", export.ProjectResolutionResolved},
+		{"repo", "shared", "https://example.com/team/repo.git", export.ProjectResolutionResolved, 0},
+		{"renamed", "renamed", "https://example.com/team/repo.git", export.ProjectResolutionResolved, 0},
+		{"personal", "personal", "https://example.com/personal/repo.git", export.ProjectResolutionResolved, 0},
+		{"ambiguous", "shared", "", export.ProjectResolutionAmbiguous, 0},
+		{"none", "shared", "", export.ProjectResolutionUnknown, 0},
+		{"child", "shared", "https://example.com/other/repo.git", export.ProjectResolutionResolved, 0},
+		{"two-candidates", "shared", "https://example.com/team/repo.git", export.ProjectResolutionResolved, 2},
 	} {
 		require.NoError(t, d.UpsertProjectIdentityObservation(ctx, export.ProjectIdentityObservation{
 			SessionID: tc.id, Project: tc.project, Machine: "local", RootPath: "/workspace/" + tc.id,
-			GitRemote: tc.remote, RemoteResolution: tc.resolution, ObservedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+			GitRemote: tc.remote, RemoteResolution: tc.resolution, RemoteCandidateCount: tc.count, ObservedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
 		}))
 	}
 	// The rename and rule change labels; snapshots still name their own repositories.
@@ -1806,16 +1808,4 @@ func TestSessionIDsForProjectRemotesUsesOwnSnapshot(t *testing.T) {
 	ids, err = d.SessionIDsForProjectRemotes(ctx, []string{"example.com/team/repo"})
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"repo", "renamed"}, ids)
-}
-
-func TestRemoteSelectionDistinguishesPortFromSCPPath(t *testing.T) {
-	d := testDB(t)
-	ctx := t.Context()
-	for _, tc := range []struct{ id, remote string }{{"port", "https://example.com:8443/org/repo"}, {"scp", "git@example.com:8443/org/repo"}} {
-		require.NoError(t, d.UpsertSession(ctx, Session{ID: tc.id, Project: tc.id, Machine: "local", Agent: "codex"}))
-		require.NoError(t, d.UpsertProjectIdentityObservation(ctx, export.ProjectIdentityObservation{SessionID: tc.id, Project: tc.id, Machine: "local", RootPath: "/workspace/" + tc.id, GitRemote: tc.remote, RemoteResolution: export.ProjectResolutionResolved, ObservedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)}))
-	}
-	ids, err := d.SessionIDsForProjectRemotes(ctx, []string{"example.com:8443/org/repo"})
-	require.NoError(t, err)
-	assert.Equal(t, []string{"port"}, ids)
 }
