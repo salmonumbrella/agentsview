@@ -430,6 +430,38 @@ func TestFederationPulseSubagentTakesPrecedenceOverAutomation(t *testing.T) {
 	assert.Equal(t, Ptr(int64(3)), pulse.Categories[1].Metrics["sessions"].Value)
 }
 
+func TestFederationPulseCountsHandlesRatherThanEnrollments(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	for _, f := range []struct {
+		id, member string
+		tokens     int
+	}{{"a", "member-one", 10}, {"b", "member-one", 20}, {"c", "member-two", 30}} {
+		enrollment, spoke, share := "enr-"+f.id, "spoke-"+f.id, "share-"+f.id
+		require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: f.member, CredentialSHA256: "digest-" + f.id}))
+		_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "private-project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+		require.NoError(t, err)
+		started := "2026-07-28T09:00:00Z"
+		record := FederationHubRecord{UID: f.id, Hash: "hash", Remote: "example/repo", ProjectKey: "private-project", Write: SessionBatchWrite{
+			Session: Session{ID: f.id, Project: "example/repo", Agent: "codex", StartedAt: &started}, Signals: SessionSignalUpdate{Outcome: "unknown"},
+			UsageEvents: []UsageEvent{{Source: "fixture", Model: "private-model", InputTokens: f.tokens, OccurredAt: started, DedupKey: f.id}},
+		}}
+		_, err = d.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", []FederationHubRecord{record})
+		require.NoError(t, err)
+	}
+	pulse, err := d.readFederationPulse(ctx, "2026-07-28", 3, time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	assert.True(t, pulse.Suppressed)
+	assert.Empty(t, pulse.Projects)
+	assert.Nil(t, pulse.Totals["tokens"].Value)
+	assert.Equal(t, "suppressed", pulse.Totals["tokens"].State)
+	encoded, err := json.Marshal(pulse)
+	require.NoError(t, err)
+	for _, secret := range []string{"member-one", "member-two", "private-project", "private-model"} {
+		assert.NotContains(t, string(encoded), secret)
+	}
+}
+
 func TestFederationPulseIncludesDatedMessageLessSignals(t *testing.T) {
 	d := testDB(t)
 	ctx := t.Context()
