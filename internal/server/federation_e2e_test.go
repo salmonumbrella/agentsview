@@ -968,3 +968,107 @@ func TestFederationLostReplyKeepsExcludedAttempt(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, details.Delivery.Unconfirmed)
 }
+
+// Individual deletion paths must converge while the share remains active.
+func TestFederationIndividualWithdrawalKeepsOtherSession(t *testing.T) {
+	for _, operation := range []string{"exclude", "archive deletion"} {
+		t.Run(operation, func(t *testing.T) {
+			ctx := t.Context()
+			hubDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "hub.db"))
+			spokeDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "spoke.db"))
+			cfg, err := config.Default()
+			require.NoError(t, err)
+			hub := federation.NewService("hub", "hub-a", cfg.Federation.Hub, hubDB)
+			_, token, err := hub.Enroll(ctx, "spoke-a", "member", "")
+			require.NoError(t, err)
+			hubServer := httptest.NewServer(New(config.Config{Host: "127.0.0.1", Port: 8080}, hubDB, nil, WithFederation(hub)).Handler())
+			t.Cleanup(hubServer.Close)
+			file := filepath.Join(testutil.PrivateTempDir(t), "credential")
+			require.NoError(t, os.WriteFile(file, []byte(token), 0600))
+			spoke := federation.NewService("spoke", "spoke-a", cfg.Federation.Hub, spokeDB)
+			spokeServer := httptest.NewServer(New(config.Config{Host: "127.0.0.1", Port: 8080}, spokeDB, nil, WithFederation(spoke)).Handler())
+			t.Cleanup(spokeServer.Close)
+			request := func(method, endpoint string, payload any) {
+				var body io.Reader
+				if payload != nil {
+					data, e := json.Marshal(payload)
+					require.NoError(t, e)
+					body = bytes.NewReader(data)
+				}
+				req, e := http.NewRequestWithContext(ctx, method, spokeServer.URL+endpoint, body)
+				require.NoError(t, e)
+				if payload != nil {
+					req.Header.Set("Content-Type", "application/json")
+				}
+				resp, e := http.DefaultClient.Do(req)
+				require.NoError(t, e)
+				resp.Body.Close()
+				require.Equal(t, http.StatusOK, resp.StatusCode)
+			}
+			require.NoError(t, spoke.Join(ctx, hubServer.URL, "hub-a", file))
+			remote := "github.com/example/repo"
+			key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
+			require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
+				if _, e := tx.ExecContext(ctx, `INSERT INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install')`); e != nil {
+					return e
+				}
+				for _, id := range []string{"a", "b"} {
+					if _, e := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES(?,'fixture','install','claude',?,'2026-01-02T00:00:00Z',1)`, id, id); e != nil {
+						return e
+					}
+					if _, e := tx.ExecContext(ctx, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES(?,'install','claude',?)`, id, id); e != nil {
+						return e
+					}
+					if _, e := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES(?,'fixture','install','2026-01-01','resolved',1,?,'git_remote',?)`, id, remote, key); e != nil {
+						return e
+					}
+				}
+				return nil
+			}))
+			for _, id := range []string{"a", "b"} {
+				require.NoError(t, spokeDB.ReplaceSessionUsageEvents(ctx, id, []db.UsageEvent{{SessionID: id, Source: "fixture", Model: "model", InputTokens: 42, OccurredAt: "2026-01-02T00:00:00Z", DedupKey: id}}))
+			}
+			preview, err := spoke.PreviewShare(ctx, federation.ShareGrant{Project: remote, Level: "summary", Attribution: "pooled"})
+			require.NoError(t, err)
+			require.NoError(t, spoke.AddShare(ctx, preview))
+			request(http.MethodPost, "/api/v1/federation/push", nil)
+			var a, b, usage, owned int
+			require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='a'),(SELECT count(*) FROM sessions WHERE id='b'),(SELECT count(*) FROM usage_events WHERE session_id='a'),(SELECT count(*) FROM federation_records WHERE session_id='a')`).Scan(&a, &b, &usage, &owned))
+			require.Equal(t, 1, a)
+			require.Equal(t, 1, b)
+			require.Greater(t, usage, 0)
+			require.Equal(t, 1, owned)
+			if operation == "exclude" {
+				request(http.MethodPost, "/api/v1/federation/exclusions", map[string]string{"session_id": "a", "reason": "private"})
+			} else {
+				for _, endpoint := range []string{"/api/v1/sessions/a", "/api/v1/sessions/a/permanent"} {
+					req, e := http.NewRequestWithContext(ctx, http.MethodDelete, spokeServer.URL+endpoint, nil)
+					require.NoError(t, e)
+					resp, e := http.DefaultClient.Do(req)
+					require.NoError(t, e)
+					resp.Body.Close()
+					require.Equal(t, http.StatusNoContent, resp.StatusCode)
+				}
+			}
+			for i := 0; i < 2; i++ {
+				request(http.MethodPost, "/api/v1/federation/push", nil)
+				require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='a'),(SELECT count(*) FROM sessions WHERE id='b'),(SELECT count(*) FROM usage_events WHERE session_id='a'),(SELECT count(*) FROM federation_records WHERE session_id='a')`).Scan(&a, &b, &usage, &owned))
+				assert.Zero(t, a)
+				assert.Equal(t, 1, b)
+				assert.Zero(t, usage)
+				assert.Zero(t, owned)
+			}
+			var localA int
+			require.NoError(t, spokeDB.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='a'`).Scan(&localA))
+			if operation == "exclude" {
+				assert.Equal(t, 1, localA)
+			} else {
+				assert.Zero(t, localA)
+			}
+			shares, err := spoke.Shares(ctx)
+			require.NoError(t, err)
+			require.Len(t, shares.Shares, 1)
+			assert.Equal(t, "active", shares.Shares[0].State)
+		})
+	}
+}
