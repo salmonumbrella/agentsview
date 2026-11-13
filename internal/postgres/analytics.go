@@ -973,6 +973,7 @@ func (s *Store) GetAnalyticsActivity(
 
 	buckets := make(map[string]*db.ActivityEntry)
 	sessionSeen := make(map[string]string)
+	unknownBuckets := make(map[string]bool)
 	var sessionIDs []string
 
 	for rows.Next() {
@@ -1036,6 +1037,8 @@ func (s *Store) GetAnalyticsActivity(
 			entry.Messages += summaryMessages
 			entry.UserMessages += summaryUsers
 			entry.ByAgent[agent] += summaryMessages
+		} else {
+			unknownBuckets[bucket] = true
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -1057,6 +1060,11 @@ func (s *Store) GetAnalyticsActivity(
 		}
 	}
 
+	// A replica cannot identify a message-less summary with no usage events.
+	// Omit the whole bucket rather than present a partial count as complete.
+	for bucket := range unknownBuckets {
+		delete(buckets, bucket)
+	}
 	series := make([]db.ActivityEntry, 0, len(buckets))
 	for _, e := range buckets {
 		series = append(series, *e)
