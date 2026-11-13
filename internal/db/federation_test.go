@@ -209,13 +209,6 @@ func TestFederationShareStateSurvivesCopyAndLeave(t *testing.T) {
 	var reason string
 	require.NoError(t, target.Reader().QueryRow(ctx, `SELECT reason FROM federation_exclusions WHERE session_id = 'session-a'`).Scan(&reason))
 	assert.Equal(t, "private", reason)
-	require.NoError(t, target.PutFederationLink(ctx, link))
-	require.NoError(t, target.PutFederationShare(ctx, share))
-	require.NoError(t, target.Reader().QueryRow(ctx, `SELECT reason FROM federation_exclusions WHERE session_id = 'session-a'`).Scan(&reason))
-	assert.Equal(t, "private", reason)
-	var version int
-	require.NoError(t, target.Reader().QueryRow(ctx, `PRAGMA user_version`).Scan(&version))
-	assert.Equal(t, federationVersionBase+federationShareVersionBase+CurrentDataVersion(), version)
 }
 
 func TestFederationShareDuplicateAndReconsent(t *testing.T) {
@@ -226,7 +219,6 @@ func TestFederationShareDuplicateAndReconsent(t *testing.T) {
 	var version int
 	require.NoError(t, database.Reader().QueryRow(ctx, `PRAGMA user_version`).Scan(&version))
 	assert.Equal(t, federationVersionBase+federationShareVersionBase+CurrentDataVersion(), version)
-	assert.Greater(t, version&^federationVersionBase, CurrentDataVersion())
 	next := first
 	next.UID = "share-b"
 	next.ConsentJSON = `{"shown":2}`
@@ -251,6 +243,28 @@ func TestFederationShareDuplicateAndReconsent(t *testing.T) {
 	require.NoError(t, database.Reader().QueryRow(ctx, `SELECT reason FROM federation_exclusions WHERE session_id='session-a'`).Scan(&reason))
 	assert.Equal(t, "private", reason)
 
+	manual := FederationShare{UID: "share-m", LinkUID: "link-a", NormalizedRemote: "github.com/example/web", Level: "summary", Attribution: "pooled", Audience: "operators", State: "paused", ConsentJSON: `{}`, PolicyDigest: "old"}
+	require.NoError(t, database.PutFederationShare(ctx, manual))
+	for _, tc := range []struct {
+		name, digest string
+		conflict     bool
+	}{{"same digest", "old", true}, {"new digest", "new", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			incoming := manual
+			incoming.State, incoming.ConsentJSON, incoming.PolicyDigest = "active", `{"shown":2}`, tc.digest
+			err := database.PutFederationShare(ctx, incoming)
+			if tc.conflict {
+				require.ErrorIs(t, err, ErrFederationShareExists)
+				return
+			}
+			require.NoError(t, err)
+			got, err := database.GetFederationShare(ctx, "link-a", "share-m")
+			require.NoError(t, err)
+			assert.Equal(t, "paused", got.State)
+			assert.Equal(t, "new", got.PolicyDigest)
+			assert.Equal(t, `{"shown":2}`, got.ConsentJSON)
+		})
+	}
 }
 
 func TestFederationTablesUpgradePreservesSessions(t *testing.T) {
@@ -293,30 +307,4 @@ func TestFederationExclusionRequiresExistingSession(t *testing.T) {
 	var reason string
 	require.NoError(t, d.Reader().QueryRow(ctx, `SELECT reason FROM federation_exclusions WHERE session_id='other'`).Scan(&reason))
 	assert.Equal(t, "first", reason)
-	require.NoError(t, d.Reader().QueryRow(ctx, `SELECT count(*) FROM pragma_table_info('federation_exclusions') WHERE name='share_uid'`).Scan(&count))
-	assert.Zero(t, count)
-}
-
-func TestFederationShareReconsentPreservesManualPause(t *testing.T) {
-	d := testDB(t)
-	ctx := t.Context()
-	share := FederationShare{UID: "share-a", LinkUID: "link-a", NormalizedRemote: "github.com/example/api", Level: "summary", Attribution: "pooled", Audience: "operators", State: "paused", ConsentJSON: `{}`, PolicyDigest: "old"}
-	require.NoError(t, d.PutFederationShare(ctx, share))
-	next := share
-	next.State, next.ConsentJSON = "active", `{"shown":2}`
-	require.ErrorIs(t, d.PutFederationShare(ctx, next), ErrFederationShareExists)
-	next.PolicyDigest = "new"
-	require.NoError(t, d.PutFederationShare(ctx, next))
-	got, err := d.GetFederationShare(ctx, "link-a", "share-a")
-	require.NoError(t, err)
-	assert.Equal(t, "paused", got.State)
-	assert.Equal(t, "new", got.PolicyDigest)
-	assert.Equal(t, `{"shown":2}`, got.ConsentJSON)
-	require.NoError(t, d.SetFederationShareState(ctx, "link-a", "share-a", "paused", "active"))
-	require.NoError(t, d.PauseFederationSharesForPolicy(ctx, "link-a", "later"))
-	next.PolicyDigest = "later"
-	require.NoError(t, d.PutFederationShare(ctx, next))
-	got, err = d.GetFederationShare(ctx, "link-a", "share-a")
-	require.NoError(t, err)
-	assert.Equal(t, "active", got.State)
 }

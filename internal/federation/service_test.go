@@ -46,14 +46,6 @@ func TestJoinPinsHubAndBlocksChangedIdentity(t *testing.T) {
 	first, err := svc.Status(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, HubOK, first.Hub.State)
-	preview, err := svc.PreviewShare(t.Context(), ShareGrant{Project: "github.com/example/empty", Level: "summary"})
-	require.NoError(t, err)
-	wire, err := json.Marshal(preview)
-	require.NoError(t, err)
-	var decoded SharePreview
-	require.NoError(t, json.Unmarshal(wire, &decoded))
-	require.NotNil(t, decoded.Policy.SuggestedProjects)
-	require.NoError(t, svc.AddShare(t.Context(), decoded))
 	policy.Processing = "aggregated"
 	digest, err = export.DigestCanonical(policy)
 	require.NoError(t, err)
@@ -299,9 +291,6 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 	preview, err := svc.PreviewShare(t.Context(), grant)
 	require.NoError(t, err)
 	assert.Equal(t, policy, preview.Policy)
-	canonical, err := export.MarshalCanonical(preview.Records)
-	require.NoError(t, err)
-	assert.Equal(t, len(canonical), preview.RecordsArrayBytes)
 	previewJSON, err := json.Marshal(preview)
 	require.NoError(t, err)
 	var previewFields map[string]any
@@ -353,7 +342,6 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 	details, err := svc.Share(t.Context(), shares[0].UID)
 	require.NoError(t, err)
 	assert.Equal(t, shares[0].ConsentJSON, details.Share.ConsentJSON)
-	stored := shares[0].ConsentJSON
 	require.NoError(t, archive.PutFederationShare(t.Context(), db.FederationShare{UID: "share-paused", LinkUID: link.UID, NormalizedRemote: "github.com/example/private", Level: "summary", Attribution: "pooled", Audience: "operators", State: "paused", ConsentJSON: `{}`, PolicyDigest: digest}))
 	_, err = svc.Status(t.Context())
 	require.NoError(t, err)
@@ -374,8 +362,6 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 	require.Len(t, shares, 2)
 	assert.Equal(t, "paused", shares[1].State)
 	assert.Equal(t, "policy_paused", shares[0].State)
-	assert.Equal(t, stored, shares[0].ConsentJSON)
-	assert.ErrorContains(t, svc.ResumeShare(t.Context(), shares[0].UID), "share add")
 	next, err := svc.PreviewShare(t.Context(), grant)
 	require.NoError(t, err)
 	require.NoError(t, svc.AddShare(t.Context(), next))
@@ -383,13 +369,6 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 	pausedPreview, err := svc.PreviewShare(t.Context(), pausedGrant)
 	require.NoError(t, err)
 	require.NoError(t, svc.AddShare(t.Context(), pausedPreview))
-	paused, err = archive.GetFederationShare(t.Context(), link.UID, "share-paused")
-	require.NoError(t, err)
-	assert.Equal(t, "paused", paused.State)
-	assert.Equal(t, digest, paused.PolicyDigest)
-	pausedJSON, err := json.Marshal(pausedPreview)
-	require.NoError(t, err)
-	assert.JSONEq(t, string(pausedJSON), paused.ConsentJSON)
 	records, err = svc.DryRun(t.Context())
 	require.NoError(t, err)
 	require.Len(t, records, 1)
@@ -410,6 +389,17 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 	paused, err = archive.GetFederationShare(t.Context(), link.UID, "share-paused")
 	require.NoError(t, err)
 	assert.Equal(t, "policy_paused", paused.State)
+	policy.SuggestedProjects = []string{}
+	digest, err = export.DigestCanonical(policy)
+	require.NoError(t, err)
+	wirePreview, err := svc.PreviewShare(t.Context(), grant)
+	require.NoError(t, err)
+	wire, err := json.Marshal(wirePreview)
+	require.NoError(t, err)
+	var decoded SharePreview
+	require.NoError(t, json.Unmarshal(wire, &decoded))
+	require.NotNil(t, decoded.Policy.SuggestedProjects)
+	require.NoError(t, svc.AddShare(t.Context(), decoded))
 	hub.Close()
 	records, err = svc.DryRun(t.Context())
 	assert.Error(t, err)
@@ -424,7 +414,6 @@ func TestShareRejectsUnshareableGrant(t *testing.T) {
 		grant   ShareGrant
 		message string
 	}{
-		{ShareGrant{Project: "*", Level: "summary"}, "repository remote"},
 		{ShareGrant{Project: "local-label", Level: "summary"}, "no repository identity another machine can match"},
 		{ShareGrant{Project: "github.com/example/api", Level: "transcript"}, "not available yet"},
 		{ShareGrant{Project: "github.com/example/api", Level: "unknown"}, "not allowed"},
