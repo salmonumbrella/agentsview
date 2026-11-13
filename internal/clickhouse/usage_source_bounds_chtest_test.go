@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/storage"
 )
 
 // Filtering before the session join must retain fallback timestamps and the
@@ -48,4 +49,26 @@ func TestDailyUsageSourceBounds(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, 8, got.Totals.OutputTokens)
+}
+
+func TestFederationAggregateUsageIsNotClamped(t *testing.T) {
+	ctx := t.Context()
+	local, target := seedFixture(t)
+	stamp := "2026-03-08T12:00:00Z"
+	input := db.MaxPlausibleTokens + 250_000
+	_, err := local.WriteSessionBatchAtomic(ctx, []db.SessionBatchWrite{{
+		Session:     db.Session{ID: "federation-aggregate", Project: "federation", Machine: "federated", Agent: "claude", StartedAt: &stamp, MessageCount: 2, UserMessageCount: 1},
+		UsageEvents: []db.UsageEvent{{Source: "federation", Model: "model", InputTokens: input, OccurredAt: stamp, DedupKey: "model"}},
+		DataVersion: 1,
+	}})
+	require.NoError(t, err)
+	syncer := newTestSync(t, local, target, storage.PusherOptions{})
+	_, err = syncer.Push(ctx, false, nil)
+	require.NoError(t, err)
+	store, err := NewStore(ctx, target)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	result, err := store.GetDailyUsage(ctx, db.UsageFilter{From: "2026-03-08", To: "2026-03-08", Timezone: "UTC", Project: "federation"})
+	require.NoError(t, err)
+	require.Equal(t, input, result.Totals.InputTokens)
 }

@@ -1969,3 +1969,16 @@ func TestStoreGetSessionUsage_CodebuffCostOnlyReported(t *testing.T) {
 	assert.Equal(t, []string{"base2-deepseek"}, u.Models,
 		"the parser-attributed template name must surface in Models")
 }
+
+func TestPostgresFederationAggregateUsageIsNotClamped(t *testing.T) {
+	_, store := prepareUsageSchema(t, "agentsview_federation_aggregate_test")
+	ctx := t.Context()
+	input := db.MaxPlausibleTokens + 250_000
+	_, err := store.DB().ExecContext(ctx, `INSERT INTO sessions(id,machine,project,agent,started_at,message_count,user_message_count) VALUES('federation','federated','project','claude','2026-05-14T10:00:00Z'::timestamptz,2,1)`)
+	require.NoError(t, err)
+	_, err = store.DB().ExecContext(ctx, `INSERT INTO usage_events(session_id,source,model,input_tokens,occurred_at,dedup_key) VALUES('federation','federation','model',$1,'2026-05-14T10:00:00Z'::timestamptz,'model')`, input)
+	require.NoError(t, err)
+	result, err := store.GetDailyUsage(ctx, db.UsageFilter{From: "2026-05-14", To: "2026-05-14", Timezone: "UTC"})
+	require.NoError(t, err)
+	assert.Equal(t, input, result.Totals.InputTokens)
+}

@@ -1318,17 +1318,17 @@ func clickUsageNormalizedColumns() string {
 			usage_dedup_key,
 			CASE
 				WHEN source = 'message' THEN %[1]s
-				WHEN source = 'session' THEN greatest(input_tokens, 0)
+				WHEN source IN ('session', 'federation') THEN greatest(input_tokens, 0)
 				ELSE %[6]s
 			END AS input_tokens_norm,
 			CASE
 				WHEN source = 'message' THEN %[2]s
-				WHEN source = 'session' THEN greatest(output_tokens, 0)
+				WHEN source IN ('session', 'federation') THEN greatest(output_tokens, 0)
 				ELSE %[7]s
 			END AS output_tokens_norm,
 			CASE
 				WHEN source = 'message' THEN %[3]s
-				WHEN source = 'session' THEN greatest(cache_create, 0)
+				WHEN source IN ('session', 'federation') THEN greatest(cache_create, 0)
 				ELSE %[8]s
 			END AS cache_create_norm,
 			CASE
@@ -1337,12 +1337,12 @@ func clickUsageNormalizedColumns() string {
 			END AS cache_create_1h_norm,
 			CASE
 				WHEN source = 'message' THEN %[5]s
-				WHEN source = 'session' THEN greatest(cache_read, 0)
+				WHEN source IN ('session', 'federation') THEN greatest(cache_read, 0)
 				ELSE %[9]s
 			END AS cache_read_norm,
 			CASE
 				WHEN source = 'message' THEN %[10]s
-				WHEN source = 'session' THEN greatest(reasoning_tokens, 0)
+				WHEN source IN ('session', 'federation') THEN greatest(reasoning_tokens, 0)
 				ELSE %[11]s
 			END AS reasoning_tokens_norm,
 			CASE

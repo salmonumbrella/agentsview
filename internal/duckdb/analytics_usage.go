@@ -805,17 +805,17 @@ func duckUsageCTEFromRaw(
 			SELECT *,
 				CASE
 					WHEN source = 'message' THEN LEAST(GREATEST(COALESCE(TRY_CAST(json_extract_string(token_json, '$.input_tokens') AS BIGINT), 0), 0), %[3]d)
-					WHEN (source = 'session' OR session_id = '') THEN GREATEST(input_tokens, 0)
+					WHEN (source IN ('session', 'federation') OR session_id = '') THEN GREATEST(input_tokens, 0)
 					ELSE LEAST(GREATEST(input_tokens, 0), %[3]d)
 				END AS input_tokens_norm,
 				CASE
 					WHEN source = 'message' THEN LEAST(GREATEST(COALESCE(TRY_CAST(json_extract_string(token_json, '$.output_tokens') AS BIGINT), 0), 0), %[3]d)
-					WHEN (source = 'session' OR session_id = '') THEN GREATEST(output_tokens, 0)
+					WHEN (source IN ('session', 'federation') OR session_id = '') THEN GREATEST(output_tokens, 0)
 					ELSE LEAST(GREATEST(output_tokens, 0), %[3]d)
 				END AS output_tokens_norm,
 				CASE
 					WHEN source = 'message' THEN LEAST(GREATEST(COALESCE(TRY_CAST(json_extract_string(token_json, '$.cache_creation_input_tokens') AS BIGINT), 0), 0), %[3]d)
-					WHEN (source = 'session' OR session_id = '') THEN GREATEST(cache_create, 0)
+					WHEN (source IN ('session', 'federation') OR session_id = '') THEN GREATEST(cache_create, 0)
 					ELSE LEAST(GREATEST(cache_create, 0), %[3]d)
 				END AS cache_create_norm,
 					-- 1h-TTL subset of cache_create_norm from the nested
@@ -826,12 +826,12 @@ func duckUsageCTEFromRaw(
 					END AS cache_create_1h_norm,
 					CASE
 						WHEN source = 'message' THEN LEAST(GREATEST(COALESCE(TRY_CAST(json_extract_string(token_json, '$.cache_read_input_tokens') AS BIGINT), 0), 0), %[3]d)
-						WHEN (source = 'session' OR session_id = '') THEN GREATEST(cache_read, 0)
+						WHEN (source IN ('session', 'federation') OR session_id = '') THEN GREATEST(cache_read, 0)
 						ELSE LEAST(GREATEST(cache_read, 0), %[3]d)
 					END AS cache_read_norm,
 					CASE
 						WHEN source = 'message' THEN LEAST(GREATEST(COALESCE(TRY_CAST(json_extract_string(token_json, '$.reasoning_tokens') AS BIGINT), 0), 0), %[3]d)
-						WHEN (source = 'session' OR session_id = '') THEN GREATEST(reasoning_tokens, 0)
+						WHEN (source IN ('session', 'federation') OR session_id = '') THEN GREATEST(reasoning_tokens, 0)
 						ELSE LEAST(GREATEST(reasoning_tokens, 0), %[3]d)
 					END AS reasoning_tokens_norm,
 					-- Anthropic bills server-side web search per request on

@@ -2056,6 +2056,8 @@ const linkSubagentSessionsQuery = `
 		WHERE tc.subagent_session_id IS NOT NULL
 		AND tc.session_id IS NOT tc.subagent_session_id
 	)
+	-- Federated hierarchy is owned by the sending share, not local tool edges.
+	AND NOT EXISTS (SELECT 1 FROM federation_records fr WHERE fr.session_id = s.id)
 	AND (
 		relationship_type != 'subagent'
 		OR parent_session_id IS NOT (` + subagentSpawnerExpr + `
@@ -2221,6 +2223,8 @@ func linkSubagentSessionsForSessionsQuery(ph string) string {
 		WHERE tc.subagent_session_id IN ` + ph + `
 		AND tc.session_id IS NOT tc.subagent_session_id
 	)
+	-- Federated hierarchy is owned by the sending share, not local tool edges.
+	AND NOT EXISTS (SELECT 1 FROM federation_records fr WHERE fr.session_id = s.id)
 	AND (
 		relationship_type != 'subagent'
 		OR parent_session_id IS NOT (` + subagentSpawnerExpr + `
@@ -2247,6 +2251,7 @@ func clearDanglingSubagentParentQuery(ph string) string {
 	local_modified_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
 	WHERE s.id IN ` + ph + `
 	AND s.relationship_type = 'subagent'
+	AND NOT EXISTS (SELECT 1 FROM federation_records fr WHERE fr.session_id = s.id)
 	AND s.parent_session_id IS NOT NULL
 	AND NOT EXISTS (
 		SELECT 1 FROM tool_calls tc WHERE tc.subagent_session_id = s.id

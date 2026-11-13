@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -36,12 +37,29 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	server := New(config.Config{Host: "127.0.0.1", Port: 8080}, hubDB, nil, WithFederation(hub))
 	var captured bytes.Buffer
 	dropFirst := true
+	conflictNext, rejectNext := false, false
+	batches := 0
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
 			data, e := io.ReadAll(r.Body)
 			require.NoError(t, e)
 			captured.Write(data)
 			r.Body = io.NopCloser(bytes.NewReader(data))
+		}
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/batches") {
+			batches++
+		}
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/batches") && conflictNext {
+			conflictNext = false
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"committed":2,"refused":{}}`))
+			return
+		}
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/batches") && rejectNext {
+			rejectNext = false
+			http.Error(w, "invalid federation batch", http.StatusBadRequest)
+			return
 		}
 		if dropFirst && r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/batches") {
 			dropFirst = false
@@ -65,9 +83,12 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
 		for _, q := range []string{
 			`INSERT INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install-a')`,
-			`INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count,user_message_count,cwd,first_message) VALUES('session-a','fixture','install-a','claude','fixture','2026-01-02T00:00:00Z',2,1,'CANARY-path','CANARY-first')`,
-			`INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES('session-a','install-a','claude','fixture')`,
+			`INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count,user_message_count,cwd,git_branch,first_message,display_name,session_name,pr_links) VALUES('session-a','fixture','install-a','claude','CANARY-file','2026-01-02T00:00:00Z',2,1,'CANARY-path','CANARY-branch','CANARY-first','CANARY-title','CANARY-name','[{"url":"CANARY-pr"}]')`,
+			`INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES('session-a','install-a','claude','CANARY-file')`,
+			`INSERT INTO session_project_assignments(session_id,project,original_project) VALUES('session-a','CANARY-renamed-label','CANARY-personal-folder')`,
+			`UPDATE sessions SET project='CANARY-personal-folder' WHERE id='session-a'`,
 			`INSERT INTO messages(session_id,ordinal,role,content) VALUES('session-a',0,'user','CANARY-message')`,
+			`INSERT INTO tool_calls(message_id,session_id,tool_name,category,input_json,result_content) SELECT id,session_id,'CANARY-tool','CANARY-category','CANARY-input','CANARY-result' FROM messages WHERE session_id='session-a'`,
 			`INSERT INTO usage_events(session_id,source,model,input_tokens,output_tokens,cost_microdollars,cost_status,cost_source,occurred_at,dedup_key) VALUES('session-a','fixture','model-a',100,20,50,'exact','reported','2026-01-02T00:00:00Z','a')`,
 		} {
 			if _, e := tx.ExecContext(ctx, q); e != nil {
@@ -77,6 +98,10 @@ func TestFederationSummaryDelivery(t *testing.T) {
 		if _, e := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES('session-a','fixture','install-a','2026-01-01T00:00:00Z','resolved',1,?,'git_remote',?)`, remote, key); e != nil {
 			return e
 		}
+		if _, e := tx.ExecContext(ctx, `UPDATE session_project_identity_snapshots SET root_path='CANARY-root', repository_path='CANARY-repository', worktree_name='CANARY-worktree', worktree_root_path='CANARY-worktree-root', git_branch='CANARY-identity-branch' WHERE session_id='session-a'`); e != nil {
+			return e
+		}
+
 		for _, id := range []string{"unshared", "ambiguous", "repo-less", "imported", "child", "before"} {
 			start, machine, candidate, source, candidateRemote := "2026-01-02T00:00:00Z", "install-a", 1, "git_remote", remote
 			if id == "before" {
@@ -103,6 +128,13 @@ func TestFederationSummaryDelivery(t *testing.T) {
 			if _, e := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES(?,'fixture',?,'2026-01-01T00:00:00Z','resolved',?,?,?,?)`, id, machine, candidate, candidateRemote, source, key); e != nil {
 				return e
 			}
+			if _, e := tx.ExecContext(ctx, `INSERT INTO messages(session_id,ordinal,role,content,thinking_text) VALUES(?,0,'assistant','CANARY-message','CANARY-thinking')`, id); e != nil {
+				return e
+			}
+			if _, e := tx.ExecContext(ctx, `INSERT INTO tool_calls(message_id,session_id,tool_name,category,input_json,result_content) SELECT id,session_id,'CANARY-tool','CANARY-category','CANARY-input','CANARY-result' FROM messages WHERE session_id=?`, id); e != nil {
+				return e
+			}
+
 		}
 		return nil
 	}))
@@ -113,6 +145,9 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	dry, err := spoke.DryRun(ctx)
 	require.NoError(t, err)
 	require.Len(t, dry, 1)
+	dryJSON, err := json.Marshal(dry)
+	require.NoError(t, err)
+	assert.NotContains(t, string(dryJSON), "CANARY")
 	_, err = spoke.Push(ctx)
 	require.Error(t, err)
 	shares, err := spokeDB.ListFederationShares(ctx, func() string { link, e := spokeDB.GetFederationLink(ctx); require.NoError(t, e); return link.UID }())
@@ -144,7 +179,7 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "session-a")
 	for _, id := range []string{"unshared", "ambiguous", "repo-less", "imported", "child", "before"} {
-		assert.NotContains(t, rec.Body.String(), id)
+		assert.NotContains(t, rec.Body.String(), `"id":"`+id+`"`)
 	}
 	assert.NotContains(t, rec.Body.String(), "CANARY")
 	for _, endpoint := range []string{"/api/v1/usage/summary", "/api/v1/analytics/tools"} {
@@ -158,12 +193,22 @@ func TestFederationSummaryDelivery(t *testing.T) {
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &result))
 			assert.Equal(t, 100, result.Totals.InputTokens)
 			assert.Equal(t, 20, result.Totals.OutputTokens)
+			assert.EqualValues(t, 50, result.Totals.TotalCost.Microdollars)
 		} else {
 			var result db.ToolsAnalyticsResponse
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &result))
 			assert.Zero(t, result.TotalCalls)
 		}
 	}
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/analytics/summary?from=2026-01-02&to=2026-01-02&timezone=UTC&include_one_shot=true", nil)
+	rec = httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var summary db.AnalyticsSummary
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &summary))
+	assert.Equal(t, 1, summary.TotalSessions)
+	assert.Equal(t, 3, summary.TotalMessages)
+	assert.NotContains(t, rec.Body.String(), "CANARY")
 	again, err := spoke.Push(ctx)
 	require.NoError(t, err)
 	assert.Zero(t, again.Sent)
@@ -172,12 +217,187 @@ func TestFederationSummaryDelivery(t *testing.T) {
 		_, e := tx.ExecContext(ctx, `UPDATE sessions SET message_count=4 WHERE id='session-a'`)
 		return e
 	}))
+	conflictNext = true
+	conflict, err := spoke.Push(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, conflict.Sent)
+	rejectNext = true
+	rejected, err := spoke.Push(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, rejected.Quarantined)
+	quarantines, err := spokeDB.FederationQuarantines(ctx)
+	require.NoError(t, err)
+	require.Len(t, quarantines, 1)
+	assert.Equal(t, "hub rejected batch", quarantines[0].Error)
 	changed, err := spoke.Push(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 1, changed.Sent)
+	quarantines, err = spokeDB.FederationQuarantines(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, quarantines)
 	var count, storedMessages int
 	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*),max(message_count) FROM sessions WHERE id='session-a'`).Scan(&count, &storedMessages))
 	assert.Equal(t, 1, count)
 	assert.Equal(t, 4, storedMessages)
 	assert.False(t, strings.Contains(captured.String(), "CANARY"))
+
+	// A local hub row with the incoming ID is never overwritten and the
+	// acknowledged refusal is retained rather than retried on the next pass.
+	require.NoError(t, hubDB.Update(ctx, func(tx *sql.Tx) error {
+		_, e := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,message_count) VALUES('collision','hub-local','hub-host','claude',9)`)
+		return e
+	}))
+	require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
+		for _, q := range []string{
+			`INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES('collision','fixture','install-a','claude','collision','2026-01-02T00:00:00Z',4)`,
+			`INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES('collision','install-a','claude','collision')`,
+		} {
+			if _, e := tx.ExecContext(ctx, q); e != nil {
+				return e
+			}
+		}
+		_, e := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES('collision','fixture','install-a','2026-01-01T00:00:00Z','resolved',1,?,'git_remote',?)`, remote, key)
+		return e
+	}))
+	refused, err := spoke.Push(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, refused.Refused)
+	assert.Equal(t, 1, refused.Quarantined)
+	var existingProject, existingMachine string
+	var existingCount int
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT project,machine,message_count FROM sessions WHERE id='collision'`).Scan(&existingProject, &existingMachine, &existingCount))
+	assert.Equal(t, "hub-local", existingProject)
+	assert.Equal(t, "hub-host", existingMachine)
+	assert.Equal(t, 9, existingCount)
+	ledger, err = spokeDB.FederationLedger(ctx, shares[0].UID)
+	require.NoError(t, err)
+	assert.Equal(t, "refused", ledger["collision"].State)
+	quarantines, err = spokeDB.FederationQuarantines(ctx)
+	require.NoError(t, err)
+	require.Len(t, quarantines, 1)
+	assert.Equal(t, db.FederationCollision, quarantines[0].Error)
+	previousBatches := batches
+	retry, err := spoke.Push(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, retry.Refused)
+	assert.Equal(t, previousBatches, batches)
+	require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
+		_, e := tx.ExecContext(ctx, `UPDATE sessions SET message_count=5 WHERE id='session-a'`)
+		return e
+	}))
+	delivered, err := spoke.Push(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, delivered.Sent)
+	quarantines, err = spokeDB.FederationQuarantines(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, quarantines)
+	assertArchiveHasNoCanary(t, hubDB)
+}
+
+// Scan every text value, including metadata and auxiliary tables,
+// so a new persistence path cannot silently retain a fixture secret.
+func assertArchiveHasNoCanary(t *testing.T, archive *db.DB) {
+	t.Helper()
+	ctx := t.Context()
+	rows, err := archive.Reader().Query(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+	require.NoError(t, err)
+	var tables []string
+	for rows.Next() {
+		var name string
+		require.NoError(t, rows.Scan(&name))
+		tables = append(tables, name)
+	}
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+	quote := func(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
+	for _, table := range tables {
+		columns, err := archive.Reader().Query(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+		require.NoError(t, err)
+		var names []string
+		for columns.Next() {
+			var name string
+			require.NoError(t, columns.Scan(&name))
+			names = append(names, name)
+		}
+		require.NoError(t, columns.Err())
+		require.NoError(t, columns.Close())
+		for _, column := range names {
+			var count int
+			query := fmt.Sprintf(`SELECT count(*) FROM %s WHERE typeof(%s) = 'text' AND instr(%s, ?) > 0`, quote(table), quote(column), quote(column))
+			require.NoError(t, archive.Reader().QueryRow(ctx, query, "CANARY").Scan(&count), "%s.%s", table, column)
+			assert.Zero(t, count, "%s.%s", table, column)
+		}
+	}
+}
+
+// The first response lets a member exclude a session before the next chunk.
+func TestFederationExclusionBetweenBatches(t *testing.T) {
+	ctx := t.Context()
+	hubDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "hub.db"))
+	spokeDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "spoke.db"))
+	cfg, err := config.Default()
+	require.NoError(t, err)
+	hub := federation.NewService("hub", "hub-a", cfg.Federation.Hub, hubDB)
+	_, token, err := hub.Enroll(ctx, "spoke-a", "member", "")
+	require.NoError(t, err)
+	srv := New(config.Config{Host: "127.0.0.1", Port: 8080}, hubDB, nil, WithFederation(hub))
+	spoke := federation.NewService("spoke", "spoke-a", cfg.Federation.Hub, spokeDB)
+	var batches int
+	var exclusionErr error
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/batches") {
+			batches++
+			buffered := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(buffered, r)
+			if batches == 1 && buffered.Code == http.StatusOK {
+				exclusionErr = spoke.Exclude(r.Context(), "s1000", "member excluded")
+			}
+			for key, values := range buffered.Header() {
+				for _, value := range values {
+					w.Header().Add(key, value)
+				}
+			}
+			w.WriteHeader(buffered.Code)
+			_, _ = w.Write(buffered.Body.Bytes())
+			return
+		}
+		srv.Handler().ServeHTTP(w, r)
+	}))
+	t.Cleanup(peer.Close)
+	file := filepath.Join(testutil.PrivateTempDir(t), "credential")
+	require.NoError(t, os.WriteFile(file, []byte(token), 0600))
+	require.NoError(t, spoke.Join(ctx, peer.URL, "hub-a", file))
+	remote := "github.com/example/api"
+	key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
+	require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
+		if _, e := tx.ExecContext(ctx, `INSERT INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install-a')`); e != nil {
+			return e
+		}
+		for i := 0; i < 1001; i++ {
+			id := fmt.Sprintf("s%04d", i)
+			if _, e := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES(?,'fixture','install-a','claude',?,'2026-01-02T00:00:00Z',1)`, id, id); e != nil {
+				return e
+			}
+			if _, e := tx.ExecContext(ctx, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES(?,'install-a','claude',?)`, id, id); e != nil {
+				return e
+			}
+			if _, e := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES(?,'fixture','install-a','2026-01-01T00:00:00Z','resolved',1,?,'git_remote',?)`, id, remote, key); e != nil {
+				return e
+			}
+		}
+		return nil
+	}))
+	preview, err := spoke.PreviewShare(ctx, federation.ShareGrant{Project: remote, Level: "summary", Attribution: "pooled"})
+	require.NoError(t, err)
+	require.Len(t, preview.Records, 1001)
+	require.NoError(t, spoke.AddShare(ctx, preview))
+	result, err := spoke.Push(ctx)
+	require.NoError(t, err)
+	require.NoError(t, exclusionErr)
+	assert.Equal(t, 1000, result.Sent)
+	assert.Equal(t, 1, batches)
+	var count, excluded int
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*),coalesce(sum(id='s1000'),0) FROM sessions`).Scan(&count, &excluded))
+	assert.Equal(t, 1000, count)
+	assert.Zero(t, excluded)
 }

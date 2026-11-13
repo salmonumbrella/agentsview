@@ -315,7 +315,8 @@ func clampUsageEventTokens(source string, p *int) bool {
 	if p == nil {
 		return false
 	}
-	if source == "session" {
+	// Federation events are per-model session aggregates, not per-message counts.
+	if source == "session" || source == "federation" {
 		if *p < 0 {
 			*p = 0
 			return true

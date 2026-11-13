@@ -862,7 +862,7 @@ func pgSnapshotRankedDailyUsageRowsSQL(
 						CAST(agentsview_json_integer(
 							u.token_usage, ARRAY['output_tokens'], 'output_tokens') AS NUMERIC),
 						0), 0), %[1]d)
-					WHEN u.usage_source = 'session'
+					WHEN u.usage_source IN ('session', 'federation')
 						THEN GREATEST(u.output_tokens, 0)
 					ELSE LEAST(GREATEST(u.output_tokens, 0), %[1]d)
 				END

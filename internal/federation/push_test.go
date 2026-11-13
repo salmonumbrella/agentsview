@@ -1,6 +1,7 @@
 package federation
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -45,6 +46,25 @@ func TestPushOldConsentDoesNotDeliver(t *testing.T) {
 	ledger, err := archive.FederationLedger(t.Context(), "share")
 	require.NoError(t, err)
 	assert.Empty(t, ledger)
+	// A newly changed policy pauses even a share carrying current delivery
+	// consent before any manifest or batch is sent.
+	currentConsent, err := json.Marshal(SharePreview{DeliveryNotice: shareDeliveryNotice})
+	require.NoError(t, err)
+	require.NoError(t, archive.Update(t.Context(), func(tx *sql.Tx) error {
+		_, e := tx.ExecContext(t.Context(), `UPDATE federation_shares SET consent_json=? WHERE share_uid='share'`, string(currentConsent))
+		return e
+	}))
+	policy.Retention = "new-retention"
+	digest, err = export.DigestCanonical(policy)
+	require.NoError(t, err)
+	before = calls
+	result, err = svc.Push(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, PushResult{}, result)
+	assert.Equal(t, before+1, calls)
+	paused, err := archive.GetFederationShare(t.Context(), link.UID, "share")
+	require.NoError(t, err)
+	assert.Equal(t, "policy_paused", paused.State)
 }
 
 func TestPushWithNoActiveShareAvoidsHub(t *testing.T) {

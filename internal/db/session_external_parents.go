@@ -287,6 +287,7 @@ func applySessionExternalParentsSQL(linksSQL string) string {
 		LIMIT -1
 	) AS l
 	WHERE sessions.id = +l.session_id
+	AND NOT EXISTS (SELECT 1 FROM federation_records fr WHERE fr.session_id = sessions.id)
 	AND COALESCE(sessions.parser_parent_session_id, '') = ''
 	AND NOT ` + spawnEdgeExistsSQL("sessions") + `
 	AND (

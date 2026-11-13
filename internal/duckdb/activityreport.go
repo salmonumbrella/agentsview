@@ -916,17 +916,17 @@ func duckActivityUsageWith(candidateWhere string) string {
 				claude_message_id, claude_request_id, source_uuid, usage_dedup_key,
 				CASE
 					WHEN source = 'message' THEN LEAST(GREATEST(COALESCE(TRY_CAST(json_extract_string(token_json, '$.input_tokens') AS BIGINT), 0), 0), %[1]d)
-					WHEN source = 'session' THEN GREATEST(input_tokens, 0)
+					WHEN source IN ('session', 'federation') THEN GREATEST(input_tokens, 0)
 					ELSE LEAST(GREATEST(input_tokens, 0), %[1]d)
 				END AS input_tokens_norm,
 				CASE
 					WHEN source = 'message' THEN LEAST(GREATEST(COALESCE(TRY_CAST(json_extract_string(token_json, '$.output_tokens') AS BIGINT), 0), 0), %[1]d)
-					WHEN source = 'session' THEN GREATEST(output_tokens, 0)
+					WHEN source IN ('session', 'federation') THEN GREATEST(output_tokens, 0)
 					ELSE LEAST(GREATEST(output_tokens, 0), %[1]d)
 				END AS output_tokens_norm,
 				CASE
 					WHEN source = 'message' THEN LEAST(GREATEST(COALESCE(TRY_CAST(json_extract_string(token_json, '$.cache_creation_input_tokens') AS BIGINT), 0), 0), %[1]d)
-					WHEN source = 'session' THEN GREATEST(cache_create, 0)
+					WHEN source IN ('session', 'federation') THEN GREATEST(cache_create, 0)
 					ELSE LEAST(GREATEST(cache_create, 0), %[1]d)
 				END AS cache_create_norm,
 					-- 1h-TTL subset of cache_create_norm from the nested
@@ -937,12 +937,12 @@ func duckActivityUsageWith(candidateWhere string) string {
 					END AS cache_create_1h_norm,
 					CASE
 						WHEN source = 'message' THEN LEAST(GREATEST(COALESCE(TRY_CAST(json_extract_string(token_json, '$.cache_read_input_tokens') AS BIGINT), 0), 0), %[1]d)
-						WHEN source = 'session' THEN GREATEST(cache_read, 0)
+						WHEN source IN ('session', 'federation') THEN GREATEST(cache_read, 0)
 						ELSE LEAST(GREATEST(cache_read, 0), %[1]d)
 					END AS cache_read_norm,
 					CASE
 						WHEN source = 'message' THEN LEAST(GREATEST(COALESCE(TRY_CAST(json_extract_string(token_json, '$.reasoning_tokens') AS BIGINT), 0), 0), %[1]d)
-						WHEN source = 'session' THEN GREATEST(reasoning_tokens, 0)
+						WHEN source IN ('session', 'federation') THEN GREATEST(reasoning_tokens, 0)
 						ELSE LEAST(GREATEST(reasoning_tokens, 0), %[1]d)
 					END AS reasoning_tokens_norm,
 					CASE

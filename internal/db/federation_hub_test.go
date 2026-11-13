@@ -2,10 +2,12 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/agentsview/internal/money"
 )
 
 func TestFederationBatchOwnershipAndRevocation(t *testing.T) {
@@ -61,14 +63,58 @@ func TestFederationCollisionsHaveOneRefusalAndReplayKeepsIt(t *testing.T) {
 	}))
 	records := []FederationHubRecord{}
 	for _, id := range []string{"host", "trash", "excluded", "foreign"} {
-		records = append(records, FederationHubRecord{UID: id, Hash: "same", Remote: "example.org/repo", ProjectKey: "key", Write: SessionBatchWrite{Session: Session{ID: id, Project: "remote", Machine: "federated", Agent: "claude"}}})
+		session := Session{ID: id, Project: "local", Machine: "host", Agent: "claude"}
+		if id == "host" {
+			session.MessageCount = 7
+		}
+		if id == "foreign" {
+			session.Machine = "federated"
+		}
+		records = append(records, FederationHubRecord{UID: id, Hash: "same", Remote: "example.org/repo", ProjectKey: "key", Write: SessionBatchWrite{Session: session}})
 	}
+	snapshot := func(query string) string {
+		rows, err := d.rawReader().QueryContext(ctx, query)
+		require.NoError(t, err)
+		defer rows.Close()
+		columns, err := rows.Columns()
+		require.NoError(t, err)
+		var result [][]any
+		for rows.Next() {
+			values := make([]any, len(columns))
+			pointers := make([]any, len(columns))
+			for i := range values {
+				pointers[i] = &values[i]
+			}
+			require.NoError(t, rows.Scan(pointers...))
+			result = append(result, values)
+		}
+		require.NoError(t, rows.Err())
+		encoded, err := json.Marshal(result)
+		require.NoError(t, err)
+		return string(encoded)
+	}
+	sessionSnapshot := snapshot(`SELECT * FROM sessions ORDER BY id`)
+	exclusionSnapshot := snapshot(`SELECT * FROM excluded_sessions ORDER BY id`)
+	ownershipSnapshot := snapshot(`SELECT * FROM federation_records ORDER BY session_id`)
 	ack, err := d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 1, "batch", records)
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"host": FederationCollision, "trash": FederationCollision, "excluded": FederationCollision, "foreign": FederationCollision}, ack.Refused)
 	replay, err := d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 1, "batch", records)
 	require.NoError(t, err)
 	assert.Equal(t, ack, replay)
+	assert.Equal(t, sessionSnapshot, snapshot(`SELECT * FROM sessions ORDER BY id`))
+	assert.Equal(t, exclusionSnapshot, snapshot(`SELECT * FROM excluded_sessions ORDER BY id`))
+	assert.Equal(t, ownershipSnapshot, snapshot(`SELECT * FROM federation_records ORDER BY session_id`))
+	for i := range records {
+		records[i].Hash = "different"
+		records[i].Write.Session.MessageCount = 999
+	}
+	changed, err := d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 2, "changed", records)
+	require.NoError(t, err)
+	assert.Equal(t, ack.Refused, changed.Refused)
+	assert.Equal(t, sessionSnapshot, snapshot(`SELECT * FROM sessions ORDER BY id`))
+	assert.Equal(t, exclusionSnapshot, snapshot(`SELECT * FROM excluded_sessions ORDER BY id`))
+	assert.Equal(t, ownershipSnapshot, snapshot(`SELECT * FROM federation_records ORDER BY session_id`))
 	var project string
 	var count int
 	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT project,message_count FROM sessions WHERE id='host'`).Scan(&project, &count))
@@ -113,4 +159,66 @@ func TestFederationSessionOriginsDistinguishesOwners(t *testing.T) {
 	got, err := d.FederationSessionOrigins(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, FederationOrigins{Federated: 1, HubHost: 1, Other: 1}, got)
+}
+
+func TestFederatedSessionAndUsageSurviveRebuildCopy(t *testing.T) {
+	source, target := testDB(t), testDB(t)
+	ctx := t.Context()
+	require.NoError(t, source.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr", SpokeArchiveID: "spoke", Member: "member", CredentialSHA256: "digest"}))
+	_, err := source.PutFederationHubShare(ctx, "spoke", FederationHubShare{UID: "share", EnrollmentUID: "enr", Remote: "example.org/repo", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+	require.NoError(t, err)
+	cost := money.Money{Microdollars: 125}
+	largeInput := MaxPlausibleTokens + 17
+	start := "2026-01-02T00:00:00Z"
+	record := FederationHubRecord{UID: "shared", Hash: "hash", Remote: "example.org/repo", ProjectKey: "key", AssistantCount: 2, Write: SessionBatchWrite{Session: Session{ID: "shared", Project: "example.org/repo", Machine: "federated", Agent: "codex", MessageCount: 4, StartedAt: &start}, UsageEvents: []UsageEvent{{SessionID: "shared", Source: "federation", Model: "model", InputTokens: largeInput, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: start, DedupKey: "model"}}}}
+	_, err = source.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 1, "batch", []FederationHubRecord{record})
+	require.NoError(t, err)
+	require.NoError(t, target.CopyFederationStateFrom(ctx, source.Path()))
+	copied, err := target.CopyOrphanedDataFrom(ctx, source.Path())
+	require.NoError(t, err)
+	assert.Equal(t, 1, copied)
+	var machine, model string
+	var messages, input, storedCost, assistants int
+	require.NoError(t, target.rawReader().QueryRowContext(ctx, `SELECT s.machine,s.message_count,u.model,u.input_tokens,u.cost_microdollars,r.assistant_count FROM sessions s JOIN usage_events u ON u.session_id=s.id JOIN federation_records r ON r.session_id=s.id WHERE s.id='shared'`).Scan(&machine, &messages, &model, &input, &storedCost, &assistants))
+	assert.Equal(t, "federated", machine)
+	assert.Equal(t, 4, messages)
+	assert.Equal(t, "model", model)
+	assert.Equal(t, largeInput, input)
+	assert.Equal(t, 125, storedCost)
+	assert.Equal(t, 2, assistants)
+	daily, err := target.GetDailyUsage(ctx, UsageFilter{From: "2026-01-02", To: "2026-01-02", Timezone: "UTC"})
+	require.NoError(t, err)
+	assert.Equal(t, largeInput, daily.Totals.InputTokens)
+	assert.EqualValues(t, 125, daily.Totals.TotalCost.Microdollars)
+}
+
+func TestLocalRelinkingDoesNotTakeFederatedParent(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr", SpokeArchiveID: "spoke", Member: "member", CredentialSHA256: "digest"}))
+	_, err := d.PutFederationHubShare(ctx, "spoke", FederationHubShare{UID: "share", EnrollmentUID: "enr", Remote: "remote", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+	require.NoError(t, err)
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		for _, q := range []string{
+			`INSERT INTO sessions(id,project,machine,agent) VALUES('host','local','host','claude')`,
+			`INSERT INTO messages(id,session_id,ordinal,role,content) VALUES(100,'host',0,'assistant','spawn')`,
+			`INSERT INTO tool_calls(message_id,session_id,tool_name,category,subagent_session_id) VALUES(100,'host','tool','other','child')`,
+		} {
+			if _, e := tx.ExecContext(ctx, q); e != nil {
+				return e
+			}
+		}
+		return nil
+	}))
+	parent := FederationHubRecord{UID: "parent", Hash: "p", Remote: "remote", ProjectKey: "key", Write: SessionBatchWrite{Session: Session{ID: "parent", Project: "remote", Machine: "federated", Agent: "claude"}}}
+	child := FederationHubRecord{UID: "child", Hash: "c", Remote: "remote", ProjectKey: "key", Write: SessionBatchWrite{Session: Session{ID: "child", Project: "remote", Machine: "federated", Agent: "claude", ParentSessionID: Ptr("parent"), RelationshipType: "subagent"}}}
+	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 1, "batch", []FederationHubRecord{parent, child})
+	require.NoError(t, err)
+	_, err = d.LinkSubagentSessionsForSessions(ctx, []string{"host"})
+	require.NoError(t, err)
+	_, err = d.LinkSubagentSessionsContext(ctx)
+	require.NoError(t, err)
+	var got string
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT parent_session_id FROM sessions WHERE id='child'`).Scan(&got))
+	assert.Equal(t, "parent", got)
 }

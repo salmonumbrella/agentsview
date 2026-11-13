@@ -1518,4 +1518,6 @@ share; a conflicting existing session ID is refused without changing it. Batch
 commit checks enrollment and share state in the writer transaction. Version bit
 `1 << 23` protects these four tables, which are copied during a rebuild.
 Federated summaries store usage events but no messages or tool calls; orphan
-copy preserves the sessions and their usage events during a rebuild.
+copy preserves the sessions and their usage events during a rebuild. Per-model
+federation usage events are session aggregates, so readers preserve counts above
+the per-message limit. Local hierarchy repair leaves share-owned parents intact.

@@ -1517,14 +1517,14 @@ func clampedUsageRowTokens(
 		ClampPlausibleTokens(int64(cacheReadInputTokens))
 }
 
-// UsageEventRowTokens floors session-level token counts at zero and clamps
-// other sources to the accepted row-level range.
+// UsageEventRowTokens floors session-level and federation aggregate counts
+// at zero and clamps other sources to the accepted per-row range.
 func UsageEventRowTokens(
 	source string,
 	inputTokens, outputTokens, cacheCreationInputTokens,
 	cacheReadInputTokens int,
 ) (inputTok, outputTok, cacheCrTok, cacheRdTok int) {
-	if source == "session" {
+	if source == "session" || source == "federation" {
 		return max(inputTokens, 0),
 			max(outputTokens, 0),
 			max(cacheCreationInputTokens, 0),

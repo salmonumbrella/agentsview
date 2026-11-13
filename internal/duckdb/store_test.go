@@ -4892,3 +4892,20 @@ func TestSearchContentHybridKeywordFallback(t *testing.T) {
 	assert.False(t, page.Matches[0].Subordinate)
 	assert.Zero(t, page.NextCursor)
 }
+
+func TestFederationAggregateUsageIsNotClamped(t *testing.T) {
+	ctx := t.Context()
+	local := newLocalDB(t)
+	rawInput := db.MaxPlausibleTokens + 250_000
+	sess := syncSession("federation-aggregate", "alpha", "", "2026-01-18T00:00:00.000Z", 1)
+	sess.Machine = "federated"
+	_, err := local.WriteSessionBatchAtomic(ctx, []db.SessionBatchWrite{{Session: sess, UsageEvents: []db.UsageEvent{{Source: "federation", Model: "model", InputTokens: rawInput, OccurredAt: "2026-01-18T00:00:00Z", DedupKey: "model"}}, DataVersion: 1}})
+	require.NoError(t, err)
+	syncer := newInMemoryTestSync(t, local, storage.MirrorPushOptions{})
+	require.NoError(t, createSchema(ctx, syncer.DB()))
+	_, err = syncer.pushEverything(ctx, nil)
+	require.NoError(t, err)
+	result, err := NewStoreFromDB(syncer.DB()).GetDailyUsage(ctx, db.UsageFilter{From: "2026-01-18", To: "2026-01-18", Timezone: "UTC"})
+	require.NoError(t, err)
+	assert.Equal(t, rawInput, result.Totals.InputTokens)
+}
