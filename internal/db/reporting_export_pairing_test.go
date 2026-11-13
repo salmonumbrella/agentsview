@@ -24,7 +24,7 @@ func TestJointReportingUsageSupportFollowsPricedSurvivors(t *testing.T) {
 		{SessionID: "one", SourceSessionID: "one", Timestamp: "2026-07-28T09:05:00Z", Agent: "codex", Model: "m", InputTokens: 10, Priced: true, Cost: money.Money{Microdollars: 4}, ProofRef: 101},
 		{SessionID: "two", SourceSessionID: "two", Timestamp: "2026-07-28T09:10:00Z", Agent: "codex", Model: "m", InputTokens: 20, Priced: true, Cost: money.Money{Microdollars: 6}, ProofRef: 102},
 		{SessionID: "one", SourceSessionID: "three", Timestamp: "2026-07-28T09:15:00Z", Agent: "codex", Model: "m", InputTokens: 30, ProofRef: 103},
-		{SessionID: "four", SourceSessionID: "four", Timestamp: "2026-07-28T09:20:00Z", Agent: "codex", Model: "m", InputTokens: 40, Cost: money.Money{Microdollars: 20_000}},
+		{SessionID: "four", SourceSessionID: "four", Timestamp: "2026-07-28T09:20:00Z", Agent: "codex", Model: "m", InputTokens: 40, WebSearchRequests: 2, Cost: money.Money{Microdollars: 20_000}, ProofRef: 104},
 	}
 	sessions := map[string]activity.SessionMeta{
 		"one":   {SessionID: "one", Project: "fixture", Agent: "codex"},
@@ -52,7 +52,7 @@ func TestJointReportingUsageSupportFollowsPricedSurvivors(t *testing.T) {
 		assert.Equal(t, []activity.UsageProofRef{101}, contributors[reportingJointContributor{"one", "one"}].proofRefs)
 		assert.Equal(t, []activity.UsageProofRef{102}, contributors[reportingJointContributor{"two", "two"}].proofRefs)
 		assert.Equal(t, []activity.UsageProofRef{103}, contributors[reportingJointContributor{"three", "one"}].proofRefs)
-		assert.Empty(t, contributors[reportingJointContributor{"four", "four"}].proofRefs)
+		assert.Equal(t, []activity.UsageProofRef{104}, contributors[reportingJointContributor{"four", "four"}].proofRefs)
 		assert.False(t, contributors[reportingJointContributor{"one", "one"}].proofIncomplete)
 		assert.True(t, contributors[reportingJointContributor{"four", "four"}].proofIncomplete)
 		assert.True(t, contributors[reportingJointContributor{"one", "one"}].costObserved)
@@ -68,6 +68,16 @@ func TestJointReportingUsageSupportFollowsPricedSurvivors(t *testing.T) {
 	encoded, err := json.Marshal(rows[0])
 	require.NoError(t, err)
 	assert.NotContains(t, string(encoded), "ProofRef")
+	rows[3].ProofRef = 0
+	rows[3].WebSearchRequests = 0
+	withoutRef, err := reportingHourSupport(start, time.Hour, rows, sessions,
+		map[string]export.ProjectMapEntry{"fixture": {ProjectKey: "project"}})
+	require.NoError(t, err)
+	require.Len(t, withoutRef, 1)
+	for _, contributors := range withoutRef {
+		require.Contains(t, contributors, reportingJointContributor{"four", "four"})
+		assert.True(t, contributors[reportingJointContributor{"four", "four"}].proofIncomplete)
+	}
 }
 
 func TestJointReportingProofDoesNotTreatAllocatedCostAsIndependent(t *testing.T) {
