@@ -846,6 +846,9 @@ func TestFederationExclusionBetweenBatches(t *testing.T) {
 		if _, e := tx.ExecContext(ctx, `UPDATE sessions SET parent_session_id='s1000', relationship_type='subagent', cwd='CANARY-path',git_branch='CANARY-branch',first_message='CANARY-first',display_name='CANARY-title',session_name='CANARY-name',pr_links='CANARY-links' WHERE id='s1001'`); e != nil {
 			return e
 		}
+		if _, e := tx.ExecContext(ctx, `INSERT INTO usage_events(session_id,source,model,input_tokens,output_tokens,cost_status,occurred_at,dedup_key) VALUES('s0000','fixture','model-a',100,20,'unknown','2026-01-02T00:00:00Z','page-child')`); e != nil {
+			return e
+		}
 		_, e := tx.ExecContext(ctx, `UPDATE sessions SET parent_session_id='s1001', relationship_type='subagent' WHERE id='s0000'`)
 		return e
 	}))
@@ -869,10 +872,17 @@ func TestFederationExclusionBetweenBatches(t *testing.T) {
 	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT coalesce(parent_session_id,''),relationship_type FROM sessions WHERE id='s0000'`).Scan(&parent, &relationship))
 	assert.Equal(t, "s1001", parent)
 	assert.Equal(t, "subagent", relationship)
+	var usageRows, inputTokens int
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*),coalesce(sum(input_tokens),0) FROM usage_events WHERE session_id='s0000'`).Scan(&usageRows, &inputTokens))
+	assert.Equal(t, 1, usageRows)
+	assert.Equal(t, 100, inputTokens)
 	_, err = spoke.Push(ctx)
 	require.NoError(t, err)
 	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions`).Scan(&count))
 	assert.Equal(t, 1001, count)
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*),coalesce(sum(input_tokens),0) FROM usage_events WHERE session_id='s0000'`).Scan(&usageRows, &inputTokens))
+	assert.Equal(t, 1, usageRows)
+	assert.Equal(t, 100, inputTokens)
 	assertArchiveHasNoCanary(t, hubDB)
 }
 
