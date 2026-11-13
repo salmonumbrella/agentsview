@@ -253,10 +253,17 @@ func TestEnrollmentStateValidation(t *testing.T) {
 }
 
 func TestShareConsentAndPolicyChange(t *testing.T) {
+	for _, retention := range []string{"member-controlled", "org-retained"} {
+		t.Run(retention, func(t *testing.T) { testShareConsentAndPolicyChange(t, retention) })
+	}
+}
+
+func testShareConsentAndPolicyChange(t *testing.T, retention string) {
+	t.Helper()
 	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, archive.Close()) })
-	policy := config.FederationHubConfig{Retention: "member-controlled", AllowedLevels: []string{"summary"}, MinGroupSize: 5, SuggestedProjects: []string{"github.com/example/*", "git.example/*"}, Processing: "none"}
+	policy := config.FederationHubConfig{Retention: retention, AllowedLevels: []string{"summary"}, MinGroupSize: 5, SuggestedProjects: []string{"github.com/example/*", "git.example/*"}, Processing: "none"}
 	digest, err := export.DigestCanonical(policy)
 	require.NoError(t, err)
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -415,11 +422,18 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 	require.Len(t, shares, 2)
 	assert.Equal(t, "paused", shares[1].State)
 	assert.Equal(t, "policy_paused", shares[0].State)
+	pausedGrant := ShareGrant{Project: "github.com/example/private", Level: "summary"}
+	pendingPreview, err := svc.PreviewShare(t.Context(), pausedGrant)
+	require.NoError(t, err)
+	assert.EqualError(t, svc.AddShare(t.Context(), pendingPreview), "share already exists")
+	stillPending, err := archive.GetFederationShare(t.Context(), link.UID, "share-paused")
+	require.NoError(t, err)
+	assert.Equal(t, "pending", stillPending.StopReceipt)
+	assert.Equal(t, shares[1].PolicyDigest, stillPending.PolicyDigest)
 	require.NoError(t, svc.processFederationStops(t.Context(), link, shares))
 	next, err := svc.PreviewShare(t.Context(), grant)
 	require.NoError(t, err)
 	require.NoError(t, svc.AddShare(t.Context(), next))
-	pausedGrant := ShareGrant{Project: "github.com/example/private", Level: "summary"}
 	pausedPreview, err := svc.PreviewShare(t.Context(), pausedGrant)
 	require.NoError(t, err)
 	require.NoError(t, svc.AddShare(t.Context(), pausedPreview))
