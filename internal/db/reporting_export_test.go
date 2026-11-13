@@ -1389,3 +1389,25 @@ func TestReportingFirstSeenUsesEffectiveIntervals(t *testing.T) {
 	assert.Equal(t, 1, hour10.Activity.Totals.NewUntimedSessions)
 	assert.Equal(t, 1, hour10.Activity.Totals.NewProjects)
 }
+
+func TestReportingMessageLessUsageSuppliesInWindowFirstSeen(t *testing.T) {
+	d := testDB(t)
+	insertSession(t, d, "earlier-summary", "example/repo", func(s *Session) {
+		s.Agent = "codex"
+		s.StartedAt = Ptr("2026-07-01T09:00:00Z")
+	})
+	require.NoError(t, d.ReplaceSessionUsageEvents(t.Context(), "earlier-summary", []UsageEvent{{
+		Source: "fixture", Model: "synthetic-model", InputTokens: 10,
+		OccurredAt: "2026-07-28T09:00:00Z", DedupKey: "usage",
+	}}))
+	day, err := d.ExportReportingDay(t.Context(), ReportingExportOptions{
+		Date: time.Date(2026, 7, 28, 0, 0, 0, 0, time.UTC),
+		Now:  time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC), SchemaVersion: export.ReportingJointSchemaVersion,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, day.Hours[9].Activity.Totals.NewSessions)
+	assert.Equal(t, 1, day.Hours[9].Activity.Totals.NewProjects)
+	assert.Equal(t, 1, day.Hours[9].Activity.Totals.NewUntimedSessions)
+	assert.Zero(t, day.Hours[9].Activity.Totals.AgentMinutes)
+	assert.EqualValues(t, 10, day.Hours[9].Usage.Totals.InputTokens)
+}

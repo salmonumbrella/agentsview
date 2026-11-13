@@ -364,7 +364,7 @@ func reportingHoursFromMachineSource(
 		return nil, err
 	}
 	sessions := source.activitySessions
-	evidence := source.sessionEvidence
+	evidence := mergeReportingSessions(source.sessionEvidence, source.usageSessions)
 	ids := source.activityIDs
 	events := source.activityEvents
 	projects := source.projects
@@ -400,16 +400,22 @@ func reportingHoursFromMachineSource(
 	}
 	activityIDs := reportingSessionIDSet(ids)
 	activityUsage := reportingActivityUsage(usage, activityIDs)
+	firstSeenSessions := mergeReportingSessions(sessions, evidence)
+	firstSeenIDs := make(map[string]struct{}, len(firstSeenSessions))
+	for _, session := range firstSeenSessions {
+		firstSeenIDs[session.SessionID] = struct{}{}
+	}
+	firstSeenUsage := reportingActivityUsage(usage, firstSeenIDs)
 	createdAt := source.createdAt
 	gapCap := time.Duration(query.GapCapSeconds) * time.Second
 	firstSeen := buildReportingFirstSeen(
 		date,
 		end,
 		gapCap,
-		mergeReportingSessions(sessions, evidence),
+		firstSeenSessions,
 		createdAt,
 		events,
-		activityUsage,
+		firstSeenUsage,
 		groupLabels,
 	)
 	// Pair once for the whole range. Prior-model inheritance does not depend on
