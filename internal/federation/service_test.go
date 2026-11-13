@@ -211,7 +211,7 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, archive.Close()) })
-	policy := config.FederationHubConfig{Retention: "member-controlled", AllowedLevels: []string{"summary"}, MinGroupSize: 3, SuggestedProjects: []string{"github.com/example/*"}, Processing: "none"}
+	policy := config.FederationHubConfig{Retention: "member-controlled", AllowedLevels: []string{"summary"}, MinGroupSize: 5, SuggestedProjects: []string{"github.com/example/*", "git.example/*"}, Processing: "none"}
 	digest, err := export.DigestCanonical(policy)
 	require.NoError(t, err)
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -290,6 +290,17 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 	grant := ShareGrant{Project: "github.com/example/api", Level: "summary", Attribution: "pooled", Since: "2026-01-02"}
 	preview, err := svc.PreviewShare(t.Context(), grant)
 	require.NoError(t, err)
+	assert.Equal(t, policy, preview.Policy)
+	previewJSON, err := json.Marshal(preview)
+	require.NoError(t, err)
+	var previewFields map[string]any
+	require.NoError(t, json.Unmarshal(previewJSON, &previewFields))
+	assert.Contains(t, previewFields, "records_array_bytes")
+	assert.NotContains(t, previewFields, "bytes")
+	empty, err := svc.PreviewShare(t.Context(), ShareGrant{Project: "github.com/example/empty", Level: "summary"})
+	require.NoError(t, err)
+	assert.Empty(t, empty.Records)
+	assert.Equal(t, 2, empty.RecordsArrayBytes)
 	assert.Contains(t, preview.Disclosure, "bearer token")
 	assert.Contains(t, preview.DeliveryNotice, "delivered to the hub")
 	assert.Contains(t, preview.Omits, "content")
@@ -299,6 +310,9 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, shares)
 	tampered := preview
+	tampered.Policy.MinGroupSize++
+	assert.ErrorContains(t, svc.AddShare(t.Context(), tampered), "preview again")
+	tampered = preview
 	tampered.Disclosure = ""
 	assert.ErrorContains(t, svc.AddShare(t.Context(), tampered), "preview again")
 	require.NoError(t, svc.AddShare(t.Context(), preview))
@@ -317,8 +331,18 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 	shown, err := json.Marshal(preview)
 	require.NoError(t, err)
 	assert.JSONEq(t, string(shown), shares[0].ConsentJSON)
-	stored := shares[0].ConsentJSON
-	require.NoError(t, archive.PutFederationShare(t.Context(), db.FederationShare{UID: "share-paused", LinkUID: link.UID, NormalizedRemote: "github.com/example/paused", Level: "summary", Attribution: "pooled", Audience: "operators", State: "paused", ConsentJSON: `{}`, PolicyDigest: digest}))
+	var storedPreview SharePreview
+	require.NoError(t, json.Unmarshal([]byte(shares[0].ConsentJSON), &storedPreview))
+	assert.Equal(t, policy, storedPreview.Policy)
+	listed, err = svc.Shares(t.Context())
+	require.NoError(t, err)
+	listedJSON, err := json.Marshal(listed)
+	require.NoError(t, err)
+	assert.NotContains(t, string(listedJSON), "consent_json")
+	details, err := svc.Share(t.Context(), shares[0].UID)
+	require.NoError(t, err)
+	assert.Equal(t, shares[0].ConsentJSON, details.Share.ConsentJSON)
+	require.NoError(t, archive.PutFederationShare(t.Context(), db.FederationShare{UID: "share-paused", LinkUID: link.UID, NormalizedRemote: "github.com/example/private", Level: "summary", Attribution: "pooled", Audience: "operators", State: "paused", ConsentJSON: `{}`, PolicyDigest: digest}))
 	_, err = svc.Status(t.Context())
 	require.NoError(t, err)
 	paused, err := archive.GetFederationShare(t.Context(), link.UID, "share-paused")
@@ -336,13 +360,46 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 	shares, err = archive.ListFederationShares(t.Context(), link.UID)
 	require.NoError(t, err)
 	require.Len(t, shares, 2)
-	assert.Equal(t, "policy_paused", shares[1].State)
+	assert.Equal(t, "paused", shares[1].State)
 	assert.Equal(t, "policy_paused", shares[0].State)
-	assert.Equal(t, stored, shares[0].ConsentJSON)
-	assert.ErrorContains(t, svc.ResumeShare(t.Context(), shares[0].UID), "share add")
 	next, err := svc.PreviewShare(t.Context(), grant)
 	require.NoError(t, err)
 	require.NoError(t, svc.AddShare(t.Context(), next))
+	pausedGrant := ShareGrant{Project: "github.com/example/private", Level: "summary"}
+	pausedPreview, err := svc.PreviewShare(t.Context(), pausedGrant)
+	require.NoError(t, err)
+	require.NoError(t, svc.AddShare(t.Context(), pausedPreview))
+	records, err = svc.DryRun(t.Context())
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.NoError(t, svc.ResumeShare(t.Context(), "share-paused"))
+	records, err = svc.DryRun(t.Context())
+	require.NoError(t, err)
+	require.Len(t, records, 3)
+	assert.Equal(t, "child", records[1].SessionID)
+	assert.Equal(t, "unshared", records[2].SessionID)
+	require.NoError(t, svc.PauseShare(t.Context(), "share-paused"))
+	policy.MinGroupSize = 6
+	digest, err = export.DigestCanonical(policy)
+	require.NoError(t, err)
+	require.NoError(t, svc.ResumeShare(t.Context(), "share-paused"))
+	records, err = svc.DryRun(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, records)
+	paused, err = archive.GetFederationShare(t.Context(), link.UID, "share-paused")
+	require.NoError(t, err)
+	assert.Equal(t, "policy_paused", paused.State)
+	policy.SuggestedProjects = []string{}
+	digest, err = export.DigestCanonical(policy)
+	require.NoError(t, err)
+	wirePreview, err := svc.PreviewShare(t.Context(), grant)
+	require.NoError(t, err)
+	wire, err := json.Marshal(wirePreview)
+	require.NoError(t, err)
+	var decoded SharePreview
+	require.NoError(t, json.Unmarshal(wire, &decoded))
+	require.NotNil(t, decoded.Policy.SuggestedProjects)
+	require.NoError(t, svc.AddShare(t.Context(), decoded))
 	hub.Close()
 	records, err = svc.DryRun(t.Context())
 	assert.Error(t, err)
@@ -357,7 +414,6 @@ func TestShareRejectsUnshareableGrant(t *testing.T) {
 		grant   ShareGrant
 		message string
 	}{
-		{ShareGrant{Project: "*", Level: "summary"}, "repository remote"},
 		{ShareGrant{Project: "local-label", Level: "summary"}, "no repository identity another machine can match"},
 		{ShareGrant{Project: "github.com/example/api", Level: "transcript"}, "not available yet"},
 		{ShareGrant{Project: "github.com/example/api", Level: "unknown"}, "not allowed"},
@@ -380,6 +436,10 @@ func TestShareLocalStateAndExclusionErrors(t *testing.T) {
 	assert.EqualError(t, svc.PauseShare(t.Context(), "share-a"), "share is already paused")
 	require.ErrorIs(t, svc.PauseShare(t.Context(), "missing"), sql.ErrNoRows)
 	require.ErrorIs(t, svc.ResumeShare(t.Context(), "missing"), sql.ErrNoRows)
+	_, err = svc.Share(t.Context(), "missing")
+	require.ErrorIs(t, err, sql.ErrNoRows)
+	require.ErrorIs(t, svc.RemoveShare(t.Context(), "missing"), sql.ErrNoRows)
+	require.NoError(t, svc.ResumeShare(t.Context(), "share-a"))
 	require.NoError(t, archive.PauseFederationSharesForPolicy(t.Context(), "link-a", "changed"))
 	assert.EqualError(t, svc.ResumeShare(t.Context(), "share-a"), "policy changed; run federation share add to review and accept")
 	assert.EqualError(t, svc.PauseShare(t.Context(), "share-a"), "policy changed; run federation share add to review and accept")
@@ -389,4 +449,29 @@ func TestShareLocalStateAndExclusionErrors(t *testing.T) {
 		require.ErrorAs(t, err, &input)
 		assert.Equal(t, tc.message, input.Message)
 	}
+}
+
+func TestShareOperationsWithoutLink(t *testing.T) {
+	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, archive.Close()) })
+	svc := NewService("spoke", "spoke-a", config.FederationHubConfig{}, archive)
+	operations := []func() error{
+		func() error { _, err := svc.Shares(t.Context()); return err },
+		func() error { _, err := svc.Share(t.Context(), "missing"); return err },
+		func() error { return svc.PauseShare(t.Context(), "missing") },
+		func() error { return svc.ResumeShare(t.Context(), "missing") },
+		func() error { return svc.RemoveShare(t.Context(), "missing") },
+	}
+	for _, operation := range operations {
+		err := operation()
+		var input *InputError
+		require.ErrorAs(t, err, &input)
+		assert.EqualError(t, err, "join a hub first")
+	}
+	require.NoError(t, archive.Update(t.Context(), func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(t.Context(), `INSERT INTO sessions (id,project,first_message) VALUES ('session-a','fixture','')`)
+		return err
+	}))
+	require.NoError(t, svc.Exclude(t.Context(), "session-a", "private"))
 }

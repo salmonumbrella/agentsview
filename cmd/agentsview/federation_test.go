@@ -85,10 +85,13 @@ func TestFederationRequestReturnsDaemonMessage(t *testing.T) {
 
 func TestShareConfirmationPostsOnlyOnYes(t *testing.T) {
 	for _, tc := range []struct {
-		input string
-		posts int
-	}{{"n\n", 0}, {"", 0}, {"y\n", 1}} {
-		t.Run(tc.input, func(t *testing.T) {
+		name, input  string
+		posts        int
+		writeFailure bool
+	}{
+		{"no", "n\n", 0, false}, {"empty", "", 0, false}, {"yes", "y\n", 1, false}, {"write failure", "y\n", 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			posts := 0
 			daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/api/v1/federation/shares/preview" {
@@ -103,18 +106,53 @@ func TestShareConfirmationPostsOnlyOnYes(t *testing.T) {
 			}))
 			t.Cleanup(daemon.Close)
 			var out bytes.Buffer
-			require.NoError(t, addFederationShare(t.Context(), daemon.URL, "", federation.ShareGrant{}, strings.NewReader(tc.input), &out))
+			var writer io.Writer = &out
+			if tc.writeFailure {
+				writer = failingShareWriter{}
+			}
+			err := addFederationShare(t.Context(), daemon.URL, "", federation.ShareGrant{}, strings.NewReader(tc.input), writer)
+			if tc.writeFailure {
+				assert.ErrorContains(t, err, "write failed")
+			} else {
+				require.NoError(t, err)
+			}
 			assert.Equal(t, tc.posts, posts)
+			if tc.posts == 0 && !tc.writeFailure {
+				assert.Contains(t, out.String(), "Aborted; no share was created.")
+			}
 		})
 	}
 }
-func TestFederationDryRunStreamsLargeResponse(t *testing.T) {
+
+func TestFederationDryRunStream(t *testing.T) {
+	// The copier is content-opaque; this body is not NDJSON.
 	body := strings.Repeat("x", (1<<20)+1024)
-	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, body) }))
-	t.Cleanup(daemon.Close)
-	var out bytes.Buffer
-	require.NoError(t, streamFederationDryRun(t.Context(), daemon.URL, "", &out))
-	assert.Equal(t, body, out.String())
+	for _, tc := range []struct {
+		name, body, errorMessage string
+		status                   int
+	}{
+		{"large response", body, "", http.StatusOK},
+		{"daemon error", `{"error":"hub policy unavailable"}`, "hub policy unavailable", http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, http.MethodGet, r.Method)
+				assert.Equal(t, "/api/v1/federation/dry-run", r.URL.Path)
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			t.Cleanup(daemon.Close)
+			var out bytes.Buffer
+			err := streamFederationDryRun(t.Context(), daemon.URL, "", &out)
+			if tc.errorMessage != "" {
+				assert.ErrorContains(t, err, tc.errorMessage)
+				assert.Empty(t, out.String())
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tc.body, out.String())
+			}
+		})
+	}
 }
 
 func TestFederationPushCallsDaemon(t *testing.T) {
@@ -133,27 +171,13 @@ type failingShareWriter struct{}
 
 func (failingShareWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
 
-func TestSharePreviewWriteFailureDoesNotPostConsent(t *testing.T) {
-	posts := 0
-	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/federation/shares/preview" {
-			_, _ = io.WriteString(w, `{}`)
-			return
-		}
-		posts++
-	}))
-	t.Cleanup(daemon.Close)
-	err := addFederationShare(t.Context(), daemon.URL, "", federation.ShareGrant{}, strings.NewReader("y\n"), failingShareWriter{})
-	assert.ErrorContains(t, err, "write failed")
-	assert.Zero(t, posts)
-}
-
-func TestFederationDryRunReturnsDaemonMessage(t *testing.T) {
-	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = io.WriteString(w, `{"error":"hub policy unavailable"}`)
-	}))
-	t.Cleanup(daemon.Close)
-	var out bytes.Buffer
-	assert.ErrorContains(t, streamFederationDryRun(t.Context(), daemon.URL, "", &out), "hub policy unavailable")
+func TestShareListSeparatesSuggestionsFromJSON(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	shares := federation.ShareList{Shares: []db.FederationShare{{UID: "share-a"}}, Suggestions: []string{"github.com/example/api"}}
+	require.NoError(t, printFederationShares(&stdout, &stderr, shares))
+	var listed []db.FederationShare
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &listed))
+	require.Len(t, listed, 1)
+	assert.Equal(t, "share-a", listed[0].UID)
+	assert.Equal(t, "Suggested: federation share add --project github.com/example/api --level summary\n", stderr.String())
 }

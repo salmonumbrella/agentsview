@@ -1239,6 +1239,7 @@ func TestFindDaemonRuntime_LiveProcess(t *testing.T) {
 }
 
 func TestFindDaemonRuntime_IgnoresIncompatibleRuntime(t *testing.T) {
+	// API 14 predates idle catch-up readiness; API 18 predates share routes and catches a reverted API 19 bump.
 	for _, version := range []int{14, 18} {
 		t.Run(strconv.Itoa(version), func(t *testing.T) {
 			dir := runtimeTestDir(t)

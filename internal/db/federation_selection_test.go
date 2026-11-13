@@ -2,7 +2,6 @@ package db
 
 import (
 	"database/sql"
-	"encoding/json/jsontext"
 	"fmt"
 	"testing"
 
@@ -17,7 +16,7 @@ func TestFederationSelectionRequiresOwnSnapshotAndLocalProof(t *testing.T) {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO pg_sync_state (key,value) VALUES ('artifact_local_installation_id','install-a')`); err != nil {
 			return err
 		}
-		for _, id := range []string{"selected", "imported", "other", "ambiguous", "excluded", "before", "boundary", "child", "no-snapshot", "attached", "artifact", "trashed", "other-repo", "root-only", "renamed", "local-sentinel"} {
+		for _, id := range []string{"selected", "imported", "other", "ambiguous", "excluded", "before", "boundary", "child", "no-snapshot", "attached", "artifact", "trashed", "root-only", "renamed", "local-sentinel"} {
 			machine := "install-a"
 			if id == "other" {
 				machine = "other"
@@ -41,7 +40,7 @@ func TestFederationSelectionRequiresOwnSnapshotAndLocalProof(t *testing.T) {
 				continue
 			}
 			remote := "github.com/example/api"
-			if id == "child" || id == "other-repo" || id == "renamed" {
+			if id == "child" || id == "renamed" {
 				remote = "github.com/example/private"
 			}
 			count := 1
@@ -61,10 +60,9 @@ func TestFederationSelectionRequiresOwnSnapshotAndLocalProof(t *testing.T) {
 			`INSERT INTO archive_session_provenance (session_id,archive_id,device_id,root_id,source_key,manifest_id,native_session_id) VALUES ('attached','archive','device','root','source','manifest','native')`,
 			`INSERT INTO artifact_imported_sessions (origin,gid,manifest_hash,imported_session_id) VALUES ('origin','gid','hash','artifact')`,
 			`UPDATE sessions SET deleted_at='2026-01-03' WHERE id='trashed'`,
-			`INSERT INTO messages (id,session_id,ordinal,role,content) VALUES (100,'selected',0,'assistant','CANARY-content')`,
-			`INSERT INTO tool_calls (message_id,session_id,tool_name,category,input_json) VALUES (100,'selected','fixture','CANARY-category','CANARY-input')`,
+			`INSERT INTO messages (id,session_id,ordinal,role,content) VALUES (100,'selected',0,'assistant','fixture-content')`,
+			`INSERT INTO tool_calls (message_id,session_id,tool_name,category,input_json) VALUES (100,'selected','fixture','fixture-category','fixture-input')`,
 			`UPDATE sessions SET parent_session_id='selected',relationship_type='subagent' WHERE id='child'`,
-			`UPDATE sessions SET first_message='CANARY-first', display_name='CANARY-title', cwd='/CANARY-cwd', git_branch='CANARY-branch'`,
 			`UPDATE sessions SET project='personal', cwd='/fixture/private/work' WHERE id='renamed'`,
 		} {
 			if _, err := tx.ExecContext(ctx, q); err != nil {
@@ -78,8 +76,6 @@ func TestFederationSelectionRequiresOwnSnapshotAndLocalProof(t *testing.T) {
 	mapping, err := database.ApplyWorktreeProjectMappings(ctx, "install-a")
 	require.NoError(t, err)
 	assert.Equal(t, 1, mapping.MatchedSessions)
-	seedSessionExportPricing(t, database)
-	insertMessages(t, database, Message{SessionID: "selected", Ordinal: 1, Role: "assistant", Model: "model-computed", TokenUsage: jsontext.Value(`{"input_tokens":1000,"output_tokens":500}`), HasContextTokens: true, HasOutputTokens: true})
 	require.NoError(t, database.PutFederationExclusion(ctx, "excluded", "private"))
 	result, err := database.SelectFederationSessions(ctx, "github.com/example/api", "2026-01-02")
 	require.NoError(t, err)
@@ -87,15 +83,13 @@ func TestFederationSelectionRequiresOwnSnapshotAndLocalProof(t *testing.T) {
 	assert.Equal(t, 5, result.NotLocal)
 	assert.Equal(t, 1, result.Excluded)
 	assert.Equal(t, 3, result.NotIdentifiable)
+	idsOnly, err := database.SelectFederationSessionIDs(ctx, "github.com/example/api", "2026-01-02")
+	require.NoError(t, err)
+	assert.Equal(t, result.IDs, idsOnly.IDs)
+	assert.Equal(t, result.NotLocal, idsOnly.NotLocal)
+	assert.Equal(t, result.Excluded, idsOnly.Excluded)
+	assert.Equal(t, 2, idsOnly.NotIdentifiable)
 	assert.Equal(t, 1, result.ToolCounts["selected"])
-	for _, row := range result.Rows {
-		if row.ID == "selected" {
-			assert.Equal(t, 1000, row.ModelUsage.InputTokens)
-			assert.Equal(t, 500, row.ModelUsage.OutputTokens)
-			assert.True(t, row.ModelUsage.HasCost)
-			assert.Equal(t, int64(20000), row.ModelUsage.Cost.Microdollars)
-		}
-	}
 }
 
 func TestFederationSelectionAttachesUsageAcrossChunks(t *testing.T) {

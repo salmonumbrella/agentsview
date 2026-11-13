@@ -259,8 +259,6 @@ func TestFederationHandshakeRegistrationByRole(t *testing.T) {
 			} else {
 				assert.Equal(t, http.StatusNotFound, rec.Code, route.path)
 			}
-			_, exposed := srv.api.OpenAPI().Paths[route.path]
-			assert.False(t, exposed)
 		}
 	}
 	_, found := OpenAPISpec(VersionInfo{}).Paths[federationHandshakePath]

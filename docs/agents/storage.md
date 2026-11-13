@@ -1504,7 +1504,9 @@ anchored to the message holding the tool call.
 
 ## Federation share state
 
-Federation shares retain the preview and policy digest accepted by the member.
+Federation shares retain the preview, including the whole policy shown to the
+member, and the policy digest accepted by the member. A policy change moves only
+active shares to `policy_paused`; manually paused shares stay paused.
 Exclusions are keyed by session across the archive, record no share, and survive
 share removal, leaving a hub, and resync. Version bit `1 << 21` covers links and
 enrollments; `1 << 22` covers shares and exclusions so older builds refuse such

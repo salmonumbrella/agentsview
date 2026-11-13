@@ -218,14 +218,14 @@ type FederationShare struct {
 	Since            string `json:"since"`
 	Audience         string `json:"audience"`
 	State            string `json:"state"`
-	ConsentJSON      string `json:"consent_json"`
+	ConsentJSON      string `json:"consent_json,omitempty"`
 	PolicyDigest     string `json:"policy_digest"`
 	CreatedAt        string `json:"created_at"`
 }
 
 func (db *DB) PutFederationShare(ctx context.Context, s FederationShare) error {
 	return db.Update(ctx, func(tx *sql.Tx) error {
-		result, err := tx.ExecContext(ctx, `INSERT INTO federation_shares (share_uid,link_uid,normalized_remote,level,attribution,since,audience,state,consent_json,policy_digest) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(link_uid,normalized_remote) DO UPDATE SET level=excluded.level,attribution=excluded.attribution,since=excluded.since,audience=excluded.audience,state=excluded.state,consent_json=excluded.consent_json,policy_digest=excluded.policy_digest WHERE federation_shares.state='policy_paused'`, s.UID, s.LinkUID, s.NormalizedRemote, s.Level, s.Attribution, s.Since, s.Audience, s.State, s.ConsentJSON, s.PolicyDigest)
+		result, err := tx.ExecContext(ctx, `INSERT INTO federation_shares (share_uid,link_uid,normalized_remote,level,attribution,since,audience,state,consent_json,policy_digest) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(link_uid,normalized_remote) DO UPDATE SET level=excluded.level,attribution=excluded.attribution,since=excluded.since,audience=excluded.audience,state=CASE WHEN federation_shares.state='paused' THEN 'paused' ELSE excluded.state END,consent_json=excluded.consent_json,policy_digest=excluded.policy_digest WHERE federation_shares.state='policy_paused' OR (federation_shares.state='paused' AND federation_shares.policy_digest<>excluded.policy_digest)`, s.UID, s.LinkUID, s.NormalizedRemote, s.Level, s.Attribution, s.Since, s.Audience, s.State, s.ConsentJSON, s.PolicyDigest)
 		if err != nil {
 			return err
 		}
@@ -260,7 +260,7 @@ func (db *DB) ListFederationShares(ctx context.Context, linkUID string) ([]Feder
 }
 func (db *DB) PauseFederationSharesForPolicy(ctx context.Context, linkUID, digest string) error {
 	return db.Update(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `UPDATE federation_shares SET state='policy_paused' WHERE link_uid=? AND state<>'policy_paused' AND policy_digest<>?`, linkUID, digest); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE federation_shares SET state='policy_paused' WHERE link_uid=? AND state='active' AND policy_digest<>?`, linkUID, digest); err != nil {
 			return err
 		}
 		return stampFederationVersion(ctx, tx)
