@@ -25,13 +25,12 @@ func (s *Sync) syncWorktreeMappings(ctx context.Context, force bool) error {
 		// explicit-rule set every push instead of advancing a cursor: a rule
 		// whose target moves out of scope must remove its previously published
 		// row even though the filtered delta contains no safe replacement.
-		mappings, err := s.local.ListAllWorktreeProjectMappings(ctx)
-		if err != nil {
-			return err
-		}
-		if len(s.projectRemotes) > 0 {
-			mappings = nil
-		} else {
+		var mappings []db.WorktreeProjectMapping
+		if len(s.projectRemotes) == 0 {
+			mappings, err = s.local.ListAllWorktreeProjectMappings(ctx)
+			if err != nil {
+				return err
+			}
 			mappings = db.FilterWorktreeMappingsForScope(mappings, s.projects, s.excludeProjects)
 		}
 		return s.commitWorktreeMappingPublication(

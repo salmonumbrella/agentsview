@@ -2481,6 +2481,51 @@ func TestUsageOnlyPushClearsVectors(t *testing.T) {
 	}
 }
 
+func TestUsageOnlyRemoteScopeClearsOnlySelectedVectors(t *testing.T) {
+	syncer, local, pg := newVectorPushTestSync(t, testPGURL(t), "agentsview_usage_remote_vector_test")
+	ctx := t.Context()
+	fake := &fakeVectorSource{
+		gen: storage.VectorGenerationInfo{Fingerprint: "usage-remote", Model: "model-a", Dimension: 4}, hasGen: true,
+		hashes: map[string]string{}, docs: map[string][]storage.VectorPushDoc{},
+	}
+	for _, tc := range []struct{ id, remote string }{
+		{"selected", "https://example.com/org/repo.git"},
+		{"other", "https://example.com/other/repo.git"},
+	} {
+		seedVectorSessionProject(t, local, tc.id, "shared")
+		require.NoError(t, local.UpsertProjectIdentityObservation(ctx, export.ProjectIdentityObservation{
+			SessionID: tc.id, Project: "shared", Machine: "test-machine", RootPath: "/work/" + tc.id,
+			GitRemote: tc.remote, RemoteResolution: export.ProjectResolutionResolved, ObservedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+		}))
+		fake.hashes[tc.id] = "hash-" + tc.id
+		fake.docs[tc.id] = []storage.VectorPushDoc{vdoc(tc.id, tc.id+"#0", 0, tc.id+" content", "hash-"+tc.id, []float32{1, 0, 0, 0})}
+	}
+	syncer.vectorSource = fake
+	_, err := syncer.Push(ctx, true, nil)
+	require.NoError(t, err)
+	for _, table := range []string{"vector_documents", "vector_push_state"} {
+		for _, id := range []string{"selected", "other"} {
+			var count int
+			require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM `+table+` WHERE session_id = $1`, id).Scan(&count))
+			require.Equal(t, 1, count, "%s %s", table, id)
+		}
+	}
+	local.SetArchiveContent(config.ArchiveContentUsage)
+	syncer.projectRemotes = []string{"example.com/org/repo"}
+	_, err = syncer.Push(ctx, true, nil)
+	require.NoError(t, err)
+	for _, table := range []string{"vector_documents", "vector_push_state"} {
+		for _, tc := range []struct {
+			id   string
+			want int
+		}{{"selected", 0}, {"other", 1}} {
+			var count int
+			require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM `+table+` WHERE session_id = $1`, tc.id).Scan(&count))
+			assert.Equal(t, tc.want, count, "%s %s", table, tc.id)
+		}
+	}
+}
+
 func TestUsageOnlyPushEvictsDeletedSessionVectors(t *testing.T) {
 	for _, full := range []bool{false, true} {
 		t.Run(fmt.Sprintf("full=%t", full), func(t *testing.T) {

@@ -436,6 +436,32 @@ func TestListSessionsForMirrorWindowInclusiveLowerBoundUnboundedAbove(t *testing
 	assert.Empty(t, none)
 }
 
+func TestGetSessionForMirrorWindowPreservesExternalParent(t *testing.T) {
+	database := testDB(t)
+	ctx := t.Context()
+	for _, id := range []string{"parent", "child"} {
+		require.NoError(t, database.UpsertSession(ctx, Session{ID: id, Project: "p", Machine: "m", Agent: "a"}))
+	}
+	_, err := database.SetSessionExternalParent(ctx, "child", "parent")
+	require.NoError(t, err)
+	got, err := database.GetSessionForMirrorWindow(ctx, "child")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	exported, err := database.GetArtifactExportSession(ctx, "child")
+	require.NoError(t, err)
+	require.NotNil(t, exported)
+	require.NotEqual(t, got.ParentSessionID, exported.ParentSessionID)
+	window, err := database.ListSessionsForMirrorWindow(ctx, "", nil, nil)
+	require.NoError(t, err)
+	for _, session := range window {
+		if session.ID == "child" {
+			assert.Equal(t, session, *got)
+			return
+		}
+	}
+	t.Fatal("child missing from mirror window")
+}
+
 // TestSyncMarkerMalformedCreatedAtIsDropped pins the no-raw-fallback
 // contract (see syncMarkerSchemaSQL): a malformed created_at must never
 // participate in the marker MAX. Letters sort above digits, so a raw

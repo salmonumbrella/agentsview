@@ -1748,8 +1748,8 @@ func TestSessionIDsForProjectRemotesUsesOwnSnapshot(t *testing.T) {
 			project = id
 		}
 		session := Session{ID: id, Project: project, Machine: "local", Agent: "codex"}
-		if id == "personal" {
-			session.Cwd = "/workspace/personal"
+		if id == "personal" || id == "repo" {
+			session.Cwd = "/workspace/" + id
 		}
 		if id == "child" {
 			session.ParentSessionID = new("repo")
@@ -1772,20 +1772,33 @@ func TestSessionIDsForProjectRemotesUsesOwnSnapshot(t *testing.T) {
 			GitRemote: tc.remote, RemoteResolution: tc.resolution, ObservedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
 		}))
 	}
-	// The rule changes the label; the session's own snapshot still names another repository.
+	// The rename and rule change labels; snapshots still name their own repositories.
 	_, err := d.CreateWorktreeProjectMapping(ctx, WorktreeProjectMapping{
-		Machine: "local", PathPrefix: "/workspace/personal", Project: "shared", Enabled: true,
+		Machine: "local", PathPrefix: "/workspace/repo", Project: "team", Enabled: true,
 	})
 	require.NoError(t, err)
-	draft := WorktreeReclassificationDraft{Machine: "local", PathPrefix: "/workspace/personal", Project: "shared", Enabled: true}
+	draft := WorktreeReclassificationDraft{Machine: "local", PathPrefix: "/workspace/repo", Project: "team", Enabled: true}
 	preview, err := d.PreviewWorktreeReclassification(ctx, draft)
 	require.NoError(t, err)
 	_, _, err = d.ApplyWorktreeReclassification(ctx, draft, preview.MappingToken, preview.ExistingMappingID)
 	require.NoError(t, err)
+	_, err = d.CreateWorktreeProjectMapping(ctx, WorktreeProjectMapping{
+		Machine: "local", PathPrefix: "/workspace/personal", Project: "team", Enabled: true,
+	})
+	require.NoError(t, err)
+	draft = WorktreeReclassificationDraft{Machine: "local", PathPrefix: "/workspace/personal", Project: "team", Enabled: true}
+	preview, err = d.PreviewWorktreeReclassification(ctx, draft)
+	require.NoError(t, err)
+	_, _, err = d.ApplyWorktreeReclassification(ctx, draft, preview.MappingToken, preview.ExistingMappingID)
+	require.NoError(t, err)
+	repo, err := d.GetSession(ctx, "repo")
+	require.NoError(t, err)
+	require.NotNil(t, repo)
 	personal, err := d.GetSession(ctx, "personal")
 	require.NoError(t, err)
 	require.NotNil(t, personal)
-	require.Equal(t, "shared", personal.Project)
+	require.Equal(t, "team", repo.Project)
+	require.Equal(t, repo.Project, personal.Project)
 	ids, err := d.SessionIDsForProjectRemotes(ctx, []string{"example.com/team/repo"})
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"repo", "renamed"}, ids)

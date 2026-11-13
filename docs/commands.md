@@ -1584,7 +1584,7 @@ agentsview replica pg push [target] [flags]
 | `--embed`            | `false` | Push sessions first, then build and push vectors; watch builds after syncs and pushes vectors on the next interval |
 | `--projects`         |         | Comma-separated projects to push (inclusive)                                                                       |
 | `--exclude-projects` |         | Comma-separated projects to exclude from push                                                                      |
-| `--project-remotes`  |         | Comma-separated Git remotes whose resolved sessions to push                                                         |
+| `--project-remotes`  |         | Comma-separated Git remotes whose resolved sessions to push                                                        |
 | `--all-projects`     | `false` | Ignore configured project filters for this run                                                                     |
 | `--all`              | `false` | Push every configured PostgreSQL target sequentially                                                               |
 | `--watch`            | `false` | Run continuously, pushing on change plus a periodic floor                                                          |

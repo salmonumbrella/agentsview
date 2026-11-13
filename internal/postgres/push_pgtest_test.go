@@ -3750,7 +3750,10 @@ func TestFilteredPushReconcilesProjectMoveCommittedDuringPush(t *testing.T) {
 
 func TestRemoteScopePushIncludesSnapshotOnlyBackfill(t *testing.T) {
 	syncer, local, pg, ctx := newSessionProvenancePushSync(t, "agentsview_remote_backfill_test")
+	seedProvenanceSession(t, local, "parent", "workstation", "project", "")
 	seedProvenanceSession(t, local, "late", "workstation", "project", "")
+	_, err := local.SetSessionExternalParent(ctx, "late", "parent")
+	require.NoError(t, err)
 	raw, err := sql.Open("sqlite3", local.Path())
 	require.NoError(t, err)
 	_, err = raw.ExecContext(ctx, `UPDATE sessions SET sync_marker = '2000-01-01T00:00:00Z' WHERE id = 'late'`)
@@ -3776,6 +3779,9 @@ func TestRemoteScopePushIncludesSnapshotOnlyBackfill(t *testing.T) {
 	assert.Equal(t, 1, result.SessionsPushed)
 	require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE id = 'late'`).Scan(&count))
 	assert.Equal(t, 1, count)
+	var parent string
+	require.NoError(t, pg.QueryRowContext(ctx, `SELECT parent_session_id FROM sessions WHERE id = 'late'`).Scan(&parent))
+	assert.Equal(t, "parent", parent)
 }
 
 func TestRemoteScopePushPublishesOnlyMatchingIdentities(t *testing.T) {

@@ -612,7 +612,7 @@ func (s *Sync) pushWithOptions(
 			if _, ok := sessionByID[snapshot.SessionID]; ok {
 				continue
 			}
-			sess, err := s.local.GetArtifactExportSession(ctx, snapshot.SessionID)
+			sess, err := s.local.GetSessionForMirrorWindow(ctx, snapshot.SessionID)
 			if err != nil {
 				return result, err
 			}
