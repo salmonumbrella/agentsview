@@ -380,7 +380,7 @@ func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T)
 // These regressions describe the accepted cross-release privacy requirement.
 // The publication policy is still open; no admission bypass is used here.
 func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
-	for _, scenario := range []string{"window", "reverse-window", "update", "rolled-back-update", "missing-authority", "copy-before-publication", "copy-after-publication", "cancel-before-admission", "concurrent", "purge-regrant", "untraced-write", "reopen", "second-handle", "closed-writer", "untraced-session", "untraced-record", "untraced-message", "untraced-tool-result", "untraced-exclusion"} {
+	for _, scenario := range []string{"window", "reverse-window", "update", "rolled-back-update", "missing-authority", "traced-exclusion", "copy-before-publication", "copy-after-publication", "cancel-before-admission", "concurrent", "purge-regrant", "untraced-write", "reopen", "second-handle", "closed-writer", "untraced-session", "untraced-record", "untraced-message", "untraced-tool-result", "untraced-exclusion"} {
 		t.Run(scenario, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
@@ -491,6 +491,16 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 				require.Error(t, err)
 				assert.Empty(t, later.Projects)
 				assert.Nil(t, later.Totals)
+				return
+			}
+			if scenario == "traced-exclusion" {
+				require.NoError(t, d.PutFederationExclusion(ctx, "a", "synthetic"))
+				later, err := d.readFederationPulse(ctx, "2026-07-29", 3, now)
+				require.NoError(t, err)
+				assert.True(t, later.Suppressed)
+				assert.Empty(t, later.Projects)
+				assert.Nil(t, later.Totals["tokens"].Value)
+				assert.Nil(t, later.Totals["cost_microdollars"].Value)
 				return
 			}
 			if scenario == "copy-after-publication" {
