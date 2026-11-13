@@ -71,24 +71,8 @@ func (db *DB) PutFederationHubShare(ctx context.Context, spoke string, share Fed
 					return ErrFederationInvalidBatch
 				}
 				if retention == "member-controlled" {
-					rows, err := tx.QueryContext(ctx, `SELECT session_id FROM federation_records WHERE share_uid=? ORDER BY session_id`, share.UID)
+					ids, err := federationOwnedSessionIDsTx(ctx, tx, share.UID, nil)
 					if err != nil {
-						return err
-					}
-					var ids []string
-					for rows.Next() {
-						var id string
-						if err = rows.Scan(&id); err != nil {
-							rows.Close()
-							return err
-						}
-						ids = append(ids, id)
-					}
-					if err = rows.Err(); err != nil {
-						rows.Close()
-						return err
-					}
-					if err = rows.Close(); err != nil {
 						return err
 					}
 					purged, err = purgeFederationRecordsTx(ctx, tx, share.UID, ids, &pending)
@@ -265,6 +249,41 @@ func (db *DB) FederationSessionOrigins(ctx context.Context) (FederationOrigins, 
  COALESCE(sum(CASE WHEN NOT EXISTS(SELECT 1 FROM federation_records r WHERE r.session_id=s.id) AND NOT `+federationLocalOrigin+` THEN 1 ELSE 0 END),0)
  FROM sessions s WHERE s.deleted_at IS NULL`).Scan(&out.Federated, &out.HubHost, &out.Other)
 	return out, err
+}
+
+// federationOwnedSessionIDsTx enumerates one share's records. When epoch is
+// set, reconciliation processes only a bounded old-epoch page.
+func federationOwnedSessionIDsTx(ctx context.Context, tx *sql.Tx, share string, epoch *int64) ([]string, error) {
+	query := `SELECT session_id FROM federation_records WHERE share_uid=?`
+	args := []any{share}
+	if epoch != nil {
+		query += ` AND epoch<>?`
+		args = append(args, *epoch)
+	}
+	query += ` ORDER BY session_id`
+	if epoch != nil {
+		query += ` LIMIT 1000`
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // purgeFederationRecordsTx deletes only rows this share owns. Unknown and
@@ -444,24 +463,8 @@ func (db *DB) ReconcileFederationPage(ctx context.Context, enrollment, spoke, sh
 		}
 		if page.Final && end == "" {
 			// The complete scan authorizes old-epoch cleanup, bounded per call.
-			rows, err = tx.QueryContext(ctx, `SELECT session_id FROM federation_records WHERE share_uid=? AND epoch<>? ORDER BY session_id LIMIT 1000`, share, epoch)
+			old, err := federationOwnedSessionIDsTx(ctx, tx, share, &epoch)
 			if err != nil {
-				return err
-			}
-			var old []string
-			for rows.Next() {
-				var id string
-				if err = rows.Scan(&id); err != nil {
-					rows.Close()
-					return err
-				}
-				old = append(old, id)
-			}
-			if err = rows.Err(); err != nil {
-				rows.Close()
-				return err
-			}
-			if err = rows.Close(); err != nil {
 				return err
 			}
 			purged, err = purgeFederationRecordsTx(ctx, tx, share, old, &pending)

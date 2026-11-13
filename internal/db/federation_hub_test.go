@@ -317,6 +317,24 @@ func TestFederationStopPurgesOnlyOwnedAndCannotBeReactivatedByStaleManifest(t *t
 	record.Write.UsageEvents = []UsageEvent{{SessionID: "owned", Source: "federation", Model: "model", InputTokens: 42, OccurredAt: started, DedupKey: "model"}}
 	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 1, "batch", []FederationHubRecord{record})
 	require.NoError(t, err)
+	other := share
+	other.UID = "other"
+	_, err = d.PutFederationHubShare(ctx, "spoke", other)
+	require.NoError(t, err)
+	otherRecord := FederationHubRecord{UID: "other-owned", Hash: "other-hash", Remote: other.Remote, ProjectKey: other.ProjectKey, Write: SessionBatchWrite{Session: Session{ID: "other-owned", Project: other.Remote, Machine: "federated", Agent: "claude"}}}
+	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "other", "policy", 1, 1, "other-batch", []FederationHubRecord{otherRecord})
+	require.NoError(t, err)
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		if _, e := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent) VALUES('collision','local','host','claude')`); e != nil {
+			return e
+		}
+		_, e := tx.ExecContext(ctx, `INSERT INTO messages(session_id,ordinal,role,content) VALUES('collision',0,'user','local message')`)
+		return e
+	}))
+	collision := FederationHubRecord{UID: "collision", Hash: "collision-hash", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: SessionBatchWrite{Session: Session{ID: "collision", Project: share.Remote, Machine: "federated", Agent: "claude"}}}
+	refused, err := d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 2, "collision-batch", []FederationHubRecord{collision})
+	require.NoError(t, err)
+	assert.Equal(t, FederationCollision, refused.Refused["collision"])
 	filter := UsageFilter{From: "2026-01-02", To: "2026-01-02", Timezone: "UTC"}
 	warm, err := d.GetDailyUsage(ctx, filter)
 	require.NoError(t, err)
@@ -332,6 +350,11 @@ func TestFederationStopPurgesOnlyOwnedAndCannotBeReactivatedByStaleManifest(t *t
 	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='owned'), (SELECT count(*) FROM federation_records WHERE share_uid='share')`).Scan(&sessions, &records))
 	assert.Zero(t, sessions)
 	assert.Zero(t, records)
+	var otherCount, collisionCount, messages int
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT (SELECT count(*) FROM federation_records WHERE share_uid='other' AND session_id='other-owned'), (SELECT count(*) FROM sessions WHERE id='collision' AND machine='host'), (SELECT count(*) FROM messages WHERE session_id='collision' AND content='local message')`).Scan(&otherCount, &collisionCount, &messages))
+	assert.Equal(t, 1, otherCount)
+	assert.Equal(t, 1, collisionCount)
+	assert.Equal(t, 1, messages)
 	after, err := d.GetDailyUsage(ctx, filter)
 	require.NoError(t, err)
 	assert.Zero(t, after.Totals.InputTokens)

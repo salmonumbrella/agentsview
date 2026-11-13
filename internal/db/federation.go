@@ -110,24 +110,8 @@ func (db *DB) RevokeFederationEnrollment(ctx context.Context, uid string) error 
 		}
 		for _, share := range shares {
 			if share.retention == "member-controlled" {
-				rows, err = tx.QueryContext(ctx, `SELECT session_id FROM federation_records WHERE share_uid=?`, share.uid)
+				ids, err := federationOwnedSessionIDsTx(ctx, tx, share.uid, nil)
 				if err != nil {
-					return err
-				}
-				var ids []string
-				for rows.Next() {
-					var id string
-					if err = rows.Scan(&id); err != nil {
-						rows.Close()
-						return err
-					}
-					ids = append(ids, id)
-				}
-				if err = rows.Err(); err != nil {
-					rows.Close()
-					return err
-				}
-				if err = rows.Close(); err != nil {
 					return err
 				}
 				removed, err := purgeFederationRecordsTx(ctx, tx, share.uid, ids, &pending)
