@@ -24,90 +24,128 @@ import (
 )
 
 func TestFederationCredentialIsolation(t *testing.T) {
-	for _, requireAuth := range []bool{false, true} {
-		t.Run(map[bool]string{false: "auth_off", true: "auth_on"}[requireAuth], func(t *testing.T) {
-			database := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "archive.db"))
-			svc := federation.NewService("hub", "hub-a", config.FederationHubConfig{}, database)
-			enrollment, token, err := svc.Enroll(t.Context(), "spoke-a", "member-a", "")
-			require.NoError(t, err)
-			srv := New(config.Config{Host: "127.0.0.1", Port: 8080, AuthToken: "personal", RequireAuth: requireAuth}, database, nil, WithFederation(svc))
-			type operation struct{ method, path string }
-			ops := []operation{{http.MethodGet, "/"}, {http.MethodGet, "/api/ping"}, {http.MethodGet, "/debug/pprof/"}, {http.MethodGet, "/api/v1/federation/enrollments"}, {http.MethodPost, "/api/v1/federation/enrollments"}, {http.MethodPost, "/api/v1/federation/enrollments/enr-a/revoke"}}
-			for path, item := range srv.api.OpenAPI().Paths {
-				if path == federationHandshakePath {
-					continue
+	for _, role := range []string{"hub", "spoke"} {
+		for _, requireAuth := range []bool{false, true} {
+			t.Run(role+map[bool]string{false: "_auth_off", true: "_auth_on"}[requireAuth], func(t *testing.T) {
+				database := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "archive.db"))
+				svc := federation.NewService("hub", "hub-a", config.FederationHubConfig{}, database)
+				enrollment, token, err := svc.Enroll(t.Context(), "spoke-a", "member-a", "")
+				require.NoError(t, err)
+				if role == "spoke" {
+					svc = federation.NewService("spoke", "spoke-a", config.FederationHubConfig{}, database)
 				}
-				for method, present := range map[string]bool{http.MethodGet: item.Get != nil, http.MethodPost: item.Post != nil, http.MethodPut: item.Put != nil, http.MethodPatch: item.Patch != nil, http.MethodDelete: item.Delete != nil, http.MethodHead: item.Head != nil, http.MethodOptions: item.Options != nil, http.MethodTrace: item.Trace != nil} {
-					if present {
-						ops = append(ops, operation{method, path})
+				srv := New(config.Config{Host: "127.0.0.1", Port: 8080, AuthToken: "personal", RequireAuth: requireAuth}, database, nil, WithFederation(svc))
+				type operation struct{ method, path string }
+				ops := []operation{{http.MethodGet, "/"}, {http.MethodGet, "/api/ping"}, {http.MethodGet, "/debug/pprof/"}, {http.MethodGet, "/api/v1/federation/enrollments"}, {http.MethodPost, "/api/v1/federation/enrollments"}, {http.MethodPost, "/api/v1/federation/enrollments/enr-a/revoke"}}
+				for path, item := range srv.api.OpenAPI().Paths {
+					if path == federationHandshakePath {
+						continue
+					}
+					for method, present := range map[string]bool{http.MethodGet: item.Get != nil, http.MethodPost: item.Post != nil, http.MethodPut: item.Put != nil, http.MethodPatch: item.Patch != nil, http.MethodDelete: item.Delete != nil, http.MethodHead: item.Head != nil, http.MethodOptions: item.Options != nil, http.MethodTrace: item.Trace != nil} {
+						if present {
+							ops = append(ops, operation{method, path})
+						}
 					}
 				}
-			}
-			for _, op := range ops {
-				path := regexp.MustCompile(`\{[^}]+\}`).ReplaceAllString(op.path, "x")
-				for _, query := range []bool{false, true} {
-					req := httptest.NewRequest(op.method, path, nil)
-					if query {
-						q := req.URL.Query()
-						q.Set("token", token)
-						req.URL.RawQuery = q.Encode()
-					} else {
-						req.Header.Set("Authorization", "Bearer "+token)
+				for _, op := range ops {
+					path := regexp.MustCompile(`\{[^}]+\}`).ReplaceAllString(op.path, "x")
+					for _, query := range []bool{false, true} {
+						req := httptest.NewRequest(op.method, path, nil)
+						if query {
+							q := req.URL.Query()
+							q.Set("token", token)
+							req.URL.RawQuery = q.Encode()
+						} else {
+							req.Header.Set("Authorization", "Bearer "+token)
+						}
+						rec := httptest.NewRecorder()
+						srv.Handler().ServeHTTP(rec, req)
+						assert.Equal(t, http.StatusUnauthorized, rec.Code, "%s %s query=%v", op.method, path, query)
+						assert.Equal(t, "Unauthorized\n", rec.Body.String())
 					}
+				}
+				if role == "spoke" {
+					req := httptest.NewRequest(http.MethodGet, federationHandshakePath, nil)
+					req.Header.Set("Authorization", "Bearer "+token)
 					rec := httptest.NewRecorder()
 					srv.Handler().ServeHTTP(rec, req)
-					assert.Equal(t, http.StatusUnauthorized, rec.Code, "%s %s query=%v", op.method, path, query)
+					assert.Equal(t, http.StatusUnauthorized, rec.Code)
 					assert.Equal(t, "Unauthorized\n", rec.Body.String())
+					return
 				}
-			}
-			var schemeResults []*httptest.ResponseRecorder
-			for _, header := range []string{token, "bearer " + token} {
-				req := httptest.NewRequest(http.MethodGet, federationHandshakePath, nil)
-				req.Header.Set("Authorization", header)
+				var schemeResults []*httptest.ResponseRecorder
+				for _, header := range []string{token, "bearer " + token} {
+					req := httptest.NewRequest(http.MethodGet, federationHandshakePath, nil)
+					req.Header.Set("Authorization", header)
+					req.Header.Set(federation.SpokeArchiveHeader, "spoke-a")
+					rec := httptest.NewRecorder()
+					srv.Handler().ServeHTTP(rec, req)
+					assert.Equal(t, http.StatusUnauthorized, rec.Code)
+					assert.Equal(t, "Unauthorized\n", rec.Body.String())
+					rows, err := svc.List(t.Context())
+					require.NoError(t, err)
+					assert.Empty(t, rows[0].LastHandshakeAt)
+					schemeResults = append(schemeResults, rec)
+				}
+				req := httptest.NewRequest(http.MethodGet, "/api/v1/federation/handshake", nil)
+				req.Header.Set("Authorization", "Bearer "+token)
 				req.Header.Set(federation.SpokeArchiveHeader, "spoke-a")
 				rec := httptest.NewRecorder()
 				srv.Handler().ServeHTTP(rec, req)
-				assert.Equal(t, http.StatusUnauthorized, rec.Code)
-				assert.Equal(t, "Unauthorized\n", rec.Body.String())
-				rows, err := svc.List(t.Context())
-				require.NoError(t, err)
-				assert.Empty(t, rows[0].LastHandshakeAt)
-				schemeResults = append(schemeResults, rec)
+				assert.Equal(t, http.StatusOK, rec.Code)
+				wrong := httptest.NewRequest(http.MethodGet, "/api/v1/federation/handshake", nil)
+				wrong.Header.Set("Authorization", "Bearer "+token)
+				wrong.Header.Set(federation.SpokeArchiveHeader, "wrong")
+				wrongResult := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(wrongResult, wrong)
+				assert.Equal(t, http.StatusUnauthorized, wrongResult.Code)
+				for _, schemeResult := range schemeResults {
+					assert.Equal(t, wrongResult.Body.String(), schemeResult.Body.String())
+					assert.Equal(t, wrongResult.Header(), schemeResult.Header())
+				}
+				require.NoError(t, svc.Revoke(t.Context(), enrollment.UID))
+				var body string
+				for _, pair := range [][2]string{{"", "spoke-a"}, {"avfc_bad", "spoke-a"}, {token, "wrong"}, {token, "spoke-a"}, {"personal", "spoke-a"}} {
+					req = httptest.NewRequest(http.MethodGet, "/api/v1/federation/handshake", nil)
+					req.Header.Set("Authorization", "Bearer "+pair[0])
+					req.Header.Set(federation.SpokeArchiveHeader, pair[1])
+					rec = httptest.NewRecorder()
+					srv.Handler().ServeHTTP(rec, req)
+					assert.Equal(t, http.StatusUnauthorized, rec.Code)
+					b, _ := io.ReadAll(rec.Result().Body)
+					if body == "" {
+						body = string(b)
+					}
+					assert.Equal(t, body, string(b))
+					assert.Equal(t, wrongResult.Body.String(), string(b))
+					assert.Equal(t, wrongResult.Header(), rec.Header())
+				}
+			})
+		}
+	}
+}
+
+func TestFederationOffPreservesOrdinaryAuth(t *testing.T) {
+	for _, required := range []bool{false, true} {
+		database := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "archive.db"))
+		srv := New(config.Config{Host: "127.0.0.1", Port: 8080, AuthToken: "personal", RequireAuth: required}, database, nil)
+		request := func(header string) *httptest.ResponseRecorder {
+			req := httptest.NewRequest(http.MethodGet, "/api/ping", nil)
+			if header != "" {
+				req.Header.Set("Authorization", header)
 			}
-			req := httptest.NewRequest(http.MethodGet, "/api/v1/federation/handshake", nil)
-			req.Header.Set("Authorization", "Bearer "+token)
-			req.Header.Set(federation.SpokeArchiveHeader, "spoke-a")
 			rec := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(rec, req)
-			assert.Equal(t, http.StatusOK, rec.Code)
-			wrong := httptest.NewRequest(http.MethodGet, "/api/v1/federation/handshake", nil)
-			wrong.Header.Set("Authorization", "Bearer "+token)
-			wrong.Header.Set(federation.SpokeArchiveHeader, "wrong")
-			wrongResult := httptest.NewRecorder()
-			srv.Handler().ServeHTTP(wrongResult, wrong)
-			assert.Equal(t, http.StatusUnauthorized, wrongResult.Code)
-			for _, schemeResult := range schemeResults {
-				assert.Equal(t, wrongResult.Body.String(), schemeResult.Body.String())
-				assert.Equal(t, wrongResult.Header(), schemeResult.Header())
-			}
-			require.NoError(t, svc.Revoke(t.Context(), enrollment.UID))
-			var body string
-			for _, pair := range [][2]string{{"", "spoke-a"}, {"avfc_bad", "spoke-a"}, {token, "wrong"}, {token, "spoke-a"}, {"personal", "spoke-a"}} {
-				req = httptest.NewRequest(http.MethodGet, "/api/v1/federation/handshake", nil)
-				req.Header.Set("Authorization", "Bearer "+pair[0])
-				req.Header.Set(federation.SpokeArchiveHeader, pair[1])
-				rec = httptest.NewRecorder()
-				srv.Handler().ServeHTTP(rec, req)
-				assert.Equal(t, http.StatusUnauthorized, rec.Code)
-				b, _ := io.ReadAll(rec.Result().Body)
-				if body == "" {
-					body = string(b)
-				}
-				assert.Equal(t, body, string(b))
-				assert.Equal(t, wrongResult.Body.String(), string(b))
-				assert.Equal(t, wrongResult.Header(), rec.Header())
-			}
-		})
+			return rec
+		}
+		got := request("Bearer avfc_x")
+		if required {
+			assert.Equal(t, http.StatusUnauthorized, got.Code)
+		} else {
+			plain := request("")
+			assert.Equal(t, plain.Code, got.Code)
+			assert.Equal(t, plain.Body.String(), got.Body.String())
+		}
 	}
 }
 
