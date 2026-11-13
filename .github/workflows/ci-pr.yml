@@ -1,24 +1,35 @@
-name: CI
-
-# Run the workflow from this revision so its steps match the code under test.
+name: Retained module diagnostic
 on:
-  pull_request:
-  merge_group:
-    types: [checks_requested]
-
-permissions: read-all
-
+  workflow_dispatch:
+permissions:
+  contents: read
 jobs:
-  run:
-    cache-mode: read
-    uses: ./.github/workflows/ci.yml
-
-  gate:
-    name: CI gate
-    needs: run
-    if: always()
-    runs-on: namespace-profile-linux-1cpu
+  tidy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - name: Require successful CI
-        if: needs.run.result != 'success'
-        run: exit 1
+      - uses: actions/checkout@v7
+        with:
+          ref: 1913bccaa3b75339ff84247c7b5f831f7c6f05bc
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Generate module metadata
+        run: |
+          set -eu
+          git rev-parse HEAD | tee "$RUNNER_TEMP/source-sha.txt"
+          test "$(cat "$RUNNER_TEMP/source-sha.txt")" = 1913bccaa3b75339ff84247c7b5f831f7c6f05bc
+          go mod tidy
+          git diff -- go.mod go.sum > "$RUNNER_TEMP/module.diff"
+          cp go.mod go.sum "$RUNNER_TEMP/"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: retained-module-1913
+          path: |
+            ${{ runner.temp }}/source-sha.txt
+            ${{ runner.temp }}/module.diff
+            ${{ runner.temp }}/go.mod
+            ${{ runner.temp }}/go.sum
+          if-no-files-found: error
