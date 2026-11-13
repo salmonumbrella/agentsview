@@ -111,11 +111,11 @@ first. The credential file must be mode 0600; a permissive mode is refused.
 
 The hub operator can use `agentsview federation enrollments list` and
 `agentsview federation revoke <enrollment-uid>`. The list shows `enrolled` for
-a member that has never contacted the hub, `linked` after contact, and `revoked`
+a member that has never contacted the hub, `contacted` after any contact, and `revoked`
 after revocation. `last_handshake_at` records the last contact and is updated by
-join and status. The member can run `agentsview federation leave` to remove the
+join and status. A join the spoke refuses still counts as contact. The member can run `agentsview federation leave` to remove the
 local link; the credential file remains in place. The hub is not told when a
-member leaves, so revoke that enrollment.
+member leaves, so a `contacted` install may have left; revoke that enrollment.
 
 ### Find a command by task
 

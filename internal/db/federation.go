@@ -66,7 +66,7 @@ func (db *DB) ListFederationEnrollments(ctx context.Context) ([]FederationEnroll
 		if e.RevokedAt != "" {
 			e.State = "revoked"
 		} else if e.LastHandshakeAt != "" {
-			e.State = "linked"
+			e.State = "contacted"
 		}
 		result = append(result, e)
 	}
