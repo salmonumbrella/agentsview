@@ -327,13 +327,13 @@ func (db *DB) CopyArchiveIdentityFrom(ctx context.Context, sourcePath string) er
 		createdAt string
 		updatedAt string
 	}
-	metadata := make(map[string]metadataRow, 3)
+	metadata := make(map[string]metadataRow, 4)
 	// A rebuilt archive stays as cold or active as the archive it replaces.
 	rows, err := conn.QueryContext(ctx, `
 		SELECT key, value, created_at, updated_at
 		FROM identity_source.archive_metadata
-		WHERE key IN (?, ?, ?)`,
-		archiveMetadataArchiveIDKey, archiveMetadataArchiveSaltKey, conversationExportInitializedKey,
+		WHERE key IN (?, ?, ?, ?)`,
+		archiveMetadataArchiveIDKey, archiveMetadataArchiveSaltKey, conversationExportInitializedKey, pulseAuthorityMetadataKey,
 	)
 	if err != nil {
 		return fmt.Errorf("reading archive identity source: %w", err)
@@ -373,6 +373,7 @@ func (db *DB) CopyArchiveIdentityFrom(ctx context.Context, sourcePath string) er
 		archiveMetadataArchiveIDKey,
 		archiveMetadataArchiveSaltKey,
 		conversationExportInitializedKey,
+		pulseAuthorityMetadataKey,
 	} {
 		row, ok := metadata[key]
 		if !ok {
@@ -389,6 +390,10 @@ func (db *DB) CopyArchiveIdentityFrom(ctx context.Context, sourcePath string) er
 		); err != nil {
 			return fmt.Errorf("copying archive identity %s: %w", key, err)
 		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO archive_metadata (key, value)
+		VALUES ('federation_pulse_requires_rejoin', '1') ON CONFLICT(key) DO UPDATE SET value='1'`); err != nil {
+		return fmt.Errorf("marking staged pulse authority: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing archive identity copy: %w", err)

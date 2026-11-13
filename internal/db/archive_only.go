@@ -13,10 +13,26 @@ var ErrArchiveOnly = errors.New("archive-only database: source sync and publicat
 // EnableArchiveOnly permanently marks a stopped or staged archive before its
 // first startup. There is deliberately no runtime or configuration override.
 func (db *DB) EnableArchiveOnly(ctx context.Context) error {
+	return db.enableArchiveOnly(ctx, false)
+}
+
+// EnableManagedArchiveOnly records that a restored or seeded copy must rejoin
+// its original pulse authority before it can become a publisher.
+func (db *DB) EnableManagedArchiveOnly(ctx context.Context) error {
+	return db.enableArchiveOnly(ctx, true)
+}
+
+func (db *DB) enableArchiveOnly(ctx context.Context, requiresRejoin bool) error {
 	return db.Update(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO archive_metadata (key, value)
  VALUES ('archive_only', '1') ON CONFLICT(key) DO UPDATE SET value = '1'`); err != nil {
 			return err
+		}
+		if requiresRejoin {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO archive_metadata (key, value)
+ VALUES ('federation_pulse_requires_rejoin', '1') ON CONFLICT(key) DO UPDATE SET value = '1'`); err != nil {
+				return err
+			}
 		}
 		version, _, err := readUserVersion(ctx, tx)
 		if err != nil {

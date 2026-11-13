@@ -32,14 +32,15 @@ func (db *DB) bindPulseAuthority(ctx context.Context, home string, allowOriginal
 	if err != nil {
 		return empty, err
 	}
-	var exists, archiveOnly bool
+	var exists, archiveOnly, requiresRejoin bool
 	err = db.getReader().QueryRowContext(ctx, `SELECT
 		EXISTS(SELECT 1 FROM archive_metadata WHERE key=?),
-		EXISTS(SELECT 1 FROM archive_metadata WHERE key='archive_only' AND value='1')`, pulseAuthorityMetadataKey).Scan(&exists, &archiveOnly)
+		EXISTS(SELECT 1 FROM archive_metadata WHERE key='archive_only' AND value='1'),
+		EXISTS(SELECT 1 FROM archive_metadata WHERE key='federation_pulse_requires_rejoin' AND value='1')`, pulseAuthorityMetadataKey).Scan(&exists, &archiveOnly, &requiresRejoin)
 	if err != nil {
 		return empty, err
 	}
-	if !exists && (!allowOriginal || archiveOnly) {
+	if requiresRejoin || (!exists && (!allowOriginal || archiveOnly)) {
 		return empty, errors.New("pulse authority requires rejoin")
 	}
 	original, err := filepath.Abs(db.Path())
@@ -53,6 +54,13 @@ func (db *DB) bindPulseAuthority(ctx context.Context, home string, allowOriginal
 	return withPulseAuthorityLock(ctx, path, !exists && allowOriginal, func() (pulseAuthorityBinding, error) {
 		var binding pulseAuthorityBinding
 		err := db.Update(ctx, func(tx *sql.Tx) error {
+			var pending bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM archive_metadata WHERE key='federation_pulse_requires_rejoin' AND value='1')`).Scan(&pending); err != nil {
+				return err
+			}
+			if pending {
+				return errors.New("pulse authority requires rejoin")
+			}
 			var currentID string
 			if err := tx.QueryRowContext(ctx, `SELECT value FROM archive_metadata WHERE key=?`, archiveMetadataArchiveIDKey).Scan(&currentID); err != nil {
 				return err

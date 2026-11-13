@@ -392,7 +392,7 @@ func verifyRestoredArchive(ctx context.Context, path string, settings RecoverySe
 		return report, err
 	}
 	defer func() { retErr = errors.Join(retErr, database.Close()) }()
-	if err := database.EnableArchiveOnly(ctx); err != nil {
+	if err := database.EnableManagedArchiveOnly(ctx); err != nil {
 		return report, fmt.Errorf("marking restored archive: %w", err)
 	}
 	database.SetToolResultImages(settings.ToolResultImages)

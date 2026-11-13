@@ -115,6 +115,9 @@ func TestManagedCopiesKeepFederationPulseHistory(t *testing.T) {
 			copied, err := db.OpenIsolatedContext(ctx, filepath.Join(target, "sessions.db"))
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, copied.Close()) })
+			var rejoin string
+			require.NoError(t, copied.Reader().QueryRow(ctx, `SELECT value FROM archive_metadata WHERE key='federation_pulse_requires_rejoin'`).Scan(&rejoin))
+			assert.Equal(t, "1", rejoin)
 			if method == "restore-old-after-revoke" {
 				revoked, err := copied.GetSessionFull(ctx, "a")
 				require.NoError(t, err)

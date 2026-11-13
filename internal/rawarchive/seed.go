@@ -132,7 +132,7 @@ func importSeed(ctx context.Context, path string, spec ImportSpec, settings Reco
 		return report, err
 	}
 	defer func() { retErr = errors.Join(retErr, database.Close()) }()
-	if err := database.EnableArchiveOnly(ctx); err != nil {
+	if err := database.EnableManagedArchiveOnly(ctx); err != nil {
 		return report, err
 	}
 	database.SetToolResultImages(settings.ToolResultImages)
