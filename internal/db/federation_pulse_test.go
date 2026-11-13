@@ -377,7 +377,7 @@ func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T)
 // These regressions describe the accepted cross-release privacy requirement.
 // The publication policy is still open; no admission bypass is used here.
 func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
-	for _, scenario := range []string{"window", "reverse-window", "update", "copy-before-publication", "cancel-before-admission", "concurrent", "purge-regrant", "untraced-write", "reopen"} {
+	for _, scenario := range []string{"window", "reverse-window", "update", "copy-before-publication", "cancel-before-admission", "concurrent", "purge-regrant", "untraced-write", "reopen", "second-handle"} {
 		t.Run(scenario, func(t *testing.T) {
 			d := testDB(t)
 			ctx := t.Context()
@@ -393,7 +393,7 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 				require.NoError(t, err)
 			}
 			now := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
-			if scenario == "window" || scenario == "reverse-window" || scenario == "copy-before-publication" || scenario == "cancel-before-admission" || scenario == "concurrent" || scenario == "purge-regrant" || scenario == "reopen" {
+			if scenario == "window" || scenario == "reverse-window" || scenario == "copy-before-publication" || scenario == "cancel-before-admission" || scenario == "concurrent" || scenario == "purge-regrant" || scenario == "reopen" || scenario == "second-handle" {
 				older := "2026-07-28T09:00:00Z"
 				cost := money.Money{Microdollars: 70}
 				record := FederationHubRecord{UID: "a-older", Hash: "initial", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: "a-older", Project: "example/repo", Agent: "codex", StartedAt: &older}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: 7, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: older, DedupKey: "a-older"}}}}
@@ -522,6 +522,18 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 					assert.Nil(t, later.Totals)
 					return
 				}
+				assert.True(t, later.Suppressed)
+				assert.Empty(t, later.Projects)
+				assert.Nil(t, later.Totals["tokens"].Value)
+				assert.Nil(t, later.Totals["cost_microdollars"].Value)
+				return
+			}
+			if scenario == "second-handle" {
+				other, err := OpenIsolated(ctx, d.Path())
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, other.Close()) })
+				later, err := other.readFederationPulse(ctx, "2026-07-28", 3, now)
+				require.NoError(t, err)
 				assert.True(t, later.Suppressed)
 				assert.Empty(t, later.Projects)
 				assert.Nil(t, later.Totals["tokens"].Value)
