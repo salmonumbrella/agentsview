@@ -377,7 +377,7 @@ func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T)
 // These regressions describe the accepted cross-release privacy requirement.
 // The publication policy is still open; no admission bypass is used here.
 func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
-	for _, scenario := range []string{"window", "reverse-window", "update"} {
+	for _, scenario := range []string{"window", "reverse-window", "update", "copy-before-publication", "cancel-before-admission"} {
 		t.Run(scenario, func(t *testing.T) {
 			d := testDB(t)
 			ctx := t.Context()
@@ -393,12 +393,30 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 				require.NoError(t, err)
 			}
 			now := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
-			if scenario == "window" || scenario == "reverse-window" {
+			if scenario == "window" || scenario == "reverse-window" || scenario == "copy-before-publication" || scenario == "cancel-before-admission" {
 				older := "2026-07-28T09:00:00Z"
 				cost := money.Money{Microdollars: 70}
 				record := FederationHubRecord{UID: "a-older", Hash: "initial", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: "a-older", Project: "example/repo", Agent: "codex", StartedAt: &older}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: 7, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: older, DedupKey: "a-older"}}}}
 				_, err := d.CommitFederationBatch(ctx, "e-a", "s-a", "h-a", "policy", 1, 2, "batch-2", []FederationHubRecord{record})
 				require.NoError(t, err)
+			}
+			var copied *DB
+			if scenario == "copy-before-publication" {
+				copied = testDB(t)
+				// The copy is made before the live archive publishes its first result.
+				require.NoError(t, copied.CopyArchiveIdentityFrom(ctx, d.Path()))
+				require.NoError(t, copied.CopyFederationStateFrom(ctx, d.Path()))
+				count, err := copied.CopyOrphanedDataFrom(ctx, d.Path())
+				require.NoError(t, err)
+				assert.Equal(t, 4, count)
+			}
+			if scenario == "cancel-before-admission" {
+				canceled, cancel := context.WithCancel(ctx)
+				cancel()
+				result, err := d.readFederationPulse(canceled, "2026-07-28", 3, now)
+				require.ErrorIs(t, err, context.Canceled)
+				assert.Empty(t, result.Projects)
+				assert.Nil(t, result.Totals)
 			}
 			firstSince := "2026-07-29"
 			if scenario == "reverse-window" {
@@ -415,6 +433,19 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 				assert.Equal(t, Ptr(int64(60)), first.Totals["tokens"].Value)
 				assert.Equal(t, Ptr(int64(600)), first.Totals["cost_microdollars"].Value)
 			}
+			if scenario == "copy-before-publication" {
+				later, err := copied.readFederationPulse(ctx, "2026-07-28", 3, now)
+				if err != nil {
+					assert.Empty(t, later.Projects)
+					assert.Nil(t, later.Totals)
+					return
+				}
+				assert.True(t, later.Suppressed)
+				assert.Empty(t, later.Projects)
+				assert.Nil(t, later.Totals["tokens"].Value)
+				assert.Nil(t, later.Totals["cost_microdollars"].Value)
+				return
+			}
 			if scenario == "update" {
 				cost := money.Money{Microdollars: 170}
 				record := FederationHubRecord{UID: "a", Hash: "changed", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: "a", Project: "example/repo", Agent: "codex", StartedAt: &start}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: 17, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: start, DedupKey: "a"}}}}
@@ -422,12 +453,12 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 				require.NoError(t, err)
 			}
 			date := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
-			if scenario == "window" {
+			if scenario == "window" || scenario == "cancel-before-admission" {
 				date = date.AddDate(0, 0, -1)
 			}
 			day, err := d.ExportReportingDay(ctx, ReportingExportOptions{Date: date, Now: now, SchemaVersion: export.ReportingJointSchemaVersion})
 			require.NoError(t, err)
-			if scenario == "window" {
+			if scenario == "window" || scenario == "cancel-before-admission" {
 				assert.EqualValues(t, 7, day.Hours[9].Usage.Totals.InputTokens)
 				assert.EqualValues(t, 70, day.Hours[9].Usage.Totals.Cost.Microdollars)
 			} else if scenario == "reverse-window" {
@@ -438,7 +469,7 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 				assert.EqualValues(t, 670, day.Hours[9].Usage.Totals.Cost.Microdollars)
 			}
 			since := "2026-07-29"
-			if scenario == "window" {
+			if scenario == "window" || scenario == "cancel-before-admission" {
 				since = "2026-07-28"
 			}
 			later, err := d.readFederationPulse(ctx, since, 3, now)
