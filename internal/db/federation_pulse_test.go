@@ -784,3 +784,40 @@ func TestFederationPulseLinkFactsDoNotExposeRefusalDetails(t *testing.T) {
 		assert.NotContains(t, string(encoded), secret)
 	}
 }
+
+func TestFederationPulseAndPublicExportShareMessageLessExistence(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	for _, name := range []string{"a", "b", "c"} {
+		enrollment, spoke, share := "e-"+name, "s-"+name, "h-"+name
+		require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: name, CredentialSHA256: "digest-" + name}))
+		_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+		require.NoError(t, err)
+		start := "2026-07-28T09:00:00Z"
+		record := FederationHubRecord{UID: name, Hash: "hash", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: name, Project: "example/repo", Agent: "codex", StartedAt: &start}, Signals: SessionSignalUpdate{Outcome: "unknown"}}}
+		_, err = d.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", []FederationHubRecord{record})
+		require.NoError(t, err)
+	}
+	now := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	day, err := d.ExportReportingDay(ctx, ReportingExportOptions{Date: now.AddDate(0, 0, -1), Now: now, SchemaVersion: export.ReportingJointSchemaVersion})
+	require.NoError(t, err)
+	require.Len(t, day.Hours, 24)
+	hour := day.Hours[9]
+	assert.Equal(t, 3, hour.Activity.Totals.NewSessions)
+	assert.Equal(t, 1, hour.Activity.Totals.NewProjects)
+	assert.Equal(t, 3, hour.Activity.Totals.NewUntimedSessions)
+	assert.Zero(t, hour.Activity.Totals.AgentMinutes)
+	assert.Empty(t, hour.Joint.Cells)
+	rng, err := d.ExportReportingRange(ctx, now)
+	require.NoError(t, err)
+	assert.Equal(t, Ptr("2026-07-28"), rng.EarliestDate)
+	pulse, err := d.readFederationPulse(ctx, "2026-07-28", 3, now)
+	require.NoError(t, err)
+	assert.Equal(t, Ptr(int64(3)), pulse.Totals["sessions"].Value)
+	assert.Equal(t, Ptr(int64(1)), pulse.Totals["active_projects"].Value)
+	assert.Equal(t, "unavailable", pulse.Totals["tokens"].State)
+	require.Len(t, pulse.Outcomes, 1)
+	assert.Equal(t, "unknown", pulse.Outcomes[0].Key)
+	assert.Equal(t, Ptr(int64(3)), pulse.Outcomes[0].Metrics["sessions"].Value)
+	assert.Equal(t, int64(hour.Activity.Totals.NewSessions), *pulse.Totals["sessions"].Value)
+}
