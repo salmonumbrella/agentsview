@@ -258,6 +258,25 @@ func TestHubPulseProtectsWholeSummaryAfterOneMemberChanges(t *testing.T) {
 			default:
 				assert.Equal(t, db.FederationPulseMetric{Value: new(int64(1500)), State: "available"}, q.Agents[0].Metrics["cost_microdollars"])
 			}
+			if dimension == "partial-to-known" {
+				require.Len(t, q.Models, 2)
+			} else {
+				require.Len(t, q.Models, 1)
+			}
+			assert.Equal(t, "model", q.Models[0].Key)
+			assert.Equal(t, db.FederationPulseMetric{Value: new(int64(3)), State: "available"}, q.Models[0].Metrics["sessions"])
+			assert.Equal(t, db.FederationPulseMetric{Value: new(int64(150)), State: "available"}, q.Models[0].Metrics["tokens"])
+			if dimension == "zero-to-unknown" {
+				assert.Equal(t, db.FederationPulseMetric{Value: new(int64(0)), State: "available"}, q.Models[0].Metrics["cost_microdollars"])
+			} else {
+				assert.Equal(t, db.FederationPulseMetric{Value: new(int64(1500)), State: "available"}, q.Models[0].Metrics["cost_microdollars"])
+			}
+			if dimension == "partial-to-known" {
+				assert.Equal(t, "unpriced", q.Models[1].Key)
+				assert.Equal(t, db.FederationPulseMetric{Value: new(int64(3)), State: "available"}, q.Models[1].Metrics["sessions"])
+				assert.Equal(t, db.FederationPulseMetric{Value: new(int64(3)), State: "available"}, q.Models[1].Metrics["tokens"])
+				assert.Equal(t, db.FederationPulseMetric{State: "unavailable"}, q.Models[1].Metrics["cost_microdollars"])
+			}
 			require.Len(t, q.Categories, 1)
 			assert.Equal(t, "interactive", q.Categories[0].Key)
 			assert.Equal(t, db.FederationPulseMetric{Value: new(int64(3)), State: "available"}, q.Categories[0].Metrics["sessions"])
