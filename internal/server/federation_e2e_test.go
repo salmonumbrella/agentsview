@@ -284,7 +284,10 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	// A local hub row with the incoming ID is never overwritten and the
 	// acknowledged refusal is retained rather than retried on the next pass.
 	require.NoError(t, hubDB.Update(ctx, func(tx *sql.Tx) error {
-		_, e := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,message_count) VALUES('collision','hub-local','hub-host','claude',9)`)
+		if _, e := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,message_count) VALUES('collision','hub-local','hub-host','claude',9)`); e != nil {
+			return e
+		}
+		_, e := tx.ExecContext(ctx, `INSERT INTO messages(session_id,ordinal,role,content) VALUES('collision',0,'user','local message')`)
 		return e
 	}))
 	require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
@@ -356,11 +359,24 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	assert.Equal(t, "unconfirmed", afterAttempt["session-b"].State)
 	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/exclusions", map[string]string{"session_id": "session-a"}, nil))
 	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/shares/"+shares[0].UID+"/pause", nil, nil))
-	beforePause := batches
 	var paused federation.PushResult
 	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &paused))
 	assert.Zero(t, paused.Sent)
-	assert.Equal(t, beforePause, batches)
+	var spokeCount, hubCount, hubUsage int
+	require.NoError(t, spokeDB.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='session-a'`).Scan(&spokeCount))
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='session-a'), (SELECT count(*) FROM usage_events WHERE session_id='session-a')`).Scan(&hubCount, &hubUsage))
+	assert.Equal(t, 1, spokeCount, "exclusion must preserve the local session")
+	assert.Zero(t, hubCount, "exclusion must remove the delivered session")
+	assert.Zero(t, hubUsage, "exclusion must remove delivered usage")
+	require.Equal(t, http.StatusOK, request(http.MethodDelete, "/api/v1/federation/shares/"+shares[0].UID, nil, nil))
+	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, nil))
+	var owned, collisionMessages int
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT (SELECT count(*) FROM federation_records WHERE share_uid=?), (SELECT count(*) FROM messages WHERE session_id='collision' AND content='local message')`, shares[0].UID).Scan(&owned, &collisionMessages))
+	assert.Zero(t, owned, "withdrawal must remove hub record receipts")
+	assert.Equal(t, 1, collisionMessages, "a refused local session must retain its messages")
+	ledger, err = spokeDB.FederationLedger(ctx, shares[0].UID)
+	require.NoError(t, err)
+	assert.NotEmpty(t, ledger, "withdrawal must preserve local delivery accounting")
 	assertArchiveHasNoCanary(t, hubDB)
 }
 
