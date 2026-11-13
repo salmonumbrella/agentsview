@@ -20,6 +20,7 @@ import (
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/federation"
+	"go.kenn.io/agentsview/internal/money"
 	"go.kenn.io/agentsview/internal/server"
 	"go.kenn.io/agentsview/internal/testutil"
 )
@@ -432,4 +433,61 @@ func TestFederationPulseCommandStoredRefusalsAcrossShares(t *testing.T) {
 		assert.NotContains(t, jsonOut, secret)
 		assert.NotContains(t, textOut, secret)
 	}
+}
+
+func TestFederationPulseCommandProtectsPublishedHistory(t *testing.T) {
+	dir := testDataDir(t)
+	t.Setenv("AGENTSVIEW_NO_DAEMON", "1")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.toml"), []byte("[federation]\nrole = 'hub'\n"), 0600))
+	database, err := db.OpenIsolated(t.Context(), filepath.Join(dir, "sessions.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, database.Close()) })
+	ctx := t.Context()
+	started := "2020-07-29T09:00:00Z"
+	for i, name := range []string{"a", "b", "c"} {
+		enrollment, spoke, share := "e-"+name, "s-"+name, "h-"+name
+		require.NoError(t, database.CreateFederationEnrollment(ctx, db.FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: name, CredentialSHA256: "digest-" + name}))
+		_, err := database.PutFederationHubShare(ctx, spoke, db.FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+		require.NoError(t, err)
+		cost := money.Money{Microdollars: int64((i + 1) * 100)}
+		record := db.FederationHubRecord{UID: name, Hash: "initial", Remote: "example/repo", ProjectKey: "project", Write: db.SessionBatchWrite{Session: db.Session{ID: name, Project: "example/repo", Agent: "codex", StartedAt: &started}, Signals: db.SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []db.UsageEvent{{Source: "fixture", Model: "model", InputTokens: (i + 1) * 10, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: started, DedupKey: name}}}}
+		_, err = database.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", []db.FederationHubRecord{record})
+		require.NoError(t, err)
+	}
+	svc := federation.NewService("hub", "archive", config.FederationHubConfig{MinGroupSize: 3}, database)
+	daemon := httptest.NewUnstartedServer(nil)
+	port := daemon.Listener.Addr().(*net.TCPAddr).Port
+	srv := server.New(config.Config{Host: "127.0.0.1", Port: port}, database, nil, server.WithFederation(svc))
+	daemon.Config.Handler = srv.Handler()
+	daemon.Start()
+	t.Cleanup(daemon.Close)
+	ep := serverEndpoint(t, daemon)
+	_, err = WriteDaemonRuntime(dir, ep.Host, ep.Port, version, false)
+	require.NoError(t, err)
+	run := func(args ...string) string {
+		t.Helper()
+		out, err := executeCommand(newRootCommand(), append([]string{"federation", "pulse", "--since", "2020-07-29"}, args...)...)
+		require.NoError(t, err)
+		return out
+	}
+	var first db.FederationPulse
+	require.NoError(t, json.Unmarshal([]byte(run("--json")), &first))
+	require.NotNil(t, first.Totals["tokens"].Value)
+	assert.EqualValues(t, 60, *first.Totals["tokens"].Value)
+	require.NotNil(t, first.Totals["cost_microdollars"].Value)
+	assert.EqualValues(t, 600, *first.Totals["cost_microdollars"].Value)
+	cost := money.Money{Microdollars: 170}
+	record := db.FederationHubRecord{UID: "a", Hash: "changed", Remote: "example/repo", ProjectKey: "project", Write: db.SessionBatchWrite{Session: db.Session{ID: "a", Project: "example/repo", Agent: "codex", StartedAt: &started}, Signals: db.SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []db.UsageEvent{{Source: "fixture", Model: "model", InputTokens: 17, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: started, DedupKey: "a"}}}}
+	_, err = database.CommitFederationBatch(ctx, "e-a", "s-a", "h-a", "policy", 1, 2, "changed", []db.FederationHubRecord{record})
+	require.NoError(t, err)
+	var later db.FederationPulse
+	require.NoError(t, json.Unmarshal([]byte(run("--json")), &later))
+	assert.True(t, later.Suppressed)
+	assert.Empty(t, later.Projects)
+	assert.Equal(t, "suppressed", later.Totals["tokens"].State)
+	assert.Nil(t, later.Totals["tokens"].Value)
+	assert.Nil(t, later.Totals["cost_microdollars"].Value)
+	text := run()
+	assert.Contains(t, text, "Some values are withheld")
+	assert.NotContains(t, text, "Project: project")
 }
