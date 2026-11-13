@@ -67,7 +67,7 @@ func TestStopRetriesAfterHubEpochAhead(t *testing.T) {
 }
 
 func TestRetiredCleanupFailureDoesNotBlockCurrentShare(t *testing.T) {
-	for _, fault := range []string{"missing credential", "offline", "revoked", "identity mismatch"} {
+	for _, fault := range []string{"missing credential", "offline", "revoked", "identity mismatch", "retained generation"} {
 		t.Run(fault, func(t *testing.T) {
 			ctx := t.Context()
 			archive, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "archive.db"))
@@ -128,6 +128,10 @@ func TestRetiredCleanupFailureDoesNotBlockCurrentShare(t *testing.T) {
 			require.NoError(t, archive.PutFederationLink(ctx, old))
 			require.NoError(t, archive.PutFederationShare(ctx, db.FederationShare{UID: "old-share", LinkUID: old.UID, NormalizedRemote: "github.com/example/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: string(consent), PolicyDigest: digest}))
 			require.NoError(t, archive.DeleteFederationLink(ctx))
+			if fault == "retained generation" {
+				require.NoError(t, archive.RecordFederationDelivery(ctx, "old-share", []db.FederationDelivery{{RecordUID: "old-missing", SessionID: "old-missing", Hash: "old", State: "sent"}}))
+				require.NoError(t, archive.ReceiptFederationStop(ctx, old.UID, "old-share", "retained", 1, 0))
+			}
 			current := db.FederationLink{UID: "new", HubOrigin: hub.URL, HubArchiveID: "hub-b", EnrollmentUID: "enr-b", Member: "member", TokenFile: file, ProtocolVersion: ProtocolVersion, State: "active"}
 			require.NoError(t, archive.PutFederationLink(ctx, current))
 			require.NoError(t, archive.PutFederationShare(ctx, db.FederationShare{UID: "new-share", LinkUID: current.UID, NormalizedRemote: "github.com/example/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: string(consent), PolicyDigest: digest}))
@@ -145,13 +149,18 @@ func TestRetiredCleanupFailureDoesNotBlockCurrentShare(t *testing.T) {
 				return nil
 			}))
 			svc := NewService("spoke", "spoke", policy, archive)
-			result, err := svc.Push(ctx)
-			require.Error(t, err)
+			result, pushErr := svc.Push(ctx)
+			require.Error(t, pushErr)
 			assert.Equal(t, 1, result.Sent)
 			assert.Equal(t, []string{"selected"}, delivered)
 			pending, err := archive.GetFederationShare(ctx, old.UID, "old-share")
 			require.NoError(t, err)
-			assert.Equal(t, "pending", pending.StopReceipt)
+			if fault == "retained generation" {
+				assert.Equal(t, "retained", pending.StopReceipt)
+				assert.ErrorContains(t, pushErr, "generation changed")
+			} else {
+				assert.Equal(t, "pending", pending.StopReceipt)
+			}
 		})
 	}
 }
