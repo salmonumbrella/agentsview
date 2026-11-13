@@ -369,6 +369,39 @@ func TestFederationPulseUnionsSessionsAcrossDaysAndClipsCutoff(t *testing.T) {
 	assert.Equal(t, Ptr(int64(90)), pulse.Totals["tokens"].Value)
 }
 
+func TestFederationPulseKeepsRetainedAndOmitsPurgedContributions(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	for _, f := range []struct {
+		id, retention string
+		tokens        int
+	}{
+		{"a", "org-retained", 10}, {"b", "org-retained", 20}, {"c", "org-retained", 30}, {"d", "member-controlled", 1000},
+	} {
+		enrollment, spoke, share := "enr-"+f.id, "spoke-"+f.id, "share-"+f.id
+		require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: f.id, CredentialSHA256: "digest-" + f.id}))
+		_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active", Retention: f.retention})
+		require.NoError(t, err)
+		started := "2026-07-28T09:00:00Z"
+		record := FederationHubRecord{UID: f.id, Hash: "hash", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{
+			Session: Session{ID: f.id, Project: "example/repo", Agent: "codex", StartedAt: &started}, Signals: SessionSignalUpdate{Outcome: "unknown"},
+			UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: f.tokens, OccurredAt: started, DedupKey: f.id}},
+		}}
+		_, err = d.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", []FederationHubRecord{record})
+		require.NoError(t, err)
+		_, err = d.RevokeFederationEnrollment(ctx, enrollment)
+		require.NoError(t, err)
+	}
+	pulse, err := d.readFederationPulse(ctx, "2026-07-28", 3, time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	assert.False(t, pulse.Suppressed)
+	assert.Equal(t, Ptr(int64(3)), pulse.Totals["sessions"].Value)
+	assert.Equal(t, Ptr(int64(60)), pulse.Totals["tokens"].Value)
+	for _, link := range pulse.Links {
+		assert.Equal(t, "revoked", link.State)
+	}
+}
+
 func TestFederationPulseIncludesDatedMessageLessSignals(t *testing.T) {
 	d := testDB(t)
 	ctx := t.Context()
