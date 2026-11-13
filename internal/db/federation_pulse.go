@@ -97,6 +97,14 @@ func (db *DB) readFederationPulseSnapshot(
 		return ReportingRange{}, fmt.Errorf("begin federation pulse snapshot: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	var requiresRejoin bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM archive_metadata
+		WHERE key='federation_pulse_requires_rejoin' AND value='1')`).Scan(&requiresRejoin); err != nil {
+		return ReportingRange{}, fmt.Errorf("checking pulse source rejoin: %w", err)
+	}
+	if requiresRejoin {
+		return ReportingRange{}, errors.New("pulse source requires authority rejoin")
+	}
 	if observe != nil {
 		if err := observe(tx); err != nil {
 			return ReportingRange{}, err

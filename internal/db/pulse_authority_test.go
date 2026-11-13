@@ -114,3 +114,14 @@ func TestBindFederationPulseAuthorityUsesHomeAndRetainsBinding(t *testing.T) {
 	t.Setenv("USERPROFILE", other)
 	require.Error(t, d.BindFederationPulseAuthority(ctx))
 }
+
+func TestStagedPulseArchiveDoesNotPublish(t *testing.T) {
+	ctx := t.Context()
+	source := testDB(t)
+	staged := testDB(t)
+	require.NoError(t, staged.CopyArchiveIdentityFrom(ctx, source.Path()))
+	pulse, err := staged.FederationPulse(ctx, "", 3)
+	require.Error(t, err)
+	assert.Nil(t, pulse.Totals)
+	assert.Empty(t, pulse.Projects)
+}
