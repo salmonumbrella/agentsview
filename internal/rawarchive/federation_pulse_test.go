@@ -14,7 +14,7 @@ import (
 
 // Both managed copy paths must preserve the original publication constraint.
 func TestManagedCopiesKeepFederationPulseHistory(t *testing.T) {
-	for _, method := range []string{"restore", "seed", "restore-old-seed"} {
+	for _, method := range []string{"restore", "seed", "restore-old-seed", "restore-old-after-revoke"} {
 		t.Run(method, func(t *testing.T) {
 			ctx := t.Context()
 			t.Setenv("HOME", t.TempDir())
@@ -41,13 +41,13 @@ func TestManagedCopiesKeepFederationPulseHistory(t *testing.T) {
 			_, err = database.CommitFederationBatch(ctx, "e-a", "s-a", "h-a", "policy", 1, 2, "batch-2", []db.FederationHubRecord{record})
 			require.NoError(t, err)
 			var oldBackupPath, oldSnapshot string
-			if method == "seed" || method == "restore-old-seed" {
+			if method == "seed" || method == "restore-old-seed" || method == "restore-old-after-revoke" {
 				// Capture the source before any pulse publication. The later seed
 				// must join the authority that the original creates afterward.
 				require.NoError(t, database.Close())
 				_, err = Capture(ctx, opts)
 				require.NoError(t, err)
-				if method == "restore-old-seed" {
+				if method == "restore-old-seed" || method == "restore-old-after-revoke" {
 					seed := filepath.Join(t.TempDir(), "seed")
 					_, err = Seed(ctx, filepath.Join(opts.Destination, "capture.json"), seed, nil)
 					require.NoError(t, err)
@@ -91,13 +91,29 @@ func TestManagedCopiesKeepFederationPulseHistory(t *testing.T) {
 				_, err = Seed(ctx, filepath.Join(opts.Destination, "capture.json"), target, nil)
 				require.NoError(t, err)
 			} else {
+				if method == "restore-old-after-revoke" {
+					_, err = database.PutFederationHubShare(ctx, "s-a", db.FederationHubShare{UID: "h-a", EnrollmentUID: "e-a", Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 2, State: "stopped", Retention: "member-controlled"})
+					require.NoError(t, err)
+				}
 				require.NoError(t, database.Close())
 				_, err = Restore(ctx, oldBackupPath, oldSnapshot, target, nil)
+				if method == "restore-old-after-revoke" && err != nil {
+					assert.NoDirExists(t, target)
+					return
+				}
 				require.NoError(t, err)
 			}
 			copied, err := db.OpenIsolatedContext(ctx, filepath.Join(target, "sessions.db"))
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, copied.Close()) })
+			if method == "restore-old-after-revoke" {
+				revoked, err := copied.GetSessionFull(ctx, "a")
+				require.NoError(t, err)
+				assert.Nil(t, revoked)
+				olderRevoked, err := copied.GetSessionFull(ctx, "a-older")
+				require.NoError(t, err)
+				assert.Nil(t, olderRevoked)
+			}
 			later, err := copied.FederationPulse(ctx, day.AddDate(0, 0, -1).Format("2006-01-02"), 3)
 			if err != nil {
 				assert.Empty(t, later.Projects)
