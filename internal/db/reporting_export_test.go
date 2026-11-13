@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"encoding/json/jsontext"
 	"fmt"
 	"math"
@@ -771,6 +772,38 @@ func TestReportingExportUsesAttributedSessionMetadataForCompleteSnapshot(
 		reportingUsageBreakdownKeys(hour.Usage.ByAgent))
 	require.Len(t, hour.Usage.ByProject, 1)
 	assert.Equal(t, "parent-project", hour.Usage.ByProject[0].Project)
+
+	// The selected child's evidence must survive attribution to the parent.
+	// Both sessions are in scope; the parent supplies the earlier snapshot,
+	// while the child supplies the larger surviving token observation.
+	// A larger unowned duplicate cannot displace either lawful candidate.
+	insertSession(t, d, "unowned-duplicate", "outside-project", func(s *Session) {
+		s.Agent = "outside-agent"
+		s.StartedAt = Ptr("2026-07-28T09:00:00Z")
+		s.EndedAt = Ptr("2026-07-28T09:07:00Z")
+	})
+	insertMessages(t, d, Message{SessionID: "unowned-duplicate", Ordinal: 0, Role: "assistant",
+		Timestamp: "2026-07-28T09:07:00Z", Model: "outside-model",
+		TokenUsage:      jsontext.Value(`{"input_tokens":9000,"output_tokens":9000}`),
+		ClaudeMessageID: "reporting-message", ClaudeRequestID: "reporting-request"})
+	start := time.Date(2026, 7, 28, 0, 0, 0, 0, time.UTC)
+	tx, err := d.getReader().BeginTx(t.Context(), &sql.TxOptions{ReadOnly: true})
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	scope := map[string]struct{}{"reporting-parent": {}, "reporting-child": {}}
+	source, err := d.loadReportingExportSourceScoped(t.Context(), tx, start, start.Add(24*time.Hour), export.ReportingJointSchemaVersion, scope)
+	require.NoError(t, err)
+	query, err := activity.ResolveQuery(activity.QueryInput{Preset: "custom", From: "2026-07-28T00:00:00Z", To: "2026-07-29T00:00:00Z", Timezone: "UTC"}, start.Add(24*time.Hour))
+	require.NoError(t, err)
+	rows, _, err := reportingMaterializedUsage(query, source.forDate(start, start.Add(24*time.Hour)))
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "reporting-parent", rows[0].SessionID)
+	assert.Equal(t, "reporting-child", rows[0].SourceSessionID)
+	assert.Equal(t, 1000, rows[0].InputTokens)
+	assert.Equal(t, 631, rows[0].OutputTokens)
+	assert.Equal(t, int64(1000), hour.Usage.Totals.InputTokens)
+	assert.Equal(t, int64(631), hour.Usage.Totals.OutputTokens)
 }
 
 func TestReportingExportDeduplicatesMergedUsageInputs(t *testing.T) {

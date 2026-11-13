@@ -1161,6 +1161,7 @@ func (c *activityReportUsageCandidate) usageRow() activity.UsageRow {
 	r := &c.scan
 	return activity.UsageRow{
 		SessionID:       r.sessionID,
+		SourceSessionID: r.sessionID,
 		Model:           r.model,
 		Timestamp:       r.ts,
 		Project:         r.project,
