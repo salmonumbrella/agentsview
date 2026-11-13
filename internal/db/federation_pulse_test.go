@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/agentsview/internal/export"
+	"go.kenn.io/agentsview/internal/money"
 )
 
 func TestFederationPulseScopeUsesOwnedLiveRecords(t *testing.T) {
@@ -275,6 +276,68 @@ func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T)
 	}
 	assert.EqualValues(t, 60, exported)
 	assert.Equal(t, exported, *got.Totals["tokens"].Value)
+}
+
+func TestFederationPulseCrossProjectScopedExportParity(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	start := "2026-07-28T09:00:00Z"
+	fixtures := []struct {
+		id, project string
+		tokens      int
+		cost        int64
+	}{
+		{"a", "alpha", 10, 1}, {"b", "alpha", 20, 2}, {"c", "alpha", 30, 3},
+		{"d", "beta", 40, 4}, {"e", "beta", 50, 5}, {"f", "beta", 60, 6},
+	}
+	scope := make(map[string]struct{}, len(fixtures))
+	for _, f := range fixtures {
+		scope[f.id] = struct{}{}
+		enrollment, share, spoke := "enr-"+f.id, "share-"+f.id, "spoke-"+f.id
+		remote, key := "example/"+f.project, "key-"+f.project
+		require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: f.id, CredentialSHA256: "digest-" + f.id}))
+		_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: remote, ProjectKey: key, Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+		require.NoError(t, err)
+		cost := money.Money{Microdollars: f.cost}
+		record := FederationHubRecord{UID: f.id, Hash: "hash", Remote: remote, ProjectKey: key, Write: SessionBatchWrite{
+			Session: Session{ID: f.id, Project: remote, Agent: "codex", StartedAt: &start}, Signals: SessionSignalUpdate{Outcome: "unknown"},
+			UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: f.tokens, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: start, DedupKey: f.id}},
+		}}
+		_, err = d.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", []FederationHubRecord{record})
+		require.NoError(t, err)
+	}
+	pulse, err := d.readFederationPulse(ctx, "2026-07-28", 3, time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	require.False(t, pulse.Suppressed)
+	require.Len(t, pulse.Projects, 2)
+	assert.Equal(t, "key-alpha", pulse.Projects[0].Key)
+	assert.Equal(t, Ptr(int64(60)), pulse.Projects[0].Totals["tokens"].Value)
+	assert.Equal(t, Ptr(int64(6)), pulse.Projects[0].Totals["cost_microdollars"].Value)
+	assert.Equal(t, "key-beta", pulse.Projects[1].Key)
+	assert.Equal(t, Ptr(int64(150)), pulse.Projects[1].Totals["tokens"].Value)
+	assert.Equal(t, Ptr(int64(15)), pulse.Projects[1].Totals["cost_microdollars"].Value)
+	assert.Equal(t, Ptr(int64(210)), pulse.Totals["tokens"].Value)
+	assert.Equal(t, Ptr(int64(21)), pulse.Totals["cost_microdollars"].Value)
+	date := time.Date(2026, 7, 28, 0, 0, 0, 0, time.UTC)
+	tx, err := d.getReader().BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	source, err := d.loadReportingExportSourceScoped(ctx, tx, date, date.Add(24*time.Hour), export.ReportingJointSchemaVersion, scope)
+	require.NoError(t, err)
+	hours, err := reportingHoursFromSource(ctx, source.forDate(date, date.Add(24*time.Hour)), date, 24, export.ReportingJointSchemaVersion, nil, time.Hour)
+	require.NoError(t, err)
+	assert.EqualValues(t, 210, hours[9].Usage.Totals.InputTokens)
+	assert.EqualValues(t, 21, hours[9].Usage.Totals.Cost.Microdollars)
+	assert.Equal(t, *pulse.Totals["tokens"].Value, hours[9].Usage.Totals.InputTokens)
+	assert.Equal(t, *pulse.Totals["cost_microdollars"].Value, hours[9].Usage.Totals.Cost.Microdollars)
+	projectUsage := map[string]int64{}
+	projectCost := map[string]int64{}
+	for _, project := range hours[9].Usage.ByProject {
+		projectUsage[project.Project] += project.InputTokens
+		projectCost[project.Project] += project.Cost.Microdollars
+	}
+	assert.Equal(t, map[string]int64{"example/alpha": 60, "example/beta": 150}, projectUsage)
+	assert.Equal(t, map[string]int64{"example/alpha": 6, "example/beta": 15}, projectCost)
 }
 
 func TestFederationPulseIncludesDatedMessageLessSignals(t *testing.T) {
