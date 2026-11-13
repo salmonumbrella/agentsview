@@ -177,6 +177,37 @@ func TestHubPulseProtectsSummaryUpdatesAndKeepsIndependentProject(t *testing.T) 
 	assert.EqualValues(t, 150, *later.Projects[0].Totals["tokens"].Value)
 	require.NotNil(t, later.Projects[0].Totals["cost_microdollars"].Value)
 	assert.EqualValues(t, 1500, *later.Projects[0].Totals["cost_microdollars"].Value)
+	for _, metric := range []string{"sessions", "active_projects", "tokens", "cost_microdollars", "automated_sessions", "usage_observed_sessions", "health_observed_sessions", "outcome_observed_sessions"} {
+		assert.Equal(t, "suppressed", later.Totals[metric].State, metric)
+		assert.Nil(t, later.Totals[metric].Value, metric)
+	}
+	for _, ratio := range []string{"automation_share", "usage_coverage", "health_coverage", "outcome_coverage"} {
+		assert.Equal(t, "suppressed", later.Ratios[ratio].State, ratio)
+		assert.Nil(t, later.Ratios[ratio].Value, ratio)
+	}
+	assert.Empty(t, later.Agents)
+	assert.Empty(t, later.Models)
+	assert.Empty(t, later.Outcomes)
+	assert.Empty(t, later.Grades)
+	assert.Empty(t, later.Categories)
+	q := later.Projects[0]
+	require.NotNil(t, q.Totals["active_projects"].Value)
+	assert.EqualValues(t, 1, *q.Totals["active_projects"].Value)
+	require.NotNil(t, q.Ratios["usage_coverage"].Value)
+	assert.Equal(t, float64(1), *q.Ratios["usage_coverage"].Value)
+	require.NotNil(t, q.Ratios["automation_share"].Value)
+	assert.Equal(t, float64(0), *q.Ratios["automation_share"].Value)
+	assert.Equal(t, "unavailable", q.Ratios["health_coverage"].State)
+	assert.Nil(t, q.Ratios["health_coverage"].Value)
+	require.Len(t, q.Agents, 1)
+	assert.Equal(t, "codex", q.Agents[0].Key)
+	require.Len(t, q.Models, 1)
+	assert.Equal(t, "model", q.Models[0].Key)
+	require.Len(t, q.Outcomes, 1)
+	assert.Equal(t, "unknown", q.Outcomes[0].Key)
+	assert.Empty(t, q.Grades)
+	require.Len(t, q.Categories, 1)
+	assert.Equal(t, "interactive", q.Categories[0].Key)
 
 	peers[1].tokens, peers[1].cost = 25, 250
 	peers[2].tokens, peers[2].cost = 35, 350
