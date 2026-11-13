@@ -243,6 +243,8 @@ type DeliveryHistory struct {
 	NormalizedRemote string         `json:"normalized_remote"`
 	Delivery         DeliveryCounts `json:"delivery"`
 	Current          bool           `json:"current"`
+	StopIntent       string         `json:"stop_intent,omitempty"`
+	StopReceipt      string         `json:"stop_receipt,omitempty"`
 }
 type HubStatus struct {
 	State        string                      `json:"state"`
@@ -269,6 +271,44 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 		}
 		out.History = append(out.History, entry)
 	}
+	links, err := s.db.ListFederationLinks(ctx)
+	if err != nil {
+		return out, err
+	}
+	for _, old := range links {
+		oldShares, e := s.db.ListFederationShares(ctx, old.UID)
+		if e != nil {
+			return out, e
+		}
+		for _, share := range oldShares {
+			index := -1
+			for i := range out.History {
+				if out.History[i].ShareUID == share.UID {
+					index = i
+					break
+				}
+			}
+			if index < 0 {
+				out.History = append(out.History, DeliveryHistory{ShareUID: share.UID})
+				index = len(out.History) - 1
+			}
+			entry := &out.History[index]
+			if entry.HubOrigin == "" {
+				entry.HubOrigin = old.HubOrigin
+			}
+			if entry.HubArchiveID == "" {
+				entry.HubArchiveID = old.HubArchiveID
+			}
+			if entry.NormalizedRemote == "" {
+				entry.NormalizedRemote = share.NormalizedRemote
+			}
+			entry.StopIntent, entry.StopReceipt = share.StopIntent, share.StopReceipt
+		}
+	}
+	out.Quarantine, err = s.db.FederationQuarantines(ctx)
+	if err != nil {
+		return out, err
+	}
 	link, err := s.db.GetFederationLink(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, nil
@@ -287,16 +327,13 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 			if out.History[i].ShareUID == share.UID {
 				out.History[i].Current = true
 				counts := out.History[i].Delivery
+				out.Delivery.Tombstoned += counts.Tombstoned
 				out.Delivery.Sent += counts.Sent
 				out.Delivery.Refused += counts.Refused
 				out.Delivery.Unconfirmed += counts.Unconfirmed
 				break
 			}
 		}
-	}
-	out.Quarantine, err = s.db.FederationQuarantines(ctx)
-	if err != nil {
-		return out, err
 	}
 	out.Hub = &HubStatus{}
 	if link.State == LinkBlocked {
@@ -320,7 +357,11 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 			out.Hub.State, out.Hub.Message = HubError, err.Error()
 			return out, nil
 		}
-		return out, err
+		if ctx.Err() != nil {
+			return out, ctx.Err()
+		}
+		out.Hub.State, out.Hub.Message = HubError, "hub unavailable"
+		return out, nil
 	}
 	if h.HubArchiveID != link.HubArchiveID {
 		if err := s.db.BlockFederationLink(ctx, link.UID); err != nil {

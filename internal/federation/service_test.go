@@ -598,3 +598,31 @@ func TestLegacyRevokeRequiresMatchingRetentionProof(t *testing.T) {
 		})
 	}
 }
+
+func TestHistoricalShareShowsRetiredStopWithoutHub(t *testing.T) {
+	ctx := t.Context()
+	archive, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "archive.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, archive.Close()) })
+	link := db.FederationLink{UID: "old", HubOrigin: "https://hub.example", HubArchiveID: "hub-a", EnrollmentUID: "enr", Member: "member", TokenFile: "/missing/fixture", ProtocolVersion: ProtocolVersion, State: "active"}
+	require.NoError(t, archive.PutFederationLink(ctx, link))
+	require.NoError(t, archive.PutFederationShare(ctx, db.FederationShare{UID: "share", LinkUID: link.UID, NormalizedRemote: "github.com/example/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: `{}`, PolicyDigest: "digest"}))
+	require.NoError(t, archive.RecordFederationDelivery(ctx, "share", []db.FederationDelivery{{RecordUID: "record", SessionID: "record", Hash: "confirmed", State: "tombstoned"}}))
+	require.NoError(t, archive.RecordFederationAttempt(ctx, "share", []db.FederationDelivery{{RecordUID: "record", SessionID: "record", Hash: "attempt"}}))
+	require.NoError(t, archive.DeleteFederationLink(ctx))
+	svc := NewService("spoke", "spoke", config.FederationHubConfig{}, archive)
+	status, err := svc.Status(ctx)
+	require.NoError(t, err)
+	require.Len(t, status.History, 1)
+	assert.Equal(t, "https://hub.example", status.History[0].HubOrigin)
+	assert.Equal(t, "hub-a", status.History[0].HubArchiveID)
+	assert.Equal(t, "pending", status.History[0].StopReceipt)
+	assert.Equal(t, 1, status.History[0].Delivery.Tombstoned)
+	assert.Equal(t, 1, status.History[0].Delivery.Unconfirmed)
+	details, err := svc.Share(ctx, "share")
+	require.NoError(t, err)
+	assert.True(t, details.Historical)
+	assert.Equal(t, "pending", details.Share.StopReceipt)
+	assert.Equal(t, "confirmed", details.Records["record"].Hash)
+	assert.Equal(t, "attempt", details.Records["record"].AttemptHash)
+}

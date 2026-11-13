@@ -2955,7 +2955,9 @@ or rejoining. `federation push --dry-run` prints selected summaries locally. Run
 `federation push` to deliver active shares now; the spoke also retries on a
 schedule. `federation status` and `federation share show` report delivery and
 quarantine counts. Status lists each ledger's original hub and repository,
-including shares removed or left while offline. Use the share UID with
+including shares removed or left while offline, their stop receipts, and
+tombstoned and unconfirmed counts. A tombstone is history; an unconfirmed
+attempt is not proof of delivery. Use the share UID with
 `share show` to inspect record IDs, confirmed hashes, states, and unconfirmed
 attempted hashes without contacting the hub. Older orphaned entries may have
 unknown context. Sent and unconfirmed counts can overlap. Shares confirmed

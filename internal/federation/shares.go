@@ -325,6 +325,7 @@ func (s *Service) Shares(ctx context.Context) (ShareList, error) {
 }
 
 type DeliveryCounts struct {
+	Tombstoned  int `json:"tombstoned"`
 	Sent        int `json:"sent"`
 	Refused     int `json:"refused"`
 	Unconfirmed int `json:"unconfirmed"`
@@ -336,6 +337,8 @@ func deliveryCounts(ledger map[string]db.FederationDelivery) (out DeliveryCounts
 			out.Unconfirmed++
 		}
 		switch d.State {
+		case "tombstoned":
+			out.Tombstoned++
 		case "sent":
 			out.Sent++
 		case "refused":
@@ -367,14 +370,30 @@ func (s *Service) Share(ctx context.Context, uid string) (ShareDetails, error) {
 		return out, err
 	}
 	if errors.Is(err, sql.ErrNoRows) {
-		if len(ledger) == 0 {
+		links, e := s.db.ListFederationLinks(ctx)
+		if e != nil {
+			return out, e
+		}
+		for _, old := range links {
+			share, e := s.db.GetFederationShare(ctx, old.UID, uid)
+			if e == nil {
+				out.Share, out.Historical = share, true
+				break
+			}
+			if !errors.Is(e, sql.ErrNoRows) {
+				return out, e
+			}
+		}
+		if out.Share.UID == "" && len(ledger) == 0 {
 			return out, sql.ErrNoRows
 		}
 		out.Historical = true
-		out.Share.UID = uid
-		for _, d := range ledger {
-			out.Share.NormalizedRemote = d.NormalizedRemote
-			break
+		if out.Share.UID == "" {
+			out.Share.UID = uid
+			for _, d := range ledger {
+				out.Share.NormalizedRemote = d.NormalizedRemote
+				break
+			}
 		}
 	}
 	out.Records = ledger

@@ -179,9 +179,9 @@ func newFederationCommand() *cobra.Command {
 		if asJSON {
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(value)
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Archive: %s\nShares: %d\nSent: %d\nRefused: %d\nUnconfirmed: %d\nQuarantined: %d\n", value.ArchiveID, value.Shares, value.Delivery.Sent, value.Delivery.Refused, value.Delivery.Unconfirmed, len(value.Quarantine))
+		fmt.Fprintf(cmd.OutOrStdout(), "Archive: %s\nShares: %d\nSent: %d\nRefused: %d\nTombstoned: %d\nUnconfirmed: %d\nQuarantined: %d\n", value.ArchiveID, value.Shares, value.Delivery.Sent, value.Delivery.Refused, value.Delivery.Tombstoned, value.Delivery.Unconfirmed, len(value.Quarantine))
 		for _, h := range value.History {
-			fmt.Fprintf(cmd.OutOrStdout(), "Share %s (current: %t): hub %s, archive %s, repository %s; sent %d, refused %d, unconfirmed %d\n", h.ShareUID, h.Current, h.HubOrigin, h.HubArchiveID, h.NormalizedRemote, h.Delivery.Sent, h.Delivery.Refused, h.Delivery.Unconfirmed)
+			fmt.Fprintf(cmd.OutOrStdout(), "Share %s (current: %t): hub %s, archive %s, repository %s; sent %d, refused %d, tombstoned %d, unconfirmed %d; stop %s, receipt %s\n", h.ShareUID, h.Current, h.HubOrigin, h.HubArchiveID, h.NormalizedRemote, h.Delivery.Sent, h.Delivery.Refused, h.Delivery.Tombstoned, h.Delivery.Unconfirmed, h.StopIntent, h.StopReceipt)
 		}
 		for _, q := range value.Quarantine {
 			fmt.Fprintf(cmd.OutOrStdout(), "Quarantine %s at sequence %d: %s\n", q.ShareUID, q.Sequence, q.Error)
