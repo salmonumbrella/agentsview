@@ -674,33 +674,6 @@ func (db *DB) FederationLedgerShares(ctx context.Context) ([]string, error) {
 	}
 	return shares, rows.Err()
 }
-func (db *DB) RecordFederationAttempt(ctx context.Context, share string, deliveries []FederationDelivery) error {
-	return db.Update(ctx, func(tx *sql.Tx) error {
-		var origin, archive, remote string
-		if err := tx.QueryRowContext(ctx, `SELECT l.hub_origin,l.hub_archive_id,s.normalized_remote FROM federation_shares s JOIN federation_links l ON l.link_uid=s.link_uid WHERE s.share_uid=?`, share).Scan(&origin, &archive, &remote); err != nil {
-			return err
-		}
-		for _, d := range deliveries {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO federation_deliveries(share_uid,record_uid,session_id,hash,state,attempt_hash,hub_origin,hub_archive_id,normalized_remote) VALUES(?,?,?,'','unconfirmed',?,?,?,?) ON CONFLICT(share_uid,record_uid) DO UPDATE SET session_id=excluded.session_id,attempt_hash=excluded.attempt_hash,hub_origin=CASE WHEN federation_deliveries.hub_origin='' THEN excluded.hub_origin ELSE federation_deliveries.hub_origin END,hub_archive_id=CASE WHEN federation_deliveries.hub_archive_id='' THEN excluded.hub_archive_id ELSE federation_deliveries.hub_archive_id END,normalized_remote=CASE WHEN federation_deliveries.normalized_remote='' THEN excluded.normalized_remote ELSE federation_deliveries.normalized_remote END`, share, d.RecordUID, d.SessionID, d.Hash, origin, archive, remote); err != nil {
-				return err
-			}
-		}
-		return stampFederationVersion(ctx, tx)
-	})
-}
-func (db *DB) RecordFederationDelivery(ctx context.Context, share string, deliveries []FederationDelivery) error {
-	return db.Update(ctx, func(tx *sql.Tx) error {
-		for _, d := range deliveries {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO federation_deliveries(share_uid,record_uid,session_id,hash,state) VALUES(?,?,?,?,?) ON CONFLICT(share_uid,record_uid) DO UPDATE SET session_id=excluded.session_id,hash=excluded.hash,state=excluded.state,attempt_hash=''`, share, d.RecordUID, d.SessionID, d.Hash, d.State); err != nil {
-				return err
-			}
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM federation_quarantine WHERE share_uid=? AND error<>?`, share, FederationCollision); err != nil {
-			return err
-		}
-		return stampFederationVersion(ctx, tx)
-	})
-}
 
 // SaveFederationPending records the exact envelope and attempt evidence in one
 // transaction before any bytes leave the spoke.

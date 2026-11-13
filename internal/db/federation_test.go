@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -10,11 +11,39 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/agentsview/internal/export"
 )
 
 func revokeFederationEnrollment(d *DB, ctx context.Context, uid string, proof ...FederationRetentionProof) error {
 	_, err := d.RevokeFederationEnrollment(ctx, uid, proof...)
 	return err
+}
+
+// saveSummaryFixture drives the same pending/acknowledgment transactions used
+// by delivery. Its generated hashes describe the actual summary envelopes.
+func saveSummaryFixture(t *testing.T, d *DB, share, agent string, ids []string, acknowledge bool) []FederationDelivery {
+	t.Helper()
+	ctx := t.Context()
+	var epoch, sequence int64
+	var remote string
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT epoch,sequence,normalized_remote FROM federation_shares WHERE share_uid=?`, share).Scan(&epoch, &sequence, &remote))
+	key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
+	var records []map[string]any
+	var deliveries []FederationDelivery
+	for _, id := range ids {
+		payload := map[string]any{"session_id": id, "project_key": key, "normalized_remote": remote, "agent": agent, "started_at": nil, "ended_at": nil, "message_count": 0, "user_message_count": 0, "assistant_message_count": 0, "total_tool_count": 0, "by_model": map[string]any{}, "is_automated": false, "outcome": "", "health": nil}
+		hash, err := export.DigestCanonical(payload)
+		require.NoError(t, err)
+		deliveries = append(deliveries, FederationDelivery{RecordUID: id, SessionID: id, Hash: hash, State: "sent"})
+		records = append(records, map[string]any{"record_uid": id, "kind": "session_summary", "hash": hash, "payload": payload})
+	}
+	envelope, err := json.Marshal(map[string]any{"protocol": 2, "spoke_instance": "spoke", "share_uid": share, "epoch": epoch, "sequence": sequence + 1, "records": records})
+	require.NoError(t, err)
+	require.NoError(t, d.SaveFederationPending(ctx, share, sequence+1, string(envelope), deliveries))
+	if acknowledge {
+		require.NoError(t, d.CommitFederationAcknowledgment(ctx, share, sequence+1, deliveries))
+	}
+	return deliveries
 }
 
 func TestFederationEnrollmentLifecycle(t *testing.T) {
@@ -219,8 +248,7 @@ func TestFederationShareStateSurvivesCopyAndLeave(t *testing.T) {
 	require.NoError(t, source.PutFederationLink(ctx, link))
 	share := FederationShare{UID: "share-a", LinkUID: "link-a", NormalizedRemote: "github.com/example/api", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: `{"selected":1}`, PolicyDigest: "digest-a"}
 	require.NoError(t, source.PutFederationShare(ctx, share))
-	require.NoError(t, source.RecordFederationAttempt(ctx, share.UID, []FederationDelivery{{RecordUID: "record", SessionID: "session-a", Hash: "confirmed"}}))
-	require.NoError(t, source.RecordFederationDelivery(ctx, share.UID, []FederationDelivery{{RecordUID: "record", SessionID: "session-a", Hash: "confirmed", State: "sent"}}))
+	confirmed := saveSummaryFixture(t, source, share.UID, "claude", []string{"session-a"}, true)[0].Hash
 	require.NoError(t, source.Update(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO sessions (id,project,first_message) VALUES ('session-a','fixture','')`)
 		return err
@@ -229,9 +257,9 @@ func TestFederationShareStateSurvivesCopyAndLeave(t *testing.T) {
 	require.NoError(t, target.CopyFederationStateFrom(ctx, source.Path()))
 	ledger, err := target.FederationLedger(ctx, share.UID)
 	require.NoError(t, err)
-	assert.Equal(t, "https://hub.example", ledger["record"].HubOrigin)
-	assert.Equal(t, "hub-a", ledger["record"].HubArchiveID)
-	assert.Equal(t, "github.com/example/api", ledger["record"].NormalizedRemote)
+	assert.Equal(t, "https://hub.example", ledger["session-a"].HubOrigin)
+	assert.Equal(t, "hub-a", ledger["session-a"].HubArchiveID)
+	assert.Equal(t, "github.com/example/api", ledger["session-a"].NormalizedRemote)
 	shares, err := target.ListFederationShares(ctx, "link-a")
 	require.NoError(t, err)
 	require.Len(t, shares, 1)
@@ -252,10 +280,10 @@ func TestFederationShareStateSurvivesCopyAndLeave(t *testing.T) {
 	assert.Equal(t, federationVersionBase+federationShareVersionBase+federationDeliveryVersionBase+federationWithdrawalVersionBase+CurrentDataVersion(), afterLeave)
 	ledger, err = target.FederationLedger(ctx, share.UID)
 	require.NoError(t, err)
-	assert.Equal(t, "confirmed", ledger["record"].Hash)
-	assert.Equal(t, "https://hub.example", ledger["record"].HubOrigin)
-	assert.Equal(t, "hub-a", ledger["record"].HubArchiveID)
-	assert.Equal(t, "github.com/example/api", ledger["record"].NormalizedRemote)
+	assert.Equal(t, confirmed, ledger["session-a"].Hash)
+	assert.Equal(t, "https://hub.example", ledger["session-a"].HubOrigin)
+	assert.Equal(t, "hub-a", ledger["session-a"].HubArchiveID)
+	assert.Equal(t, "github.com/example/api", ledger["session-a"].NormalizedRemote)
 	var reason string
 	require.NoError(t, target.Reader().QueryRow(ctx, `SELECT reason FROM federation_exclusions WHERE session_id = 'session-a'`).Scan(&reason))
 	assert.Equal(t, "private", reason)
@@ -433,24 +461,24 @@ func TestFederationAttemptPreservesAcknowledgmentAndQuarantine(t *testing.T) {
 	ctx := t.Context()
 	require.NoError(t, d.PutFederationLink(ctx, FederationLink{UID: "link", HubOrigin: "https://hub.example", HubArchiveID: "hub", EnrollmentUID: "enrollment", Member: "member", TokenFile: "/fixture/token", ProtocolVersion: 1, State: "active"}))
 	require.NoError(t, d.PutFederationShare(ctx, FederationShare{UID: "share", LinkUID: "link", NormalizedRemote: "github.com/example/api", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: `{}`, PolicyDigest: "digest"}))
-	require.NoError(t, d.RecordFederationDelivery(ctx, "share", []FederationDelivery{{RecordUID: "old", SessionID: "old", Hash: "confirmed", State: "sent"}}))
+	confirmed := saveSummaryFixture(t, d, "share", "claude", []string{"old"}, true)[0].Hash
 	require.NoError(t, d.PutFederationQuarantine(ctx, FederationQuarantine{ShareUID: "share", Error: FederationCollision, Sequence: 3}))
-	require.NoError(t, d.RecordFederationAttempt(ctx, "share", []FederationDelivery{{RecordUID: "old", SessionID: "old", Hash: "changed"}, {RecordUID: "new", SessionID: "new", Hash: "first"}}))
+	attempts := saveSummaryFixture(t, d, "share", "codex", []string{"old", "new"}, false)
 	ledger, err := d.FederationLedger(ctx, "share")
 	require.NoError(t, err)
 	assert.Equal(t, "sent", ledger["old"].State)
-	assert.Equal(t, "confirmed", ledger["old"].Hash)
-	assert.Equal(t, "changed", ledger["old"].AttemptHash)
+	assert.Equal(t, confirmed, ledger["old"].Hash)
+	assert.Equal(t, attempts[0].Hash, ledger["old"].AttemptHash)
 	assert.Equal(t, "https://hub.example", ledger["old"].HubOrigin)
 	assert.Equal(t, "hub", ledger["old"].HubArchiveID)
 	assert.Equal(t, "github.com/example/api", ledger["old"].NormalizedRemote)
 	assert.Equal(t, "unconfirmed", ledger["new"].State)
 	assert.Empty(t, ledger["new"].Hash)
-	assert.Equal(t, "first", ledger["new"].AttemptHash)
-	require.NoError(t, d.RecordFederationDelivery(ctx, "share", []FederationDelivery{{RecordUID: "old", SessionID: "old", Hash: "changed", State: "sent"}}))
+	assert.Equal(t, attempts[1].Hash, ledger["new"].AttemptHash)
+	require.NoError(t, d.CommitFederationAcknowledgment(ctx, "share", 2, attempts))
 	ledger, err = d.FederationLedger(ctx, "share")
 	require.NoError(t, err)
-	assert.Equal(t, "changed", ledger["old"].Hash)
+	assert.Equal(t, attempts[0].Hash, ledger["old"].Hash)
 	assert.Empty(t, ledger["old"].AttemptHash)
 	q, err := d.FederationQuarantines(ctx)
 	require.NoError(t, err)
@@ -465,9 +493,10 @@ func TestFederationAttemptPreservesAcknowledgmentAndQuarantine(t *testing.T) {
 func TestFederationShareReplacementAndRemovalKeepLedger(t *testing.T) {
 	d := testDB(t)
 	ctx := t.Context()
+	require.NoError(t, d.PutFederationLink(ctx, FederationLink{UID: "link", HubOrigin: "https://hub.example", HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: "/fixture/token", ProtocolVersion: 2, State: "active"}))
 	s := FederationShare{UID: "share", LinkUID: "link", NormalizedRemote: "example.org/repo", State: "active", Since: "2026-01-01", ConsentJSON: `{"delivery_notice":"old"}`}
 	require.NoError(t, d.PutFederationShare(ctx, s))
-	require.NoError(t, d.RecordFederationDelivery(ctx, s.UID, []FederationDelivery{{RecordUID: "record", SessionID: "session", Hash: "hash", State: "sent"}}))
+	confirmed := saveSummaryFixture(t, d, s.UID, "claude", []string{"record"}, true)[0].Hash
 	s.UID, s.Since = "replacement", "2026-02-01"
 	require.NoError(t, d.PutFederationShare(ctx, s))
 	got, err := d.GetFederationShare(ctx, "link", "share")
@@ -482,7 +511,7 @@ func TestFederationShareReplacementAndRemovalKeepLedger(t *testing.T) {
 	assert.Equal(t, FederationCollision, q[0].Error)
 	ledger, err := d.FederationLedger(ctx, "share")
 	require.NoError(t, err)
-	assert.Equal(t, "hash", ledger["record"].Hash)
+	assert.Equal(t, confirmed, ledger["record"].Hash)
 }
 
 func TestFederationAttemptColumnUpgradesAndCopiesOldLedger(t *testing.T) {
@@ -519,7 +548,7 @@ func TestFederationDeliveryContextUpgradeUsesOriginalJoins(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, source.PutFederationLink(ctx, FederationLink{UID: "old-link", HubOrigin: "https://hub.example", HubArchiveID: "old-hub", EnrollmentUID: "enr", Member: "member", TokenFile: "/fixture/token", ProtocolVersion: 1, State: "active"}))
 	require.NoError(t, source.PutFederationShare(ctx, FederationShare{UID: "old-share", LinkUID: "old-link", NormalizedRemote: "github.com/example/api", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: `{}`, PolicyDigest: "digest"}))
-	require.NoError(t, source.RecordFederationAttempt(ctx, "old-share", []FederationDelivery{{RecordUID: "record", SessionID: "session", Hash: "attempt"}}))
+	attempt := saveSummaryFixture(t, source, "old-share", "claude", []string{"record"}, false)[0].Hash
 	require.NoError(t, source.Close())
 	old, err := sql.Open("sqlite3", path)
 	require.NoError(t, err)
@@ -533,7 +562,7 @@ func TestFederationDeliveryContextUpgradeUsesOriginalJoins(t *testing.T) {
 	assert.Equal(t, "https://hub.example", ledger["record"].HubOrigin)
 	assert.Equal(t, "old-hub", ledger["record"].HubArchiveID)
 	assert.Equal(t, "github.com/example/api", ledger["record"].NormalizedRemote)
-	assert.Equal(t, "attempt", ledger["record"].AttemptHash)
+	assert.Equal(t, attempt, ledger["record"].AttemptHash)
 	upgraded, err := OpenIsolated(ctx, path)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, upgraded.Close()) })
@@ -620,8 +649,9 @@ func TestFederationWithdrawalStateSurvivesCopy(t *testing.T) {
 func TestRemoveFederationShareRetainsStopIntentAndAccounting(t *testing.T) {
 	d := testDB(t)
 	ctx := t.Context()
+	require.NoError(t, d.PutFederationLink(ctx, FederationLink{UID: "link", HubOrigin: "https://hub.example", HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: "/fixture/token", ProtocolVersion: 2, State: "active"}))
 	require.NoError(t, d.PutFederationShare(ctx, FederationShare{UID: "share", LinkUID: "link", NormalizedRemote: "example.org/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: "{}", PolicyDigest: "policy"}))
-	require.NoError(t, d.RecordFederationDelivery(ctx, "share", []FederationDelivery{{RecordUID: "record", SessionID: "record", Hash: "confirmed", State: "sent"}}))
+	confirmed := saveSummaryFixture(t, d, "share", "claude", []string{"record"}, true)[0].Hash
 	require.NoError(t, d.DeleteFederationShare(ctx, "link", "share"))
 	share, err := d.GetFederationShare(ctx, "link", "share")
 	require.NoError(t, err)
@@ -629,7 +659,7 @@ func TestRemoveFederationShareRetainsStopIntentAndAccounting(t *testing.T) {
 	assert.Equal(t, "pending", share.StopReceipt)
 	ledger, err := d.FederationLedger(ctx, "share")
 	require.NoError(t, err)
-	assert.Equal(t, "confirmed", ledger["record"].Hash)
+	assert.Equal(t, confirmed, ledger["record"].Hash)
 	assert.Equal(t, "sent", ledger["record"].State)
 }
 
@@ -638,14 +668,23 @@ func TestFederationPendingBatchAndAcknowledgmentAreDurable(t *testing.T) {
 	ctx := t.Context()
 	require.NoError(t, d.PutFederationLink(ctx, FederationLink{UID: "link", HubOrigin: "https://example.org", HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: "/fixture/token", ProtocolVersion: 2, State: "active"}))
 	require.NoError(t, d.PutFederationShare(ctx, FederationShare{UID: "share", LinkUID: "link", NormalizedRemote: "example.org/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: "{}", PolicyDigest: "policy"}))
-	require.NoError(t, d.SaveFederationPending(ctx, "share", 1, `{"sequence":1}`, []FederationDelivery{{RecordUID: "item", SessionID: "item", Hash: "attempt"}}))
+	attempt := saveSummaryFixture(t, d, "share", "claude", []string{"item"}, false)[0]
 	share, err := d.GetFederationShare(ctx, "link", "share")
 	require.NoError(t, err)
-	assert.Equal(t, `{"sequence":1}`, share.PendingBatch)
+	require.NotEmpty(t, share.PendingBatch)
+	pending := share.PendingBatch
 	ledger, err := d.FederationLedger(ctx, "share")
 	require.NoError(t, err)
-	assert.Equal(t, "attempt", ledger["item"].AttemptHash)
-	require.NoError(t, d.CommitFederationAcknowledgment(ctx, "share", 1, []FederationDelivery{{RecordUID: "item", SessionID: "item", Hash: "attempt", State: "sent"}}))
+	assert.Equal(t, attempt.Hash, ledger["item"].AttemptHash)
+	// A stale acknowledgment leaves both the exact pending bytes and attempt.
+	require.ErrorIs(t, d.CommitFederationAcknowledgment(ctx, "share", 2, []FederationDelivery{attempt}), ErrFederationSequence)
+	share, err = d.GetFederationShare(ctx, "link", "share")
+	require.NoError(t, err)
+	assert.Equal(t, pending, share.PendingBatch)
+	ledger, err = d.FederationLedger(ctx, "share")
+	require.NoError(t, err)
+	assert.Equal(t, attempt.Hash, ledger["item"].AttemptHash)
+	require.NoError(t, d.CommitFederationAcknowledgment(ctx, "share", 1, []FederationDelivery{attempt}))
 	share, err = d.GetFederationShare(ctx, "link", "share")
 	require.NoError(t, err)
 	assert.Empty(t, share.PendingBatch)
@@ -696,14 +735,14 @@ func TestFederationReconcileConfirmsOnlyMatchingAttempt(t *testing.T) {
 	ctx := t.Context()
 	require.NoError(t, d.PutFederationLink(ctx, FederationLink{UID: "link", HubOrigin: "https://example.org", HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: "/fixture/token", ProtocolVersion: 2, State: "active"}))
 	require.NoError(t, d.PutFederationShare(ctx, FederationShare{UID: "share", LinkUID: "link", NormalizedRemote: "example.org/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: "{}", PolicyDigest: "policy"}))
-	require.NoError(t, d.RecordFederationAttempt(ctx, "share", []FederationDelivery{{RecordUID: "a", SessionID: "a", Hash: "attempt-a"}, {RecordUID: "b", SessionID: "b", Hash: "attempt-b"}}))
-	require.NoError(t, d.ConfirmFederationMatches(ctx, "share", []FederationInventoryItem{{UID: "a", Hash: "attempt-a"}, {UID: "b", Hash: "different"}}))
+	attempts := saveSummaryFixture(t, d, "share", "claude", []string{"a", "b"}, false)
+	require.NoError(t, d.ConfirmFederationMatches(ctx, "share", []FederationInventoryItem{{UID: "a", Hash: attempts[0].Hash}, {UID: "b", Hash: "different"}}))
 	ledger, err := d.FederationLedger(ctx, "share")
 	require.NoError(t, err)
 	assert.Equal(t, "sent", ledger["a"].State)
-	assert.Equal(t, "attempt-a", ledger["a"].Hash)
+	assert.Equal(t, attempts[0].Hash, ledger["a"].Hash)
 	assert.Empty(t, ledger["a"].AttemptHash)
-	assert.Equal(t, "attempt-b", ledger["b"].AttemptHash)
+	assert.Equal(t, attempts[1].Hash, ledger["b"].AttemptHash)
 }
 
 func TestFederationGenerationChangeRequiresNewEpoch(t *testing.T) {

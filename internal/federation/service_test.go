@@ -715,8 +715,15 @@ func TestHistoricalShareShowsRetiredStopWithoutHub(t *testing.T) {
 	link := db.FederationLink{UID: "old", HubOrigin: "https://hub.example", HubArchiveID: "hub-a", EnrollmentUID: "enr", Member: "member", TokenFile: "/missing/fixture", ProtocolVersion: ProtocolVersion, State: "active"}
 	require.NoError(t, archive.PutFederationLink(ctx, link))
 	require.NoError(t, archive.PutFederationShare(ctx, db.FederationShare{UID: "share", LinkUID: link.UID, NormalizedRemote: "github.com/example/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: `{}`, PolicyDigest: "digest"}))
-	require.NoError(t, archive.RecordFederationDelivery(ctx, "share", []db.FederationDelivery{{RecordUID: "record", SessionID: "record", Hash: "confirmed", State: "tombstoned"}}))
-	require.NoError(t, archive.RecordFederationAttempt(ctx, "share", []db.FederationDelivery{{RecordUID: "record", SessionID: "record", Hash: "attempt"}}))
+	confirmed := saveSummaryFixture(t, archive, link.UID, "share", "claude", []string{"record"}, true)[0].Hash
+	attempt := saveSummaryFixture(t, archive, link.UID, "share", "codex", []string{"record"}, false)[0].Hash
+	require.NoError(t, archive.StopFederationShare(ctx, link.UID, "share", "pause"))
+	require.NoError(t, archive.ReceiptFederationStop(ctx, link.UID, "share", "retained", 1, 1))
+	tombstone := Batch{Protocol: ProtocolVersion, SpokeInstance: "spoke", ShareUID: "share", Epoch: 1, Sequence: 2, Records: []BatchRecord{{RecordUID: "record", Kind: "tombstone"}}}
+	encoded, err := json.Marshal(tombstone)
+	require.NoError(t, err)
+	require.NoError(t, archive.SaveFederationPending(ctx, "share", 2, string(encoded), nil))
+	require.NoError(t, archive.CommitFederationAcknowledgment(ctx, "share", 2, []db.FederationDelivery{{RecordUID: "record", SessionID: "record", State: "tombstoned"}}))
 	require.NoError(t, archive.DeleteFederationLink(ctx))
 	svc := NewService("spoke", "spoke", config.FederationHubConfig{}, archive)
 	status, err := svc.Status(ctx)
@@ -731,6 +738,6 @@ func TestHistoricalShareShowsRetiredStopWithoutHub(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, details.Historical)
 	assert.Equal(t, "pending", details.Share.StopReceipt)
-	assert.Equal(t, "confirmed", details.Records["record"].Hash)
-	assert.Equal(t, "attempt", details.Records["record"].AttemptHash)
+	assert.Equal(t, confirmed, details.Records["record"].Hash)
+	assert.Equal(t, attempt, details.Records["record"].AttemptHash)
 }

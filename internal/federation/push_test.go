@@ -23,6 +23,30 @@ import (
 	"go.kenn.io/agentsview/internal/testutil"
 )
 
+func saveSummaryFixture(t *testing.T, archive *db.DB, link, uid, agent string, ids []string, acknowledge bool) []db.FederationDelivery {
+	t.Helper()
+	ctx := t.Context()
+	share, err := archive.GetFederationShare(ctx, link, uid)
+	require.NoError(t, err)
+	key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: share.NormalizedRemote}).Key
+	batch := Batch{Protocol: ProtocolVersion, SpokeInstance: "spoke", ShareUID: uid, Epoch: share.Epoch, Sequence: share.Sequence + 1}
+	var deliveries []db.FederationDelivery
+	for _, id := range ids {
+		payload := SummaryRecord{SessionID: id, ProjectKey: key, Remote: share.NormalizedRemote, Agent: agent, ByModel: map[string]db.SessionModelUsageBreakdown{}}
+		hash, err := export.DigestCanonical(payload)
+		require.NoError(t, err)
+		batch.Records = append(batch.Records, BatchRecord{RecordUID: id, Kind: "session_summary", Hash: hash, Payload: &payload})
+		deliveries = append(deliveries, db.FederationDelivery{RecordUID: id, SessionID: id, Hash: hash, State: "sent"})
+	}
+	encoded, err := json.Marshal(batch)
+	require.NoError(t, err)
+	require.NoError(t, archive.SaveFederationPending(ctx, uid, batch.Sequence, string(encoded), deliveries))
+	if acknowledge {
+		require.NoError(t, archive.CommitFederationAcknowledgment(ctx, uid, batch.Sequence, deliveries))
+	}
+	return deliveries
+}
+
 func TestStopRetriesAfterHubEpochAhead(t *testing.T) {
 	ctx := t.Context()
 	archive, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "archive.db"))
@@ -177,6 +201,9 @@ func TestRetiredCleanupFailureDoesNotBlockCurrentShare(t *testing.T) {
 			_, err = svc.Push(ctx)
 			require.NoError(t, err)
 			assert.Equal(t, []string{"selected"}, oldDelivered)
+			if fault == "retained generation" {
+				saveSummaryFixture(t, archive, old.UID, "old-share", "claude", []string{"old-missing"}, true)
+			}
 			require.NoError(t, archive.DeleteFederationLink(ctx))
 			oldFault = true
 			if fault == "missing credential" {
@@ -189,8 +216,7 @@ func TestRetiredCleanupFailureDoesNotBlockCurrentShare(t *testing.T) {
 				oldHub.Close()
 			}
 			if fault == "retained generation" {
-				require.NoError(t, archive.RecordFederationDelivery(ctx, "old-share", []db.FederationDelivery{{RecordUID: "old-missing", SessionID: "old-missing", Hash: "old", State: "sent"}}))
-				require.NoError(t, archive.ReceiptFederationStop(ctx, old.UID, "old-share", "retained", 1, 0))
+				require.NoError(t, archive.ReceiptFederationStop(ctx, old.UID, "old-share", "retained", 1, 2))
 				require.NoError(t, archive.Update(ctx, func(tx *sql.Tx) error {
 					_, e := tx.ExecContext(ctx, `UPDATE federation_shares SET source_generation='prior-generation' WHERE share_uid='old-share'`)
 					return e
@@ -577,7 +603,7 @@ func TestRetainedRestoreHonorsExplicitExclusionButNotMissingRows(t *testing.T) {
 			return
 		}
 		if r.Method == http.MethodPut {
-			_ = json.NewEncoder(w).Encode(ShareView{State: "stopped", Epoch: 1, Retention: "org-retained"})
+			_ = json.NewEncoder(w).Encode(ShareView{State: "stopped", Epoch: 1, Committed: 1, Retention: "org-retained"})
 			return
 		}
 		var batch Batch
@@ -593,11 +619,11 @@ func TestRetainedRestoreHonorsExplicitExclusionButNotMissingRows(t *testing.T) {
 	require.NoError(t, archive.PutFederationShare(ctx, db.FederationShare{UID: "share", LinkUID: link.UID, NormalizedRemote: "github.com/example/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: string(consent), PolicyDigest: digest}))
 	_, err = archive.SetFederationGeneration(ctx, link.UID, "share", "old-generation")
 	require.NoError(t, err)
-	require.NoError(t, archive.RecordFederationDelivery(ctx, "share", []db.FederationDelivery{{RecordUID: "absent", SessionID: "absent", Hash: "a", State: "sent"}, {RecordUID: "excluded", SessionID: "excluded", Hash: "b", State: "sent"}}))
+	saveSummaryFixture(t, archive, link.UID, "share", "claude", []string{"absent", "excluded"}, true)
 	require.NoError(t, archive.UpsertSession(ctx, db.Session{ID: "excluded", Project: "fixture", Machine: "install", Agent: "claude"}))
 	require.NoError(t, archive.PutFederationExclusion(ctx, "excluded", "private"))
 	require.NoError(t, archive.StopFederationShare(ctx, link.UID, "share", "remove"))
-	require.NoError(t, archive.ReceiptFederationStop(ctx, link.UID, "share", "retained", 1, 0))
+	require.NoError(t, archive.ReceiptFederationStop(ctx, link.UID, "share", "retained", 1, 1))
 	share, err := archive.GetFederationShare(ctx, link.UID, "share")
 	require.NoError(t, err)
 	svc := NewService("spoke", "spoke", policy, archive)
