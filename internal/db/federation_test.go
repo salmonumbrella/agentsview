@@ -168,6 +168,7 @@ func TestDecodeFederationUserVersion(t *testing.T) {
 	}{
 		{179, false}, {archiveOnlyVersionBase + 179, true},
 		{federationVersionBase + 179, false}, {archiveOnlyVersionBase + federationVersionBase + 179, true},
+		{federationVersionBase + federationShareVersionBase + 179, false}, {archiveOnlyVersionBase + federationVersionBase + federationShareVersionBase + 179, true},
 	} {
 		version, archiveOnly := DecodeUserVersion(tc.version)
 		assert.Equal(t, 179, version)
@@ -182,7 +183,11 @@ func TestFederationShareStateSurvivesCopyAndLeave(t *testing.T) {
 	require.NoError(t, source.PutFederationLink(ctx, link))
 	share := FederationShare{UID: "share-a", LinkUID: "link-a", NormalizedRemote: "github.com/example/api", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: `{"selected":1}`, PolicyDigest: "digest-a"}
 	require.NoError(t, source.PutFederationShare(ctx, share))
-	require.NoError(t, source.PutFederationExclusion(ctx, "session-a", "share-a", "private"))
+	require.NoError(t, source.Update(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO sessions (id,project,first_message) VALUES ('session-a','fixture','')`)
+		return err
+	}))
+	require.NoError(t, source.PutFederationExclusion(ctx, "session-a", "private"))
 	require.NoError(t, target.CopyFederationStateFrom(ctx, source.Path()))
 	shares, err := target.ListFederationShares(ctx, "link-a")
 	require.NoError(t, err)
@@ -198,6 +203,9 @@ func TestFederationShareStateSurvivesCopyAndLeave(t *testing.T) {
 	shares, err = target.ListFederationShares(ctx, "link-a")
 	require.NoError(t, err)
 	assert.Empty(t, shares)
+	var afterLeave int
+	require.NoError(t, target.Reader().QueryRow(ctx, `PRAGMA user_version`).Scan(&afterLeave))
+	assert.Equal(t, federationVersionBase+federationShareVersionBase+CurrentDataVersion(), afterLeave)
 	var reason string
 	require.NoError(t, target.Reader().QueryRow(ctx, `SELECT reason FROM federation_exclusions WHERE session_id = 'session-a'`).Scan(&reason))
 	assert.Equal(t, "private", reason)
@@ -207,7 +215,7 @@ func TestFederationShareStateSurvivesCopyAndLeave(t *testing.T) {
 	assert.Equal(t, "private", reason)
 	var version int
 	require.NoError(t, target.Reader().QueryRow(ctx, `PRAGMA user_version`).Scan(&version))
-	assert.Equal(t, federationVersionBase+CurrentDataVersion(), version)
+	assert.Equal(t, federationVersionBase+federationShareVersionBase+CurrentDataVersion(), version)
 }
 
 func TestFederationShareDuplicateAndReconsent(t *testing.T) {
@@ -217,7 +225,8 @@ func TestFederationShareDuplicateAndReconsent(t *testing.T) {
 	require.NoError(t, database.PutFederationShare(ctx, first))
 	var version int
 	require.NoError(t, database.Reader().QueryRow(ctx, `PRAGMA user_version`).Scan(&version))
-	assert.Equal(t, federationVersionBase+CurrentDataVersion(), version)
+	assert.Equal(t, federationVersionBase+federationShareVersionBase+CurrentDataVersion(), version)
+	assert.Greater(t, version&^federationVersionBase, CurrentDataVersion())
 	next := first
 	next.UID = "share-b"
 	next.ConsentJSON = `{"shown":2}`
@@ -231,20 +240,17 @@ func TestFederationShareDuplicateAndReconsent(t *testing.T) {
 	assert.Equal(t, "share-a", shares[0].UID)
 	assert.Equal(t, "active", shares[0].State)
 	assert.Equal(t, `{"shown":2}`, shares[0].ConsentJSON)
-	require.NoError(t, database.PutFederationExclusion(ctx, "session-a", "share-a", "private"))
+	require.NoError(t, database.Update(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO sessions (id,project,first_message) VALUES ('session-a','fixture','')`)
+		return err
+	}))
+	require.NoError(t, database.PutFederationExclusion(ctx, "session-a", "private"))
 	require.NoError(t, database.DeleteFederationShare(ctx, "link-a", "share-a"))
 	require.NoError(t, database.PutFederationShare(ctx, next))
 	var reason string
 	require.NoError(t, database.Reader().QueryRow(ctx, `SELECT reason FROM federation_exclusions WHERE session_id='session-a'`).Scan(&reason))
 	assert.Equal(t, "private", reason)
 
-}
-
-func TestFederationShareDeliveryLedgerStartsEmpty(t *testing.T) {
-	database := testDB(t)
-	count, err := database.FederationDeliveryCount(t.Context(), "share-a")
-	require.NoError(t, err)
-	assert.Zero(t, count)
 }
 
 func TestFederationTablesUpgradePreservesSessions(t *testing.T) {
@@ -259,7 +265,7 @@ func TestFederationTablesUpgradePreservesSessions(t *testing.T) {
 	require.NoError(t, archive.Close())
 	old, err := sql.Open("sqlite3", path)
 	require.NoError(t, err)
-	_, err = old.ExecContext(ctx, `DROP TABLE federation_shares; DROP TABLE federation_exclusions; DROP TABLE federation_deliveries`)
+	_, err = old.ExecContext(ctx, `DROP TABLE federation_shares; DROP TABLE federation_exclusions`)
 	require.NoError(t, err)
 	require.NoError(t, old.Close())
 	archive, err = OpenIsolated(ctx, path)
@@ -268,5 +274,25 @@ func TestFederationTablesUpgradePreservesSessions(t *testing.T) {
 	var message string
 	require.NoError(t, archive.Reader().QueryRow(ctx, `SELECT first_message FROM sessions WHERE id='saved'`).Scan(&message))
 	assert.Equal(t, "preserve", message)
-	require.NoError(t, archive.PutFederationExclusion(ctx, "saved", "", "private"))
+	require.NoError(t, archive.PutFederationExclusion(ctx, "saved", "private"))
+}
+
+func TestFederationExclusionRequiresExistingSession(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.ErrorIs(t, d.PutFederationExclusion(ctx, "missing", "private"), ErrFederationSessionNotFound)
+	var count int
+	require.NoError(t, d.Reader().QueryRow(ctx, `SELECT count(*) FROM federation_exclusions`).Scan(&count))
+	assert.Zero(t, count)
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO sessions (id,project,first_message,machine,deleted_at) VALUES ('other','fixture','','other','2026-01-01')`)
+		return err
+	}))
+	require.NoError(t, d.PutFederationExclusion(ctx, "other", "first"))
+	require.NoError(t, d.PutFederationExclusion(ctx, "other", "second"))
+	var reason string
+	require.NoError(t, d.Reader().QueryRow(ctx, `SELECT reason FROM federation_exclusions WHERE session_id='other'`).Scan(&reason))
+	assert.Equal(t, "first", reason)
+	require.NoError(t, d.Reader().QueryRow(ctx, `SELECT count(*) FROM pragma_table_info('federation_exclusions') WHERE name='share_uid'`).Scan(&count))
+	assert.Zero(t, count)
 }

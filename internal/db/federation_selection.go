@@ -10,22 +10,70 @@ import (
 // FederationSelection is a single archive snapshot, selected by each session's
 // own repository identity and machine-local ownership evidence.
 type FederationSelection struct {
-	IDs                                 []string
-	Rows                                []SessionSummaryRow
-	ProjectKeys                         map[string]string
-	ToolCounts                          map[string]int
-	Outcomes                            map[string]string
-	Health                              map[string]*string
-	NotLocal, NotIdentifiable, Excluded int
+	IDs         []string
+	Rows        []SessionSummaryRow
+	ProjectKeys map[string]string
+	ToolCounts  map[string]int
+	Outcomes    map[string]string
+	Health      map[string]*string
+	NotLocal    int
+	// NotIdentifiable counts sessions without repository identity anywhere in the
+	// archive and sessions whose identity for this repository is ambiguous.
+	NotIdentifiable int
+	Excluded        int
 }
 
 func (db *DB) SelectFederationSessions(ctx context.Context, remote, since string) (FederationSelection, error) {
-	out := FederationSelection{IDs: []string{}, ProjectKeys: map[string]string{}, ToolCounts: map[string]int{}, Outcomes: map[string]string{}, Health: map[string]*string{}}
 	tx, err := db.getReader().BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return FederationSelection{}, err
+	}
+	defer tx.Rollback()
+	out, err := db.selectFederationSessionIDs(ctx, tx, remote, since)
 	if err != nil {
 		return out, err
 	}
+	err = QueryChunkedSize(out.IDs, maxSQLVars, func(ids []string) error {
+		placeholders, args := InPlaceholders(ids)
+		found, e := db.querySessionExportRowsFrom(ctx, tx, "sessions.id IN "+placeholders, args, 1e12, sessionExportCursorPayload{}, len(ids), sessionExportActivitySource{})
+		if e != nil {
+			return e
+		}
+		if _, e = db.attachSessionExportUsage(ctx, tx, found); e != nil {
+			return e
+		}
+		out.Rows = append(out.Rows, found...)
+		return nil
+	})
+	if err != nil {
+		return out, fmt.Errorf("selecting federation rows: %w", err)
+	}
+	sort.Slice(out.Rows, func(i, j int) bool { return out.Rows[i].ID < out.Rows[j].ID })
+	if err = tx.Commit(); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+// SelectFederationSessionIDs selects candidates without loading summaries or usage.
+func (db *DB) SelectFederationSessionIDs(ctx context.Context, remote, since string) (FederationSelection, error) {
+	tx, err := db.getReader().BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return FederationSelection{}, err
+	}
 	defer tx.Rollback()
+	out, err := db.selectFederationSessionIDs(ctx, tx, remote, since)
+	if err != nil {
+		return out, err
+	}
+	if err = tx.Commit(); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+func (db *DB) selectFederationSessionIDs(ctx context.Context, tx *sql.Tx, remote, since string) (FederationSelection, error) {
+	out := FederationSelection{IDs: []string{}, ProjectKeys: map[string]string{}, ToolCounts: map[string]int{}, Outcomes: map[string]string{}, Health: map[string]*string{}}
 	ids, err := sessionIDsForProjectRemotes(ctx, tx, []string{remote})
 	if err != nil {
 		return out, err
@@ -57,10 +105,11 @@ func (db *DB) SelectFederationSessions(ctx context.Context, remote, since string
 			rows.Close()
 			return out, err
 		}
-		if !selectedIDs[id] {
+		if !inRange.Valid || !inRange.Bool {
 			continue
 		}
-		if !inRange.Valid || !inRange.Bool {
+		if !selectedIDs[id] {
+			out.NotIdentifiable++
 			continue
 		}
 		if !local {
@@ -84,28 +133,11 @@ func (db *DB) SelectFederationSessions(ctx context.Context, remote, since string
 	if err = rows.Close(); err != nil {
 		return out, err
 	}
-	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM sessions s WHERE s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM session_project_identity_snapshots i WHERE i.session_id=s.id)`).Scan(&out.NotIdentifiable); err != nil {
+	var withoutIdentity int
+	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM sessions s WHERE s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM session_project_identity_snapshots i WHERE i.session_id=s.id)`).Scan(&withoutIdentity); err != nil {
 		return out, err
 	}
-	err = QueryChunkedSize(out.IDs, maxSQLVars, func(ids []string) error {
-		placeholders, args := InPlaceholders(ids)
-		found, e := db.querySessionExportRowsFrom(ctx, tx, "sessions.id IN "+placeholders, args, 1e12, sessionExportCursorPayload{}, len(ids), sessionExportActivitySource{})
-		if e != nil {
-			return e
-		}
-		out.Rows = append(out.Rows, found...)
-		return nil
-	})
-	if err != nil {
-		return out, fmt.Errorf("selecting federation rows: %w", err)
-	}
-	if _, err = db.attachSessionExportUsage(ctx, tx, out.Rows); err != nil {
-		return out, err
-	}
-	sort.Slice(out.Rows, func(i, j int) bool { return out.Rows[i].ID < out.Rows[j].ID })
-	if err = tx.Commit(); err != nil {
-		return out, err
-	}
+	out.NotIdentifiable += withoutIdentity
 	return out, nil
 }
 

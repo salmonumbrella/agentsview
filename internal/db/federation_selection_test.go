@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/json/jsontext"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -79,13 +80,13 @@ func TestFederationSelectionRequiresOwnSnapshotAndLocalProof(t *testing.T) {
 	assert.Equal(t, 1, mapping.MatchedSessions)
 	seedSessionExportPricing(t, database)
 	insertMessages(t, database, Message{SessionID: "selected", Ordinal: 1, Role: "assistant", Model: "model-computed", TokenUsage: jsontext.Value(`{"input_tokens":1000,"output_tokens":500}`), HasContextTokens: true, HasOutputTokens: true})
-	require.NoError(t, database.PutFederationExclusion(ctx, "excluded", "share-a", "private"))
+	require.NoError(t, database.PutFederationExclusion(ctx, "excluded", "private"))
 	result, err := database.SelectFederationSessions(ctx, "github.com/example/api", "2026-01-02")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"boundary", "selected"}, result.IDs)
 	assert.Equal(t, 5, result.NotLocal)
 	assert.Equal(t, 1, result.Excluded)
-	assert.Equal(t, 1, result.NotIdentifiable)
+	assert.Equal(t, 3, result.NotIdentifiable)
 	assert.Equal(t, 1, result.ToolCounts["selected"])
 	for _, row := range result.Rows {
 		if row.ID == "selected" {
@@ -94,5 +95,39 @@ func TestFederationSelectionRequiresOwnSnapshotAndLocalProof(t *testing.T) {
 			assert.True(t, row.ModelUsage.HasCost)
 			assert.Equal(t, int64(20000), row.ModelUsage.Cost.Microdollars)
 		}
+	}
+}
+
+func TestFederationSelectionAttachesUsageAcrossChunks(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO pg_sync_state (key,value) VALUES ('artifact_local_installation_id','install-a')`); err != nil {
+			return err
+		}
+		for i := 0; i < 1000; i++ {
+			id := fmt.Sprintf("session-%04d", i)
+			for _, q := range []string{
+				`INSERT INTO sessions (id,project,machine,agent,file_path,started_at) VALUES (?,'fixture','install-a','claude',?,'2026-01-02T00:00:00Z')`,
+				`INSERT INTO local_session_source_baselines (session_id,machine,agent,file_path) VALUES (?,'install-a','claude',?)`,
+				`INSERT INTO session_project_identity_snapshots (session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES (?,'fixture','install-a','2026-01-01','resolved',1,'github.com/example/api','git_remote',?)`,
+			} {
+				if _, err := tx.ExecContext(ctx, q, id, id); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO messages (session_id,ordinal,role,content,model,token_usage,has_context_tokens,has_output_tokens) VALUES (?,0,'assistant','','model-computed','{"input_tokens":1000,"output_tokens":500}',1,1)`, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	result, err := d.SelectFederationSessions(ctx, "github.com/example/api", "")
+	require.NoError(t, err)
+	require.Len(t, result.IDs, 1000)
+	require.Len(t, result.Rows, 1000)
+	for _, row := range result.Rows {
+		assert.Equal(t, 1000, row.ModelUsage.InputTokens)
+		assert.Equal(t, 500, row.ModelUsage.OutputTokens)
 	}
 }

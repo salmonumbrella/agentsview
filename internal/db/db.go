@@ -696,6 +696,10 @@ const archiveOnlyVersionBase = 1 << 20
 // Older builds refuse archives with federation rows; other archives are unchanged.
 const federationVersionBase = 1 << 21
 
+// Set while shares or exclusions exist; builds that strip only the older bit
+// read a version above dataVersion and refuse the archive.
+const federationShareVersionBase = 1 << 22
+
 const tokenCoverageRepairStatsKey = "token_coverage_repair_v1"
 
 const toolCallFieldBackfillStatsKey = "tool_call_field_backfill_v1"
@@ -2422,7 +2426,7 @@ func readUserVersion(ctx context.Context, conn interface {
 
 // DecodeUserVersion returns the parser version and permanent archive-only mode.
 func DecodeUserVersion(version int) (int, bool) {
-	version &^= federationVersionBase
+	version &^= federationVersionBase | federationShareVersionBase
 	if version >= archiveOnlyVersionBase {
 		return version - archiveOnlyVersionBase, true
 	}
@@ -2443,24 +2447,41 @@ func writeUserVersion(ctx context.Context, tx *sql.Tx, version int) error {
 			version += archiveOnlyVersionBase
 		}
 	}
-	for _, table := range []string{"federation_enrollments", "federation_links", "federation_shares", "federation_exclusions", "federation_deliveries"} {
+	hasFederation, err := federationTablesHaveRows(ctx, tx, []string{"federation_enrollments", "federation_links", "federation_shares", "federation_exclusions"})
+	if err != nil {
+		return err
+	}
+	if hasFederation {
+		version += federationVersionBase
+	}
+	hasShares, err := federationTablesHaveRows(ctx, tx, []string{"federation_shares", "federation_exclusions"})
+	if err != nil {
+		return err
+	}
+	if hasShares {
+		version += federationShareVersionBase
+	}
+	_, err = tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", version))
+	return err
+}
+
+func federationTablesHaveRows(ctx context.Context, tx *sql.Tx, tables []string) (bool, error) {
+	for _, table := range tables {
 		var exists bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)`, table).Scan(&exists); err != nil {
-			return err
+			return false, err
 		}
 		if exists {
 			var hasRows bool
 			if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM `+table+`)`).Scan(&hasRows); err != nil {
-				return err
+				return false, err
 			}
 			if hasRows {
-				version += federationVersionBase
-				break
+				return true, nil
 			}
 		}
 	}
-	_, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", version))
-	return err
+	return false, nil
 }
 
 type schemaColumnMigration struct {

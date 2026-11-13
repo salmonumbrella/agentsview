@@ -1882,16 +1882,6 @@ CREATE TABLE IF NOT EXISTS federation_shares (
 );
 CREATE TABLE IF NOT EXISTS federation_exclusions (
     session_id TEXT PRIMARY KEY,
-    share_uid TEXT NOT NULL,
     reason TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-CREATE TABLE IF NOT EXISTS federation_deliveries (
-    share_uid TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    record_uid TEXT NOT NULL,
-    transcript_revision TEXT NOT NULL,
-    hash TEXT NOT NULL,
-    state TEXT NOT NULL,
-    PRIMARY KEY (share_uid, session_id)
 );

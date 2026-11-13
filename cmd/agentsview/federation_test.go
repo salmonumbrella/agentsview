@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -121,4 +122,33 @@ func TestFederationPushRequiresDryRun(t *testing.T) {
 	cmd.SetArgs(nil)
 	err := cmd.ExecuteContext(t.Context())
 	assert.ErrorContains(t, err, "--dry-run is required")
+}
+
+type failingShareWriter struct{}
+
+func (failingShareWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+func TestSharePreviewWriteFailureDoesNotPostConsent(t *testing.T) {
+	posts := 0
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/federation/shares/preview" {
+			_, _ = io.WriteString(w, `{}`)
+			return
+		}
+		posts++
+	}))
+	t.Cleanup(daemon.Close)
+	err := addFederationShare(t.Context(), daemon.URL, "", federation.ShareGrant{}, strings.NewReader("y\n"), failingShareWriter{})
+	assert.ErrorContains(t, err, "write failed")
+	assert.Zero(t, posts)
+}
+
+func TestFederationDryRunReturnsDaemonMessage(t *testing.T) {
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"hub policy unavailable"}`)
+	}))
+	t.Cleanup(daemon.Close)
+	var out bytes.Buffer
+	assert.ErrorContains(t, streamFederationDryRun(t.Context(), daemon.URL, "", &out), "hub policy unavailable")
 }

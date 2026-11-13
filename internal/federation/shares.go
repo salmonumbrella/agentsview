@@ -139,6 +139,10 @@ func (s *Service) previewWithPolicy(ctx context.Context, g ShareGrant, hub *HubS
 	}
 	p = SharePreview{Grant: g, PolicyDigest: hub.PolicyDigest, Retention: hub.Policy.Retention, Processing: hub.Policy.Processing, Audience: "operators", Includes: shareIncludes, Omits: shareOmits, Disclosure: shareDisclosure, AttributionNotice: shareAttributionNotice, DeliveryNotice: shareDeliveryNotice, Selected: len(selected.IDs), NotLocal: selected.NotLocal, NotIdentifiable: selected.NotIdentifiable, Excluded: selected.Excluded, Records: []SummaryRecord{}}
 	agents, models := map[string]bool{}, map[string]bool{}
+	selectedIDs := make(map[string]bool, len(selected.IDs))
+	for _, id := range selected.IDs {
+		selectedIDs[id] = true
+	}
 	p.Usage.HasCost = len(selected.Rows) > 0
 	for _, row := range selected.Rows {
 		agents[row.Agent] = true
@@ -160,7 +164,7 @@ func (s *Service) previewWithPolicy(ctx context.Context, g ShareGrant, hub *HubS
 		}
 		p.Usage.HasCost = p.Usage.HasCost && u.HasCost
 		record := SummaryRecord{SessionID: row.ID, ProjectKey: selected.ProjectKeys[row.ID], Remote: g.Project, Agent: row.Agent, Models: row.ModelUsage.Models, StartedAt: row.StartedAt, EndedAt: row.EndedAt, MessageCount: row.MessageCount, UserMessageCount: row.UserMessageCount, AssistantMessageCount: row.AssistantMessageCount, ToolCount: selected.ToolCounts[row.ID], Usage: SummaryUsage{InputTokens: row.ModelUsage.InputTokens, OutputTokens: row.ModelUsage.OutputTokens, CacheCreationInputTokens: row.ModelUsage.CacheCreationInputTokens, CacheReadInputTokens: row.ModelUsage.CacheReadInputTokens, ReasoningTokens: row.ModelUsage.ReasoningTokens, Cost: row.ModelUsage.Cost, HasCost: row.ModelUsage.HasCost}, Automated: row.IsAutomated, Outcome: selected.Outcomes[row.ID], Health: selected.Health[row.ID]}
-		if row.ParentSessionID != nil && slices.Contains(selected.IDs, *row.ParentSessionID) {
+		if row.ParentSessionID != nil && selectedIDs[*row.ParentSessionID] {
 			record.ParentID = row.ParentSessionID
 			record.Relationship = row.RelationshipType
 		}
@@ -276,7 +280,7 @@ func (s *Service) Shares(ctx context.Context) (ShareList, error) {
 		if !matches {
 			continue
 		}
-		selection, err := s.db.SelectFederationSessions(ctx, remote, "")
+		selection, err := s.db.SelectFederationSessionIDs(ctx, remote, "")
 		if err != nil {
 			return out, err
 		}
@@ -288,8 +292,7 @@ func (s *Service) Shares(ctx context.Context) (ShareList, error) {
 }
 
 type ShareDetails struct {
-	Share      db.FederationShare `json:"share"`
-	Deliveries int                `json:"deliveries"`
+	Share db.FederationShare `json:"share"`
 }
 
 func (s *Service) Share(ctx context.Context, uid string) (ShareDetails, error) {
@@ -302,18 +305,13 @@ func (s *Service) Share(ctx context.Context, uid string) (ShareDetails, error) {
 	if err != nil {
 		return out, err
 	}
-	out.Deliveries, err = s.db.FederationDeliveryCount(ctx, uid)
-	return out, err
+	return out, nil
 }
+
+const policyPausedMessage = "policy changed; run federation share add to review and accept"
+
 func (s *Service) PauseShare(ctx context.Context, uid string) error {
 	link, err := s.db.GetFederationLink(ctx)
-	if err != nil {
-		return err
-	}
-	return s.db.SetFederationShareState(ctx, link.UID, uid, "active", "paused")
-}
-func (s *Service) ResumeShare(ctx context.Context, uid string) error {
-	link, _, err := s.livePolicy(ctx)
 	if err != nil {
 		return err
 	}
@@ -321,8 +319,28 @@ func (s *Service) ResumeShare(ctx context.Context, uid string) error {
 	if err != nil {
 		return err
 	}
-	if share.State == "policy_paused" {
-		return inputError("policy changed; run federation share add to review and accept")
+	switch share.State {
+	case "paused":
+		return inputError("share is already paused")
+	case "policy_paused":
+		return inputError(policyPausedMessage)
+	}
+	return s.db.SetFederationShareState(ctx, link.UID, uid, "active", "paused")
+}
+func (s *Service) ResumeShare(ctx context.Context, uid string) error {
+	link, err := s.db.GetFederationLink(ctx)
+	if err != nil {
+		return err
+	}
+	share, err := s.db.GetFederationShare(ctx, link.UID, uid)
+	if err != nil {
+		return err
+	}
+	switch share.State {
+	case "policy_paused":
+		return inputError(policyPausedMessage)
+	case "active":
+		return inputError("share is already active")
 	}
 	return s.db.SetFederationShareState(ctx, link.UID, uid, "paused", "active")
 }
@@ -337,26 +355,15 @@ func (s *Service) Exclude(ctx context.Context, id, reason string) error {
 	if id == "" {
 		return inputError("session ID is required")
 	}
-	link, err := s.db.GetFederationLink(ctx)
+	_, err := s.db.GetFederationLink(ctx)
 	if err != nil {
 		return err
 	}
-	shares, err := s.db.ListFederationShares(ctx, link.UID)
-	if err != nil {
-		return err
+	err = s.db.PutFederationExclusion(ctx, id, reason)
+	if errors.Is(err, db.ErrFederationSessionNotFound) {
+		return inputError("session not found")
 	}
-	owner := ""
-	for _, share := range shares {
-		selection, err := s.db.SelectFederationSessions(ctx, share.NormalizedRemote, share.Since)
-		if err != nil {
-			return err
-		}
-		if slices.Contains(selection.IDs, id) {
-			owner = share.UID
-			break
-		}
-	}
-	return s.db.PutFederationExclusion(ctx, id, owner, reason)
+	return err
 }
 func (s *Service) DryRun(ctx context.Context) ([]SummaryRecord, error) {
 	link, hub, err := s.livePolicy(ctx)

@@ -1505,9 +1505,11 @@ anchored to the message holding the tool call.
 ## Federation share state
 
 Federation shares retain the preview and policy digest accepted by the member.
-Exclusions are keyed by session across the archive and survive share removal,
-leaving a hub, and resync. The federation version bit covers shares, exclusions,
-and delivery ledger rows, and resync copies them with the link state. Summary
-selection requires the exact local installation ID, a matching local source
-baseline, and no attached-archive or imported-artifact provenance. It uses each
-session's own repository snapshot in the same read transaction as its summary.
+Exclusions are keyed by session across the archive, record no share, and survive
+share removal, leaving a hub, and resync. Version bit `1 << 21` covers links and
+enrollments; `1 << 22` covers shares and exclusions so older builds refuse such
+an archive instead of dropping them on a full resync. Resync copies federation
+state with the link. Summary selection requires the exact local installation
+ID, a matching local source baseline, and no attached-archive or
+imported-artifact provenance. It uses each session's own repository snapshot in
+the same read transaction as its summary.

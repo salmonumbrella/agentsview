@@ -238,9 +238,12 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 				return err
 			}
 		}
-		for _, id := range []string{"unshared", "ambiguous", "repo-less", "imported", "child", "before"} {
+		for _, id := range []string{"unshared", "ambiguous", "repo-less", "imported", "child", "before", "remote-only"} {
 			machine := "install-a"
 			started := "2026-01-02T00:00:00Z"
+			if id == "remote-only" {
+				machine = "install-b"
+			}
 			if id == "before" {
 				started = "2026-01-01T23:59:59Z"
 			}
@@ -253,6 +256,9 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 				}
 			}
 			remote := "github.com/example/api"
+			if id == "remote-only" {
+				remote = "github.com/example/remote-only"
+			}
 			if id == "unshared" || id == "child" {
 				remote = "github.com/example/private"
 			}
@@ -280,6 +286,7 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, listed.Shares)
 	assert.Contains(t, listed.Suggestions, "github.com/example/api")
+	assert.NotContains(t, listed.Suggestions, "github.com/example/remote-only")
 	grant := ShareGrant{Project: "github.com/example/api", Level: "summary", Attribution: "pooled", Since: "2026-01-02"}
 	preview, err := svc.PreviewShare(t.Context(), grant)
 	require.NoError(t, err)
@@ -311,15 +318,25 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 	require.NoError(t, err)
 	assert.JSONEq(t, string(shown), shares[0].ConsentJSON)
 	stored := shares[0].ConsentJSON
+	require.NoError(t, archive.PutFederationShare(t.Context(), db.FederationShare{UID: "share-paused", LinkUID: link.UID, NormalizedRemote: "github.com/example/paused", Level: "summary", Attribution: "pooled", Audience: "operators", State: "paused", ConsentJSON: `{}`, PolicyDigest: digest}))
+	_, err = svc.Status(t.Context())
+	require.NoError(t, err)
+	paused, err := archive.GetFederationShare(t.Context(), link.UID, "share-paused")
+	require.NoError(t, err)
+	assert.Equal(t, "paused", paused.State)
+	active, err := archive.GetFederationShare(t.Context(), link.UID, shares[0].UID)
+	require.NoError(t, err)
+	assert.Equal(t, "active", active.State)
 	policy.Processing = "aggregated"
 	digest, err = export.DigestCanonical(policy)
 	require.NoError(t, err)
 	status, err := svc.Status(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, 1, status.Shares)
+	assert.Equal(t, 2, status.Shares)
 	shares, err = archive.ListFederationShares(t.Context(), link.UID)
 	require.NoError(t, err)
-	require.Len(t, shares, 1)
+	require.Len(t, shares, 2)
+	assert.Equal(t, "policy_paused", shares[1].State)
 	assert.Equal(t, "policy_paused", shares[0].State)
 	assert.Equal(t, stored, shares[0].ConsentJSON)
 	assert.ErrorContains(t, svc.ResumeShare(t.Context(), shares[0].UID), "share add")
@@ -347,5 +364,29 @@ func TestShareRejectsUnshareableGrant(t *testing.T) {
 	} {
 		_, err := validateGrant(tc.grant, hub)
 		assert.ErrorContains(t, err, tc.message)
+	}
+}
+
+func TestShareLocalStateAndExclusionErrors(t *testing.T) {
+	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, archive.Close()) })
+	require.NoError(t, archive.PutFederationLink(t.Context(), db.FederationLink{UID: "link-a", HubOrigin: "http://127.0.0.1:1", HubArchiveID: "hub-a", EnrollmentUID: "enr-a", Member: "member-a", TokenFile: "missing", ProtocolVersion: 1, State: "active"}))
+	require.NoError(t, archive.PutFederationShare(t.Context(), db.FederationShare{UID: "share-a", LinkUID: "link-a", NormalizedRemote: "github.com/example/api", Level: "summary", Attribution: "pooled", Audience: "operators", State: "paused", ConsentJSON: `{}`, PolicyDigest: "digest"}))
+	svc := NewService("spoke", "spoke-a", config.FederationHubConfig{}, archive)
+	require.NoError(t, svc.ResumeShare(t.Context(), "share-a"))
+	assert.EqualError(t, svc.ResumeShare(t.Context(), "share-a"), "share is already active")
+	require.NoError(t, svc.PauseShare(t.Context(), "share-a"))
+	assert.EqualError(t, svc.PauseShare(t.Context(), "share-a"), "share is already paused")
+	require.ErrorIs(t, svc.PauseShare(t.Context(), "missing"), sql.ErrNoRows)
+	require.ErrorIs(t, svc.ResumeShare(t.Context(), "missing"), sql.ErrNoRows)
+	require.NoError(t, archive.PauseFederationSharesForPolicy(t.Context(), "link-a", "changed"))
+	assert.EqualError(t, svc.ResumeShare(t.Context(), "share-a"), "policy changed; run federation share add to review and accept")
+	assert.EqualError(t, svc.PauseShare(t.Context(), "share-a"), "policy changed; run federation share add to review and accept")
+	for _, tc := range []struct{ id, message string }{{"", "session ID is required"}, {"missing", "session not found"}} {
+		err := svc.Exclude(t.Context(), tc.id, "")
+		var input *InputError
+		require.ErrorAs(t, err, &input)
+		assert.Equal(t, tc.message, input.Message)
 	}
 }

@@ -21,17 +21,29 @@ import (
 )
 
 func federationRequest(ctx context.Context, base, token, method, path string, body any, out any) error {
+	resp, err := federationResponse(ctx, base, token, method, path, body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if out != nil {
+		return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(out)
+	}
+	return nil
+}
+
+func federationResponse(ctx context.Context, base, token, method, path string, body any) (*http.Response, error) {
 	var input io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		input = bytes.NewReader(data)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimSuffix(base, "/")+path, input)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Origin", daemonOriginURL(base))
 	if token != "" {
@@ -42,27 +54,25 @@ func federationRequest(ctx context.Context, base, token, method, path string, bo
 	}
 	client, err := requestsign.ClientFromEnvironment(base, &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return errors.New("federation daemon request failed")
+		return nil, errors.New("federation daemon request failed")
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
 		var response struct {
 			Error string `json:"error"`
 		}
 		if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&response) == nil && response.Error != "" {
-			return fmt.Errorf("federation: %s", response.Error)
+			return nil, fmt.Errorf("federation: %s", response.Error)
 		}
-		return fmt.Errorf("federation daemon request returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("federation daemon request returned HTTP %d", resp.StatusCode)
 	}
-	if out != nil {
-		return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(out)
-	}
-	return nil
+	return resp, nil
 }
+
 func joinFederation(ctx context.Context, base, token, hub, hubArchive, credentialFile string) error {
 	absolute, err := filepath.Abs(credentialFile)
 	if err != nil {
@@ -209,33 +219,20 @@ func addFederationShare(ctx context.Context, base, token string, grant federatio
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(out, string(data))
+	if _, err = fmt.Fprintln(out, string(data)); err != nil {
+		return err
+	}
 	if !confirm(in, out, "Create this share?") {
 		return nil
 	}
 	return federationRequest(ctx, base, token, http.MethodPost, "/api/v1/federation/shares", preview, nil)
 }
 func streamFederationDryRun(ctx context.Context, base, token string, out io.Writer) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(base, "/")+"/api/v1/federation/dry-run", nil)
+	resp, err := federationResponse(ctx, base, token, http.MethodGet, "/api/v1/federation/dry-run", nil)
 	if err != nil {
 		return err
-	}
-	req.Header.Set("Origin", daemonOriginURL(base))
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	client, err := requestsign.ClientFromEnvironment(base, &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }})
-	if err != nil {
-		return err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return errors.New("federation daemon request failed")
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("federation daemon request returned HTTP %d", resp.StatusCode)
-	}
 	_, err = io.Copy(out, resp.Body)
 	return err
 }
@@ -251,7 +248,7 @@ func newFederationShareCommand() *cobra.Command {
 	}}
 	add.Flags().StringVar(&g.Project, "project", "", "Repository remote")
 	add.Flags().StringVar(&g.Level, "level", "", "Share level")
-	add.Flags().StringVar(&g.Since, "since", "", "Earliest date")
+	add.Flags().StringVar(&g.Since, "since", "", "Earliest session start date (UTC)")
 	add.Flags().StringVar(&g.Attribution, "attribution", "pooled", "Attribution request")
 	_ = add.MarkFlagRequired("project")
 	_ = add.MarkFlagRequired("level")

@@ -273,8 +273,13 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 		out.Hub.State, out.Hub.Message = HubError, "federation enrollment changed"
 		return out, nil
 	}
-	if err := s.db.PauseFederationSharesForPolicy(ctx, link.UID, h.PolicyDigest); err != nil {
-		return out, err
+	for _, share := range shares {
+		if share.State != "policy_paused" && share.PolicyDigest != h.PolicyDigest {
+			if err := s.db.PauseFederationSharesForPolicy(ctx, link.UID, h.PolicyDigest); err != nil {
+				return out, err
+			}
+			break
+		}
 	}
 	out.Hub.State, out.Hub.Policy, out.Hub.PolicyDigest = HubOK, &h.Policy, h.PolicyDigest
 	return out, nil

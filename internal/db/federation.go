@@ -179,7 +179,7 @@ func (db *DB) CopyFederationStateFrom(ctx context.Context, sourcePath string) er
 		return err
 	}
 	defer tx.Rollback()
-	for table, columns := range map[string]string{"federation_enrollments": "enrollment_uid,spoke_archive_id,member,spoke_name,credential_sha256,created_at,last_handshake_at,revoked_at", "federation_links": "link_uid,hub_origin,hub_archive_id,enrollment_uid,member,token_file,protocol_version,state,created_at", "federation_shares": "share_uid,link_uid,normalized_remote,level,attribution,since,audience,state,consent_json,policy_digest,created_at", "federation_exclusions": "session_id,share_uid,reason,created_at", "federation_deliveries": "share_uid,session_id,record_uid,transcript_revision,hash,state"} {
+	for table, columns := range map[string]string{"federation_enrollments": "enrollment_uid,spoke_archive_id,member,spoke_name,credential_sha256,created_at,last_handshake_at,revoked_at", "federation_links": "link_uid,hub_origin,hub_archive_id,enrollment_uid,member,token_file,protocol_version,state,created_at", "federation_shares": "share_uid,link_uid,normalized_remote,level,attribution,since,audience,state,consent_json,policy_digest,created_at", "federation_exclusions": "session_id,reason,created_at"} {
 		var present int
 		if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM federation_old.sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&present); err != nil {
 			return err
@@ -255,9 +255,19 @@ func (db *DB) PauseFederationSharesForPolicy(ctx context.Context, linkUID, diges
 		return stampFederationVersion(ctx, tx)
 	})
 }
-func (db *DB) PutFederationExclusion(ctx context.Context, sessionID, shareUID, reason string) error {
+
+var ErrFederationSessionNotFound = errors.New("federation session not found")
+
+func (db *DB) PutFederationExclusion(ctx context.Context, sessionID, reason string) error {
 	return db.Update(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO federation_exclusions (session_id,share_uid,reason) VALUES (?,?,?) ON CONFLICT(session_id) DO NOTHING`, sessionID, shareUID, reason); err != nil {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)`, sessionID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return ErrFederationSessionNotFound
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO federation_exclusions (session_id,reason) VALUES (?,?) ON CONFLICT(session_id) DO NOTHING`, sessionID, reason); err != nil {
 			return err
 		}
 		return stampFederationVersion(ctx, tx)
@@ -301,10 +311,4 @@ func (db *DB) DeleteFederationShare(ctx context.Context, linkUID, uid string) er
 		}
 		return stampFederationVersion(ctx, tx)
 	})
-}
-
-func (db *DB) FederationDeliveryCount(ctx context.Context, shareUID string) (int, error) {
-	var count int
-	err := db.getReader().QueryRowContext(ctx, `SELECT count(*) FROM federation_deliveries WHERE share_uid=? AND state='sent'`, shareUID).Scan(&count)
-	return count, err
 }
