@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -42,6 +45,7 @@ func TestFederationRevokePublishesCommittedPartialCleanup(t *testing.T) {
 		_, err := database.PutFederationHubShare(ctx, "spoke", share)
 		require.NoError(t, err)
 		record := db.FederationHubRecord{UID: item.uid, Hash: "hash", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: db.SessionBatchWrite{Session: db.Session{ID: item.uid, Project: "fixture", Machine: "federated", Agent: "claude"}}}
+		record.Write.UsageEvents = []db.UsageEvent{{SessionID: item.uid, Source: "federation", Model: "fixture", InputTokens: 42, OccurredAt: "2026-01-01T00:00:00Z", DedupKey: "fixture"}}
 		_, err = database.CommitFederationBatch(ctx, "enr", "spoke", item.uid, item.policy, 1, 1, "batch", []db.FederationHubRecord{record})
 		require.NoError(t, err)
 	}
@@ -69,11 +73,34 @@ func TestFederationRevokePublishesCommittedPartialCleanup(t *testing.T) {
 		err := database.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='known'`).Scan(&known)
 		assert.NoError(t, err)
 		assert.Zero(t, known) // The callback observes the committed purge.
+		if callbacks.Load() == 2 {
+			var other int
+			assert.NoError(t, database.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='other'`).Scan(&other))
+			assert.Zero(t, other)
+		}
 		callbacks.Add(1)
 	}))
 	srv.broadcaster = NewBroadcaster(0)
 	events, unsubscribe := srv.broadcaster.Subscribe()
 	defer unsubscribe()
+	streamServer := httptest.NewServer(srv.Handler())
+	defer streamServer.Close()
+	streamCtx, cancelStream := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelStream()
+	streamReq, err := http.NewRequestWithContext(streamCtx, http.MethodGet, streamServer.URL+"/api/v1/events", nil)
+	require.NoError(t, err)
+	stream, err := streamServer.Client().Do(streamReq)
+	require.NoError(t, err)
+	defer stream.Body.Close()
+	require.Equal(t, http.StatusOK, stream.StatusCode)
+	streamReader := bufio.NewReader(stream.Body)
+	ready, err := streamReader.ReadString('\n')
+	require.NoError(t, err)
+	assert.Contains(t, ready, "events_ready")
+	_, err = streamReader.ReadString('\n') // ready data
+	require.NoError(t, err)
+	_, err = streamReader.ReadString('\n') // event separator
+	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/federation/enrollments/enr/revoke", nil)
 	req.Host = "127.0.0.1:8080"
 	req.Header.Set("Origin", "http://127.0.0.1:8080")
@@ -85,10 +112,21 @@ func TestFederationRevokePublishesCommittedPartialCleanup(t *testing.T) {
 	require.NotEmpty(t, events)
 	assert.Equal(t, "sessions", (<-events).Scope)
 	assert.EqualValues(t, 1, callbacks.Load())
+	streamEvent, err := streamReader.ReadString('\n')
+	require.NoError(t, err)
+	streamData, err := streamReader.ReadString('\n')
+	require.NoError(t, err)
+	assert.Contains(t, streamEvent, "data_changed")
+	assert.Contains(t, streamData, `"scope":"sessions"`)
 	var known, legacy int
 	require.NoError(t, database.Reader().QueryRow(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='known'),(SELECT count(*) FROM sessions WHERE id='legacy')`).Scan(&known, &legacy))
 	assert.Zero(t, known)
 	assert.Equal(t, 1, legacy)
+	var knownUsage, knownOwnership, legacyUsage int
+	require.NoError(t, database.Reader().QueryRow(ctx, `SELECT (SELECT count(*) FROM usage_events WHERE session_id='known'),(SELECT count(*) FROM federation_records WHERE session_id='known'),(SELECT count(*) FROM usage_events WHERE session_id='legacy')`).Scan(&knownUsage, &knownOwnership, &legacyUsage))
+	assert.Zero(t, knownUsage)
+	assert.Zero(t, knownOwnership)
+	assert.Equal(t, 1, legacyUsage)
 	var otherCount, messages int
 	require.NoError(t, database.Reader().QueryRow(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='other'),(SELECT count(*) FROM messages WHERE session_id='collision' AND content='original')`).Scan(&otherCount, &messages))
 	assert.Equal(t, 1, otherCount)
@@ -145,6 +183,19 @@ func TestFederationRevokePublishesCommittedPartialCleanup(t *testing.T) {
 	var retainedCount int
 	require.NoError(t, database.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='retained'`).Scan(&retainedCount))
 	assert.Equal(t, 1, retainedCount)
+	// A separately delivered member-controlled enrollment succeeds and
+	// publishes its own committed purge once.
+	otherRequest := httptest.NewRequest(http.MethodPost, "/api/v1/federation/enrollments/other-enr/revoke", nil)
+	otherRequest.Host = "127.0.0.1:8080"
+	otherRequest.Header.Set("Origin", "http://127.0.0.1:8080")
+	response = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, otherRequest)
+	assert.Equal(t, http.StatusOK, response.Code)
+	require.NotEmpty(t, events)
+	assert.Equal(t, "sessions", (<-events).Scope)
+	assert.EqualValues(t, 3, callbacks.Load())
+	require.NoError(t, database.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='other'`).Scan(&otherCount))
+	assert.Zero(t, otherCount)
 }
 
 func TestFederationInventoryRejectsChangedPolicyOverHTTP(t *testing.T) {
@@ -1633,6 +1684,15 @@ func TestRetainedSnapshotRecoversHubSequenceWithoutSendingContent(t *testing.T) 
 				assert.Zero(t, ownedB)
 				assert.Zero(t, ownedC)
 				assert.Zero(t, usage)
+				for _, id := range []string{"a", "b", "c"} {
+					read, err := hubDB.GetSession(ctx, id)
+					require.NoError(t, err)
+					if id == "a" {
+						assert.NotNil(t, read)
+					} else {
+						assert.Nil(t, read)
+					}
+				}
 				var localC int
 				require.NoError(t, replacement.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='c'`).Scan(&localC))
 				assert.Equal(t, 1, localC)
