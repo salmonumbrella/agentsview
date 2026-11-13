@@ -243,6 +243,45 @@ func TestHubPulseProtectsWholeSummaryAfterOneMemberChanges(t *testing.T) {
 			assert.Empty(t, later.Categories)
 			require.Len(t, later.Projects, 1)
 			assert.Equal(t, members[3].payload.ProjectKey, later.Projects[0].Key)
+			q := later.Projects[0]
+			assert.Equal(t, db.FederationPulseMetric{Value: new(int64(3)), State: "available"}, q.Totals["usage_observed_sessions"])
+			assert.Equal(t, db.FederationPulseMetric{Value: new(int64(0)), State: "available"}, q.Totals["automated_sessions"])
+			assert.Equal(t, db.FederationPulseRatio{Value: new(float64(0)), State: "available"}, q.Ratios["automation_share"])
+			require.Len(t, q.Agents, 1)
+			assert.Equal(t, "codex", q.Agents[0].Key)
+			assert.Equal(t, db.FederationPulseMetric{Value: new(int64(3)), State: "available"}, q.Agents[0].Metrics["sessions"])
+			switch dimension {
+			case "zero-to-unknown":
+				assert.Equal(t, db.FederationPulseMetric{Value: new(int64(0)), State: "available"}, q.Agents[0].Metrics["cost_microdollars"])
+			case "partial-to-known":
+				assert.Equal(t, db.FederationPulseMetric{Value: new(int64(1500)), State: "partial"}, q.Agents[0].Metrics["cost_microdollars"])
+			default:
+				assert.Equal(t, db.FederationPulseMetric{Value: new(int64(1500)), State: "available"}, q.Agents[0].Metrics["cost_microdollars"])
+			}
+			require.Len(t, q.Categories, 1)
+			assert.Equal(t, "interactive", q.Categories[0].Key)
+			assert.Equal(t, db.FederationPulseMetric{Value: new(int64(3)), State: "available"}, q.Categories[0].Metrics["sessions"])
+			if dimension == "outcome-unknown" {
+				assert.Equal(t, db.FederationPulseMetric{Value: new(int64(3)), State: "available"}, q.Totals["outcome_observed_sessions"])
+				assert.Equal(t, db.FederationPulseRatio{Value: new(float64(1)), State: "available"}, q.Ratios["outcome_coverage"])
+				require.Len(t, q.Outcomes, 1)
+				assert.Equal(t, "completed", q.Outcomes[0].Key)
+				assert.Equal(t, db.FederationPulseMetric{Value: new(int64(3)), State: "available"}, q.Outcomes[0].Metrics["sessions"])
+			} else {
+				assert.Equal(t, db.FederationPulseMetric{State: "unavailable"}, q.Totals["outcome_observed_sessions"])
+				assert.Equal(t, db.FederationPulseRatio{State: "unavailable"}, q.Ratios["outcome_coverage"])
+				assert.Empty(t, q.Outcomes)
+			}
+			if dimension == "health-absent" {
+				assert.Equal(t, db.FederationPulseMetric{Value: new(int64(3)), State: "available"}, q.Totals["health_observed_sessions"])
+				require.Len(t, q.Grades, 1)
+				assert.Equal(t, "A", q.Grades[0].Key)
+				assert.Equal(t, db.FederationPulseMetric{Value: new(int64(3)), State: "available"}, q.Grades[0].Metrics["sessions"])
+			} else {
+				assert.Equal(t, db.FederationPulseMetric{State: "unavailable"}, q.Totals["health_observed_sessions"])
+				assert.Equal(t, db.FederationPulseRatio{State: "unavailable"}, q.Ratios["health_coverage"])
+				assert.Empty(t, q.Grades)
+			}
 			require.NotNil(t, later.Projects[0].Ratios["usage_coverage"].Value)
 			assert.Equal(t, float64(1), *later.Projects[0].Ratios["usage_coverage"].Value)
 			if dimension == "health-absent" {
