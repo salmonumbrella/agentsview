@@ -377,6 +377,48 @@ func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T)
 	assert.Equal(t, exported, *got.Totals["tokens"].Value)
 }
 
+// An untraced source change must not hide an independent project's results.
+func TestFederationPulseDirtyProjectKeepsIndependentProject(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	d := testDB(t)
+	ctx := t.Context()
+	start := "2026-07-29T09:00:00Z"
+	for i, name := range []string{"a", "b", "c", "d", "e", "f"} {
+		project, remote := "p", "example/p"
+		if i >= 3 {
+			project, remote = "q", "example/q"
+		}
+		enrollment, spoke, share := "e-"+name, "s-"+name, "h-"+name
+		require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: name, CredentialSHA256: "digest-" + name}))
+		_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: remote, ProjectKey: project, Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active", Retention: "member-controlled"})
+		require.NoError(t, err)
+		cost := money.Money{Microdollars: int64((i + 1) * 100)}
+		record := FederationHubRecord{UID: name, Hash: "initial", Remote: remote, ProjectKey: project, Write: SessionBatchWrite{Session: Session{ID: name, Project: remote, Agent: "codex", StartedAt: &start}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "federation", Model: "model", InputTokens: (i + 1) * 10, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: start, DedupKey: "model"}}}}
+		_, err = d.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", []FederationHubRecord{record})
+		require.NoError(t, err)
+	}
+	now := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
+	first, err := d.readFederationPulse(ctx, "2026-07-29", 3, now)
+	require.NoError(t, err)
+	assert.Equal(t, Ptr(int64(210)), first.Totals["tokens"].Value)
+	assert.Equal(t, Ptr(int64(2100)), first.Totals["cost_microdollars"].Value)
+	result, err := d.getWriter().ExecContext(ctx, `INSERT INTO messages(session_id,ordinal,role,content,timestamp) VALUES('a',0,'user','synthetic','2026-07-29T09:00:00Z')`)
+	require.NoError(t, err)
+	rows, err := result.RowsAffected()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, rows)
+	later, err := d.readFederationPulse(ctx, "2026-07-29", 3, now)
+	require.NoError(t, err)
+	assert.True(t, later.Suppressed)
+	assert.Nil(t, later.Totals["tokens"].Value)
+	assert.Nil(t, later.Totals["cost_microdollars"].Value)
+	require.Len(t, later.Projects, 1)
+	assert.Equal(t, "q", later.Projects[0].Key)
+	assert.Equal(t, Ptr(int64(3)), later.Projects[0].Totals["sessions"].Value)
+	assert.Equal(t, Ptr(int64(150)), later.Projects[0].Totals["tokens"].Value)
+	assert.Equal(t, Ptr(int64(1500)), later.Projects[0].Totals["cost_microdollars"].Value)
+}
+
 // These regressions describe the accepted cross-release privacy requirement.
 // The publication policy is still open; no admission bypass is used here.
 func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
