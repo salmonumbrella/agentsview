@@ -101,7 +101,7 @@ func TestStopManifestUsesConsentedRetentionAndStaleRegisterStaysStopped(t *testi
 // A change to any published membership or availability dimension must not
 // become a second view of a single member while another project stays useful.
 func TestHubPulseProtectsWholeSummaryAfterOneMemberChanges(t *testing.T) {
-	for _, dimension := range []string{"agent", "model", "outcome", "outcome-unknown", "health", "health-absent", "automation", "usage-absent", "cost-availability", "zero-to-unknown", "partial-to-known"} {
+	for _, dimension := range []string{"agent", "model", "key-vanishes", "outcome", "outcome-unknown", "health", "health-absent", "automation", "usage-absent", "cost-availability", "zero-to-unknown", "partial-to-known"} {
 		t.Run(dimension, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			ctx := t.Context()
@@ -177,6 +177,28 @@ func TestHubPulseProtectsWholeSummaryAfterOneMemberChanges(t *testing.T) {
 				if dimension == "partial-to-known" {
 					assert.Equal(t, "partial", first.Totals["cost_microdollars"].State)
 				}
+			}
+			if dimension == "key-vanishes" {
+				for i := range members {
+					p := &members[i].payload
+					p.ByModel = map[string]db.SessionModelUsageBreakdown{"other": p.ByModel["model"]}
+					apply(members[i], 2)
+				}
+				later, err := hub.Pulse(ctx, "2020-07-29")
+				require.NoError(t, err)
+				assert.False(t, later.Suppressed)
+				require.Len(t, later.Projects, 2)
+				require.NotNil(t, later.Totals["tokens"].Value)
+				assert.EqualValues(t, 210, *later.Totals["tokens"].Value)
+				require.NotNil(t, later.Totals["cost_microdollars"].Value)
+				assert.EqualValues(t, 2100, *later.Totals["cost_microdollars"].Value)
+				require.Len(t, later.Models, 1)
+				assert.Equal(t, "other", later.Models[0].Key)
+				for _, project := range later.Projects {
+					require.Len(t, project.Models, 1)
+					assert.Equal(t, "other", project.Models[0].Key)
+				}
+				return
 			}
 			p := &members[0].payload
 			switch dimension {
