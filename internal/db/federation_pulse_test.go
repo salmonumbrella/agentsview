@@ -489,6 +489,42 @@ func TestFederationPulseCrossProjectAllocatedCostMatchesScopedExport(t *testing.
 		assert.Equal(t, Ptr(int64(6_000_000)), project.Totals["tokens"].Value)
 		assert.Equal(t, Ptr(int64(90_000)), project.Totals["cost_microdollars"].Value)
 	}
+	// Separate unpriced sessions retain the authoritative allocation above;
+	// a session-level authoritative total would price every row in that session.
+	for _, project := range []string{"alpha", "beta"} {
+		for _, member := range []string{"a", "b", "c"} {
+			id := project + "-" + member
+			share := "unpriced-" + id
+			remote, key := "example/"+project, "key-"+project
+			_, err := d.PutFederationHubShare(ctx, "spoke-"+id, FederationHubShare{UID: share, EnrollmentUID: "enr-" + id, Remote: remote, ProjectKey: key, Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+			require.NoError(t, err)
+			start := "2026-07-28T11:20:00Z"
+			record := FederationHubRecord{UID: share, Hash: "hash", Remote: remote, ProjectKey: key, Write: SessionBatchWrite{Session: Session{ID: share, Project: remote, Agent: "copilot", StartedAt: &start}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "synthetic-unpriced-model", InputTokens: 10, OccurredAt: start, DedupKey: share}}}}
+			_, err = d.CommitFederationBatch(ctx, "enr-"+id, "spoke-"+id, share, "policy", 1, 1, "batch", []FederationHubRecord{record})
+			require.NoError(t, err)
+		}
+	}
+	day, err := d.ExportReportingDay(ctx, ReportingExportOptions{Date: date, Now: date.Add(24 * time.Hour), SchemaVersion: export.ReportingJointSchemaVersion})
+	require.NoError(t, err)
+	assert.EqualValues(t, 120_000, day.Hours[11].Usage.Totals.Cost.Microdollars)
+	var unpriced, allocated int64
+	for _, cell := range day.Hours[11].Joint.Cells {
+		unpriced += cell.Pricing.UnpricedRows
+		allocated += cell.Pricing.AllocatedCost.Microdollars
+	}
+	assert.EqualValues(t, 6, unpriced)
+	assert.EqualValues(t, 120_000, allocated)
+	pulse, err = d.readFederationPulse(ctx, "2026-07-28", 3, date.Add(24*time.Hour))
+	require.NoError(t, err)
+	assert.False(t, pulse.Suppressed)
+	assert.Equal(t, Ptr(int64(12_000_060)), pulse.Totals["tokens"].Value)
+	assert.Equal(t, "partial", pulse.Totals["cost_microdollars"].State)
+	assert.Equal(t, Ptr(int64(180_000)), pulse.Totals["cost_microdollars"].Value)
+	require.Len(t, pulse.Projects, 2)
+	for _, project := range pulse.Projects {
+		assert.Equal(t, "partial", project.Totals["cost_microdollars"].State)
+		assert.Equal(t, Ptr(int64(90_000)), project.Totals["cost_microdollars"].Value)
+	}
 }
 
 func TestFederationPulseSurvivorUsesAttributedSessionForModelCoverage(t *testing.T) {

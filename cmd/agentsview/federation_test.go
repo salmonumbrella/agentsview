@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/federation"
+	"go.kenn.io/agentsview/internal/server"
 	"go.kenn.io/agentsview/internal/testutil"
 )
 
@@ -159,6 +161,54 @@ func TestFederationPulseDefaultStartIsNotDisclosed(t *testing.T) {
 	var out bytes.Buffer
 	require.NoError(t, printFederationPulse(&out, db.FederationPulse{Since: &since, ClosedThrough: "2026-07-29T00:00:00Z", Suppressed: true}))
 	assert.Contains(t, out.String(), "UTC window: 2026-07-27 to")
+}
+
+func TestFederationPulseCommandHidesDefaultStart(t *testing.T) {
+	dir := testDataDir(t)
+	t.Setenv("AGENTSVIEW_NO_DAEMON", "1")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.toml"), []byte("[federation]\nrole = 'hub'\n"), 0600))
+	database, err := db.OpenIsolated(t.Context(), filepath.Join(dir, "sessions.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, database.Close()) })
+	svc := federation.NewService("hub", "archive", config.FederationHubConfig{MinGroupSize: 3}, database)
+	daemon := httptest.NewUnstartedServer(nil)
+	port := daemon.Listener.Addr().(*net.TCPAddr).Port
+	srv := server.New(config.Config{Host: "127.0.0.1", Port: port}, database, nil, server.WithFederation(svc))
+	daemon.Config.Handler = srv.Handler()
+	daemon.Start()
+	t.Cleanup(daemon.Close)
+	ep := serverEndpoint(t, daemon)
+	_, err = WriteDaemonRuntime(dir, ep.Host, ep.Port, version, false)
+	require.NoError(t, err)
+	run := func(args ...string) string {
+		out, err := executeCommand(newRootCommand(), append([]string{"federation", "pulse"}, args...)...)
+		require.NoError(t, err)
+		return out
+	}
+	assert.Contains(t, run("--json"), `"since":null`)
+	for i, name := range []string{"a", "b", "c"} {
+		enrollment, spoke, share := "e-"+name, "s-"+name, "h-"+name
+		require.NoError(t, database.CreateFederationEnrollment(t.Context(), db.FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: name, CredentialSHA256: "digest-" + name}))
+		_, err := database.PutFederationHubShare(t.Context(), spoke, db.FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+		require.NoError(t, err)
+		start := "2026-07-28T09:00:00Z"
+		record := db.FederationHubRecord{UID: name, Hash: "hash", Remote: "example/repo", ProjectKey: "project", Write: db.SessionBatchWrite{Session: db.Session{ID: name, Project: "example/repo", Agent: "codex", StartedAt: &start}, Signals: db.SessionSignalUpdate{Outcome: "unknown"}}}
+		_, err = database.CommitFederationBatch(t.Context(), enrollment, spoke, share, "policy", 1, 1, "batch", []db.FederationHubRecord{record})
+		require.NoError(t, err)
+		if i == 1 {
+			continue
+		}
+		jsonOut := run("--json")
+		assert.Contains(t, jsonOut, `"since":null`)
+		assert.NotContains(t, jsonOut, "2026-07-28")
+		if i == 0 {
+			assert.Contains(t, jsonOut, `"state":"suppressed"`)
+			assert.Contains(t, run("--json", "--since", "2026-07-27"), `"since":"2026-07-27"`)
+		}
+		text := run()
+		assert.Contains(t, text, "UTC window: default start not disclosed to ")
+		assert.NotContains(t, text, "2026-07-28")
+	}
 }
 
 func TestShareRemoveReportsPendingCleanup(t *testing.T) {
