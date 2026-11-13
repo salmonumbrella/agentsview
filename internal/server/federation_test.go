@@ -180,6 +180,37 @@ func TestFederationPulseRoute(t *testing.T) {
 	}
 }
 
+func TestFederationPulseUsesOrdinaryHostAndOperatorAuth(t *testing.T) {
+	database := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "archive.db"))
+	svc := federation.NewService("hub", "archive", config.FederationHubConfig{MinGroupSize: 3}, database)
+	for _, required := range []bool{false, true} {
+		srv := New(config.Config{Host: "127.0.0.1", Port: 8080, AuthToken: "personal", RequireAuth: required}, database, nil, WithFederation(svc))
+		for _, tc := range []struct {
+			name, host, token string
+			want              int
+		}{
+			{"operator", "127.0.0.1:8080", "personal", http.StatusOK},
+			{"no token", "127.0.0.1:8080", "", map[bool]int{true: http.StatusUnauthorized, false: http.StatusOK}[required]},
+			{"untrusted host", "untrusted.example:8080", "personal", http.StatusForbidden},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/v1/federation/pulse", nil)
+				req.Host, req.RemoteAddr = tc.host, "192.0.2.1:1234"
+				if tc.token != "" {
+					req.Header.Set("Authorization", "Bearer "+tc.token)
+				}
+				rec := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(rec, req)
+				assert.Equal(t, tc.want, rec.Code)
+				if tc.want == http.StatusOK {
+					assert.Contains(t, rec.Body.String(), `"closed_through"`)
+					assert.NotContains(t, rec.Body.String(), `"member"`)
+				}
+			})
+		}
+	}
+}
+
 func TestFederationOffPreservesOrdinaryAuth(t *testing.T) {
 	for _, required := range []bool{false, true} {
 		database := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "archive.db"))

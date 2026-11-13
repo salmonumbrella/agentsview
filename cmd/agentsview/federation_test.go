@@ -110,6 +110,27 @@ func TestFederationPulseResponseAndOverflow(t *testing.T) {
 	assert.ErrorContains(t, err, "response too large")
 }
 
+func TestFederationPulseTextUsesReleasedStatesAndSeparateLinks(t *testing.T) {
+	count := int64(3)
+	since, contact := "2025-01-02", "2025-01-03T10:00:00Z"
+	pulse := db.FederationPulse{
+		Since: &since, ClosedThrough: "2025-01-03T12:00:00Z", Suppressed: true,
+		Totals: map[string]db.FederationPulseMetric{
+			"sessions": {Value: &count, State: "available"},
+			"tokens":   {State: "suppressed"}, "cost_microdollars": {State: "unavailable"},
+		},
+		Links: []db.FederationPulseLink{{SpokeName: "spoke", State: "contacted", LastContactAt: &contact, LatestBatchRefusals: []string{"collision"}}},
+	}
+	var text bytes.Buffer
+	require.NoError(t, printFederationPulse(&text, pulse))
+	assert.Contains(t, text.String(), "sessions: 3")
+	assert.Contains(t, text.String(), "tokens: suppressed")
+	assert.Contains(t, text.String(), "cost_microdollars: unavailable")
+	assert.Contains(t, text.String(), "Some values are withheld.")
+	assert.Contains(t, text.String(), "Spoke: spoke; state: contacted; last contact: 2025-01-03T10:00:00Z; last accepting batch: unavailable; backlog lag: unavailable")
+	assert.Contains(t, text.String(), "Latest stored batch refusals: collision")
+}
+
 func TestShareRemoveReportsPendingCleanup(t *testing.T) {
 	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodDelete, r.Method)
