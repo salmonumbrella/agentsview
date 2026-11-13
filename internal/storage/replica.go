@@ -64,8 +64,10 @@ type ConfiguredReplica struct {
 	Target ReplicaTarget
 	// Projects and ExcludeProjects are the configured push scope. At most
 	// one is set.
-	Projects        []string
-	ExcludeProjects []string
+	Projects          []string
+	ExcludeProjects   []string
+	ProjectRemotes    []string
+	ProjectRemotesErr error
 }
 
 // PusherOptions scopes one connected push session.
@@ -76,6 +78,8 @@ type PusherOptions struct {
 	// ExcludeProjects excludes these project names from push.
 	// Mutually exclusive with Projects.
 	ExcludeProjects []string
+	// ProjectRemotes limits PostgreSQL pushes to resolved repository identities.
+	ProjectRemotes []string
 	// SyncStateTarget scopes per-target push watermarks and fingerprints.
 	SyncStateTarget string
 	// MigrateLegacySyncState moves unsuffixed legacy sync-state keys into the

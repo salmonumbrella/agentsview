@@ -100,6 +100,25 @@ func FilterIdentityScope(
 	return out
 }
 
+// IdentitySelectedByRemotes selects only an unambiguously resolved git remote.
+func IdentitySelectedByRemotes(item export.ProjectIdentityObservation, remotes []string) bool {
+	return item.RemoteResolution == export.ProjectResolutionResolved &&
+		item.KeySource == export.ProjectIdentityKeySourceGitRemote &&
+		item.RemoteCandidateCount <= 1 &&
+		item.NormalizedRemote != "" && slices.Contains(remotes, item.NormalizedRemote)
+}
+
+// FilterIdentityByRemotes restricts observations to the selected remotes.
+func FilterIdentityByRemotes(items []export.ProjectIdentityObservation, remotes []string) []export.ProjectIdentityObservation {
+	out := items[:0]
+	for _, item := range items {
+		if IdentitySelectedByRemotes(item, remotes) {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
 // ProjectMatchesPushScope reports whether project passes the push's include
 // and exclude lists.
 func ProjectMatchesPushScope(project string, projects, excludeProjects []string) bool {

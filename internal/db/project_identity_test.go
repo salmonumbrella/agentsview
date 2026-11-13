@@ -1738,3 +1738,84 @@ func TestCopySessionMetadataKeepsFreshIdentityOverEmptyPlaceholder(t *testing.T)
 	require.Len(t, publishable, 1, "an evidence-free placeholder must not replace the fresh identity")
 	assert.Equal(t, root, publishable[0].RootPath)
 }
+
+func TestSessionIDsForProjectRemotesUsesOwnSnapshot(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	for _, id := range []string{"repo", "renamed", "personal", "ambiguous", "none", "child", "missing"} {
+		project := "shared"
+		if id == "renamed" || id == "personal" {
+			project = id
+		}
+		session := Session{ID: id, Project: project, Machine: "local", Agent: "codex"}
+		if id == "personal" || id == "repo" {
+			session.Cwd = "/workspace/" + id
+		}
+		if id == "child" {
+			session.ParentSessionID = new("repo")
+		}
+		require.NoError(t, d.UpsertSession(ctx, session))
+	}
+	for _, tc := range []struct {
+		id, project, remote string
+		resolution          export.ProjectResolution
+	}{
+		{"repo", "shared", "https://example.com/team/repo.git", export.ProjectResolutionResolved},
+		{"renamed", "renamed", "https://example.com/team/repo.git", export.ProjectResolutionResolved},
+		{"personal", "personal", "https://example.com/personal/repo.git", export.ProjectResolutionResolved},
+		{"ambiguous", "shared", "", export.ProjectResolutionAmbiguous},
+		{"none", "shared", "", export.ProjectResolutionUnknown},
+		{"child", "shared", "https://example.com/other/repo.git", export.ProjectResolutionResolved},
+	} {
+		require.NoError(t, d.UpsertProjectIdentityObservation(ctx, export.ProjectIdentityObservation{
+			SessionID: tc.id, Project: tc.project, Machine: "local", RootPath: "/workspace/" + tc.id,
+			GitRemote: tc.remote, RemoteResolution: tc.resolution, ObservedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+		}))
+	}
+	// The rename and rule change labels; snapshots still name their own repositories.
+	_, err := d.CreateWorktreeProjectMapping(ctx, WorktreeProjectMapping{
+		Machine: "local", PathPrefix: "/workspace/repo", Project: "team", Enabled: true,
+	})
+	require.NoError(t, err)
+	draft := WorktreeReclassificationDraft{Machine: "local", PathPrefix: "/workspace/repo", Project: "team", Enabled: true}
+	preview, err := d.PreviewWorktreeReclassification(ctx, draft)
+	require.NoError(t, err)
+	_, _, err = d.ApplyWorktreeReclassification(ctx, draft, preview.MappingToken, preview.ExistingMappingID)
+	require.NoError(t, err)
+	_, err = d.CreateWorktreeProjectMapping(ctx, WorktreeProjectMapping{
+		Machine: "local", PathPrefix: "/workspace/personal", Project: "team", Enabled: true,
+	})
+	require.NoError(t, err)
+	draft = WorktreeReclassificationDraft{Machine: "local", PathPrefix: "/workspace/personal", Project: "team", Enabled: true}
+	preview, err = d.PreviewWorktreeReclassification(ctx, draft)
+	require.NoError(t, err)
+	_, _, err = d.ApplyWorktreeReclassification(ctx, draft, preview.MappingToken, preview.ExistingMappingID)
+	require.NoError(t, err)
+	repo, err := d.GetSession(ctx, "repo")
+	require.NoError(t, err)
+	require.NotNil(t, repo)
+	personal, err := d.GetSession(ctx, "personal")
+	require.NoError(t, err)
+	require.NotNil(t, personal)
+	require.Equal(t, "team", repo.Project)
+	require.Equal(t, repo.Project, personal.Project)
+	ids, err := d.SessionIDsForProjectRemotes(ctx, []string{"example.com/team/repo"})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"repo", "renamed"}, ids)
+	require.NoError(t, d.SoftDeleteSession(ctx, "repo"))
+	ids, err = d.SessionIDsForProjectRemotes(ctx, []string{"example.com/team/repo"})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"repo", "renamed"}, ids)
+}
+
+func TestRemoteSelectionDistinguishesPortFromSCPPath(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	for _, tc := range []struct{ id, remote string }{{"port", "https://example.com:8443/org/repo"}, {"scp", "git@example.com:8443/org/repo"}} {
+		require.NoError(t, d.UpsertSession(ctx, Session{ID: tc.id, Project: tc.id, Machine: "local", Agent: "codex"}))
+		require.NoError(t, d.UpsertProjectIdentityObservation(ctx, export.ProjectIdentityObservation{SessionID: tc.id, Project: tc.id, Machine: "local", RootPath: "/workspace/" + tc.id, GitRemote: tc.remote, RemoteResolution: export.ProjectResolutionResolved, ObservedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)}))
+	}
+	ids, err := d.SessionIDsForProjectRemotes(ctx, []string{"example.com:8443/org/repo"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"port"}, ids)
+}

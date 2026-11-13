@@ -269,10 +269,13 @@ func resolveWatchTarget(
 	if err := validateReplicaPushVectors(appCfg, cfg, target.Target.PushVectors); err != nil {
 		return storage.ConfiguredReplica{}, nil, nil, err
 	}
-	projects, exclude, err = resolvePushProjects(target, cfg)
+	var remotes []string
+	projects, exclude, remotes, err = resolvePushProjects(target, cfg)
 	if err != nil {
 		return storage.ConfiguredReplica{}, nil, nil, err
 	}
+	target.ProjectRemotes = remotes
+	target.ProjectRemotesErr = nil
 	return target, projects, exclude, nil
 }
 

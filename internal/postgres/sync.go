@@ -258,8 +258,11 @@ type Sync struct {
 	fullVectorSessions map[string]struct{}
 
 	// Project filtering for push scope.
-	projects        []string
-	excludeProjects []string
+	projects         []string
+	excludeProjects  []string
+	projectRemotes   []string
+	selected         map[string]struct{}
+	identityRevision int64
 
 	// vectorSource, when set, supplies the local vectors.db active generation
 	// pushed as a phase at the end of Push. Nil disables the phase.
@@ -341,6 +344,7 @@ func New(
 	if err := storage.ValidateProjectFilters(
 		opts.Projects,
 		opts.ExcludeProjects,
+		opts.ProjectRemotes,
 	); err != nil {
 		return nil, err
 	}
@@ -363,11 +367,11 @@ func New(
 	syncStateScope := pushSyncStateScope(
 		opts.SyncStateTarget,
 		opts.Projects,
-		opts.ExcludeProjects,
+		opts.ExcludeProjects, opts.ProjectRemotes,
 	)
 	aliasBackfillStateScope := opts.SyncStateTarget
 	migrateLegacySyncState := opts.MigrateLegacySyncState &&
-		!hasProjectFilter(opts.Projects, opts.ExcludeProjects)
+		!hasProjectFilter(opts.Projects, opts.ExcludeProjects, opts.ProjectRemotes)
 
 	return &Sync{
 		pg:    pg,
@@ -389,19 +393,20 @@ func New(
 		migrateLegacySyncState: migrateLegacySyncState,
 		projects:               opts.Projects,
 		excludeProjects:        opts.ExcludeProjects,
+		projectRemotes:         opts.ProjectRemotes,
 		vectorSource:           opts.VectorSource,
 	}, nil
 }
 
-func hasProjectFilter(projects, excludeProjects []string) bool {
-	return len(projects) > 0 || len(excludeProjects) > 0
+func hasProjectFilter(projects, excludeProjects []string, remotes []string) bool {
+	return len(projects) > 0 || len(excludeProjects) > 0 || len(remotes) > 0
 }
 
 func pushSyncStateScope(
 	target string,
-	projects, excludeProjects []string,
+	projects, excludeProjects []string, remotes []string,
 ) string {
-	if !hasProjectFilter(projects, excludeProjects) {
+	if !hasProjectFilter(projects, excludeProjects, remotes) {
 		return target
 	}
 
@@ -420,6 +425,14 @@ func pushSyncStateScope(
 	writeSyncScopeField(sum, strconv.Itoa(len(excludeValues)))
 	for _, value := range excludeValues {
 		writeSyncScopeField(sum, value)
+	}
+	if len(remotes) > 0 {
+		values := normalizeProjectFilterValues(remotes)
+		writeSyncScopeField(sum, "remotes")
+		writeSyncScopeField(sum, strconv.Itoa(len(values)))
+		for _, value := range values {
+			writeSyncScopeField(sum, value)
+		}
 	}
 	fingerprint := hex.EncodeToString(sum.Sum(nil)[:8])
 	if target == "" {
@@ -454,10 +467,18 @@ func writeSyncScopeField(sum interface{ Write([]byte) (int, error) }, value stri
 	_, _ = sum.Write([]byte(value))
 }
 
+func (s *Sync) inScope(id, project string) bool {
+	if len(s.projectRemotes) > 0 {
+		_, ok := s.selected[id]
+		return ok
+	}
+	return !projectFailsFilter(project, s.projects, s.excludeProjects)
+}
+
 // isFiltered reports whether push scope is restricted by
 // project include/exclude filters.
 func (s *Sync) isFiltered() bool {
-	return hasProjectFilter(s.projects, s.excludeProjects)
+	return hasProjectFilter(s.projects, s.excludeProjects, s.projectRemotes)
 }
 
 // DB returns the underlying PostgreSQL connection pool.
@@ -544,7 +565,7 @@ func (s *Sync) Status(
 ) (SyncStatus, error) {
 	lastPush, err := ReadLastPushAt(ctx,
 		s.local, s.syncStateTarget, nil, nil,
-		s.migrateLegacySyncState,
+		s.migrateLegacySyncState, nil,
 	)
 	if err != nil {
 		log.Printf(
@@ -633,12 +654,12 @@ func ReadLastPushAt(ctx context.Context,
 	local storage.SyncStateStore,
 	target string,
 	projects, excludeProjects []string,
-	migrateLegacy bool,
+	migrateLegacy bool, remotes []string,
 ) (string, error) {
 	if local == nil {
 		return "", errors.New("local sync state is required")
 	}
-	scope := pushSyncStateScope(target, projects, excludeProjects)
+	scope := pushSyncStateScope(target, projects, excludeProjects, remotes)
 	if scope == "" {
 		return local.GetSyncState(ctx, "last_push_at")
 	}
@@ -653,7 +674,7 @@ func ReadLastPushAt(ctx context.Context,
 	}
 	if lastPush != "" ||
 		!migrateLegacy ||
-		hasProjectFilter(projects, excludeProjects) {
+		hasProjectFilter(projects, excludeProjects, remotes) {
 		return lastPush, nil
 	}
 	return local.GetSyncState(ctx, "last_push_at")

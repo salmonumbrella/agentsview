@@ -675,6 +675,20 @@ func (s *Sync) vectorSessionsOutOfScope(
 	if !s.isFiltered() {
 		return nil, nil
 	}
+	if len(s.projectRemotes) > 0 {
+		out := make(map[string]struct{})
+		for id := range local {
+			if _, ok := s.selected[id]; !ok {
+				out[id] = struct{}{}
+			}
+		}
+		for id := range pgState {
+			if _, ok := s.selected[id]; !ok {
+				out[id] = struct{}{}
+			}
+		}
+		return out, nil
+	}
 	localIDs := make([]string, 0, len(local))
 	for id := range local {
 		localIDs = append(localIDs, id)
@@ -730,7 +744,7 @@ func (s *Sync) scopeEvictionCandidatesByLocalProject(
 			absent = append(absent, id)
 			continue
 		}
-		if projectFailsFilter(project, s.projects, s.excludeProjects) {
+		if !s.inScope(id, project) {
 			out[id] = struct{}{}
 		}
 	}
@@ -760,7 +774,7 @@ func (s *Sync) localOutOfScopeVectorSessions(
 		if !ok {
 			continue
 		}
-		if projectFailsFilter(project, s.projects, s.excludeProjects) {
+		if !s.inScope(id, project) {
 			out[id] = struct{}{}
 		}
 	}
@@ -1462,7 +1476,8 @@ func halfvecLiteral(v []float32) (string, error) {
 // clearUsageOnlyVectorSessions discovers indexed sessions in PostgreSQL rather
 // than the local push candidates, which omit sessions deleted from the archive.
 // Usage-only storage retains no vectors for this archive, including generations
-// that are no longer active. Other archives' sessions remain untouched.
+// that are no longer active. A remote scope clears only selected sessions.
+// Other archives' sessions remain untouched.
 func (s *Sync) clearUsageOnlyVectorSessions(ctx context.Context) error {
 	var exists bool
 	if err := s.pg.QueryRowContext(ctx, `SELECT to_regclass('vector_documents') IS NOT NULL`).Scan(&exists); err != nil {
@@ -1495,6 +1510,11 @@ func (s *Sync) clearUsageOnlyVectorSessions(ctx context.Context) error {
 			return err
 		}
 		if owner.owns(marker.String, machine.String) {
+			if len(s.projectRemotes) > 0 {
+				if _, ok := s.selected[id]; !ok {
+					continue
+				}
+			}
 			ids = append(ids, id)
 		}
 	}

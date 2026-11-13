@@ -12271,3 +12271,45 @@ func countSessionFileHashReads(t *testing.T, archive *db.DB) *atomic.Int32 {
 	require.NoError(t, conn.Close())
 	return reads
 }
+
+func TestProjectRemoteSelectionUsesDiscoveredCandidateCount(t *testing.T) {
+	database := openTestDB(t)
+	engine := NewEngine(t.Context(), database, EngineConfig{Machine: "laptop"})
+	for _, tc := range []struct {
+		id, config string
+		count      int
+		selected   bool
+	}{
+		{"origin", "[remote \"origin\"]\n url = https://example.com/org/repo\n", 1, true},
+		{"different", "[remote \"origin\"]\n url = https://example.com/org/repo\n[remote \"upstream\"]\n url = https://example.com/org/other\n", 2, false},
+		{"same", "[remote \"origin\"]\n url = https://example.com/org/repo\n[remote \"upstream\"]\n url = git@example.com:org/repo.git\n", 1, true},
+		{"ambiguous", "[remote \"one\"]\n url = https://example.com/org/repo\n[remote \"two\"]\n url = https://example.com/org/other\n", 2, false},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			root := t.TempDir()
+			require.NoError(t, os.Mkdir(filepath.Join(root, ".git"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(root, ".git", "config"), []byte(tc.config), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(root, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o644))
+			written, _, failed, _ := engine.writeBatch([]pendingWrite{{sess: parser.ParsedSession{ID: tc.id, Project: tc.id, Machine: "laptop", Agent: parser.AgentCodex, Cwd: root, StartedAt: time.Now()}}}, syncWriteDefault, true)
+			require.Equal(t, 1, written)
+			require.Zero(t, failed)
+			snapshots, err := database.ListSessionProjectIdentitySnapshots(t.Context())
+			require.NoError(t, err)
+			found := false
+			for _, snapshot := range snapshots {
+				if snapshot.SessionID == tc.id {
+					found = true
+					assert.Equal(t, tc.count, snapshot.RemoteCandidateCount)
+				}
+			}
+			require.True(t, found)
+			ids, err := database.SessionIDsForProjectRemotes(t.Context(), []string{"example.com/org/repo"})
+			require.NoError(t, err)
+			if tc.selected {
+				assert.Contains(t, ids, tc.id)
+			} else {
+				assert.NotContains(t, ids, tc.id)
+			}
+		})
+	}
+}

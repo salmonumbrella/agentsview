@@ -122,7 +122,9 @@ func (s *Sync) PushWithOptions(
 	}
 	switch {
 	case err == nil || errors.Is(err, db.ErrDiagnosticConflict) || completed:
-		err = errors.Join(err, s.replaceRetainedCommitLinks(ctx))
+		if len(s.projectRemotes) == 0 {
+			err = errors.Join(err, s.replaceRetainedCommitLinks(ctx))
+		}
 	case run != nil:
 		// Keep what the run committed since its last checkpoint. The push
 		// may have failed because ctx ended, so save without it, but within
@@ -501,7 +503,22 @@ func (s *Sync) pushWithOptions(
 	if err != nil {
 		return result, err
 	}
-	if s.isFiltered() {
+	if len(s.projectRemotes) > 0 {
+		// Keep later snapshot changes in the journal for the next push.
+		s.identityRevision, err = s.local.ProjectIdentityPublicationRevision(ctx)
+		if err != nil {
+			return result, err
+		}
+		ids, selectErr := s.local.SessionIDsForProjectRemotes(ctx, s.projectRemotes)
+		if selectErr != nil {
+			return result, selectErr
+		}
+		s.selected = make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			s.selected[id] = struct{}{}
+		}
+	}
+	if s.isFiltered() && len(s.projectRemotes) == 0 {
 		scopeMoveCandidates, scopeErr := listPGProjectScopeMoveCandidates(
 			ctx, s.local, lastPush,
 		)
@@ -525,8 +542,10 @@ func (s *Sync) pushWithOptions(
 			return result, scopeErr
 		}
 	}
-	if err := s.syncMachineMetadata(ctx); err != nil {
-		return result, err
+	if len(s.projectRemotes) == 0 {
+		if err := s.syncMachineMetadata(ctx); err != nil {
+			return result, err
+		}
 	}
 	if err := timedPushSetupStep("model pricing sync",
 		func() error { return s.syncModelPricing(ctx) }); err != nil {
@@ -536,7 +555,10 @@ func (s *Sync) pushWithOptions(
 		func() error { return s.syncCursorUsageEvents(ctx, full) }); err != nil {
 		return result, err
 	}
-	diagnosticErr := s.syncDiagnosticEvents(ctx, full, markerID)
+	var diagnosticErr error
+	if len(s.projectRemotes) == 0 {
+		diagnosticErr = s.syncDiagnosticEvents(ctx, full, markerID)
+	}
 	if diagnosticErr != nil {
 		log.Printf("pgsync: diagnostic events: %v", diagnosticErr)
 	}
@@ -561,7 +583,43 @@ func (s *Sync) pushWithOptions(
 		map[string]db.Session, len(allSessions),
 	)
 	for _, sess := range allSessions {
-		sessionByID[sess.ID] = sess
+		if s.inScope(sess.ID, sess.Project) {
+			sessionByID[sess.ID] = sess
+		}
+	}
+	if len(s.projectRemotes) > 0 && !full {
+		generation, err := s.local.GetDatabaseID(ctx)
+		if err != nil {
+			return result, err
+		}
+		published, err := s.effectiveSyncState().GetSyncState(ctx, projectIdentityPublicationStateKey+":"+generation)
+		if err != nil {
+			return result, err
+		}
+		revision := s.identityRevision
+		after, parseErr := strconv.ParseInt(published, 10, 64)
+		if parseErr != nil || after < 0 || after > revision {
+			after = 0
+		}
+		delta, err := s.local.LoadProjectIdentityPublicationDelta(ctx, after, revision, nil, nil)
+		if err != nil {
+			return result, err
+		}
+		for _, snapshot := range delta.Snapshots {
+			if _, ok := s.selected[snapshot.SessionID]; !ok {
+				continue
+			}
+			if _, ok := sessionByID[snapshot.SessionID]; ok {
+				continue
+			}
+			sess, err := s.local.GetSessionForMirrorWindow(ctx, snapshot.SessionID)
+			if err != nil {
+				return result, err
+			}
+			if sess != nil {
+				sessionByID[sess.ID] = *sess
+			}
+		}
 	}
 
 	var priorFingerprints map[string]string
@@ -934,6 +992,9 @@ func (s *Sync) syncProjectIdentityObservations(
 	if err != nil {
 		return err
 	}
+	if len(s.projectRemotes) > 0 && s.selected != nil {
+		revision = s.identityRevision
+	}
 	databaseGeneration, err := s.local.GetDatabaseID(ctx)
 	if err != nil {
 		return fmt.Errorf("loading source database generation: %w", err)
@@ -946,7 +1007,7 @@ func (s *Sync) syncProjectIdentityObservations(
 		return fmt.Errorf("reading project identity publication revision: %w", err)
 	}
 	adoptLegacyFilteredScope := false
-	if s.isFiltered() && publishedRevisionValue == "" {
+	if s.isFiltered() && len(s.projectRemotes) == 0 && publishedRevisionValue == "" {
 		legacyValue, loadErr := state.GetSyncState(ctx,
 			legacyProjectIdentityStateKey+":"+databaseGeneration,
 		)
@@ -970,6 +1031,10 @@ func (s *Sync) syncProjectIdentityObservations(
 		}
 	}
 
+	if len(s.projectRemotes) > 0 {
+		fullPublication = true
+	}
+
 	var observations []export.ProjectIdentityObservation
 	var snapshots []export.ProjectIdentityObservation
 	var delta db.ProjectIdentityPublicationDelta
@@ -978,11 +1043,20 @@ func (s *Sync) syncProjectIdentityObservations(
 		if err != nil {
 			return fmt.Errorf("loading project identity observations: %w", err)
 		}
-		observations = db.FilterIdentityScope(
-			observations, s.projects, s.excludeProjects,
-		)
+		if len(s.projectRemotes) > 0 {
+			observations = db.FilterIdentityByRemotes(observations, s.projectRemotes)
+		} else {
+			observations = db.FilterIdentityScope(observations, s.projects, s.excludeProjects)
+		}
+		var selectedIDs []string
+		if len(s.projectRemotes) > 0 {
+			selectedIDs = make([]string, 0, len(s.selected))
+			for id := range s.selected {
+				selectedIDs = append(selectedIDs, id)
+			}
+		}
 		snapshots, err = s.local.ListPublishableSessionProjectIdentitySnapshots(
-			ctx, nil, s.projects, s.excludeProjects,
+			ctx, selectedIDs, s.projects, s.excludeProjects,
 		)
 		if err != nil {
 			return fmt.Errorf("loading session project identity snapshots: %w", err)
@@ -1035,7 +1109,7 @@ func (s *Sync) syncProjectIdentityObservations(
 	publicationScope := unfilteredPublicationScope
 	if s.isFiltered() {
 		publicationScope = pushSyncStateScope(
-			"", s.projects, s.excludeProjects,
+			"", s.projects, s.excludeProjects, s.projectRemotes,
 		)
 		if err := prepareFilteredProjectIdentityPublication(
 			ctx, tx, archiveID, databaseGeneration, publicationScope,
@@ -1670,7 +1744,7 @@ func (s *Sync) retireSourceArchiveMetadata(
 	defer func() { _ = tx.Rollback() }()
 	if s.isFiltered() {
 		publicationScope := pushSyncStateScope(
-			"", s.projects, s.excludeProjects,
+			"", s.projects, s.excludeProjects, s.projectRemotes,
 		)
 		if err := releaseFilteredProjectIdentityFullOwnership(
 			ctx, tx, archiveID, publicationScope,
@@ -1701,8 +1775,10 @@ func (s *Sync) retireSourceArchiveMetadata(
 			}
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM retained_commit_links WHERE source_archive_id=$1`, archiveID); err != nil {
-		return fmt.Errorf("retiring old archive retained links: %w", err)
+	if len(s.projectRemotes) == 0 {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM retained_commit_links WHERE source_archive_id=$1`, archiveID); err != nil {
+			return fmt.Errorf("retiring old archive retained links: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing old archive metadata retirement: %w", err)
@@ -2197,6 +2273,10 @@ func purgePGExcludedPushSessions(
 func (s *Sync) reconcilePGMissingSessions(
 	ctx context.Context, ownerMarker string, legacyMarkerMachines []string,
 ) error {
+	// The owner marker spans all archive scopes; a remote scope cannot judge a missing local session.
+	if len(s.projectRemotes) > 0 {
+		return nil
+	}
 	// Empty Codex thread anchors still own remote restore/purge scope.
 	where := "owner_marker = $1 AND NOT (trash_includes_codex_pages AND deleted_at IS NOT NULL)"
 	args := []any{ownerMarker}
@@ -2265,7 +2345,7 @@ func (s *Sync) reconcilePGMissingSessions(
 				continue
 			}
 			paged = append(paged, id)
-			if projectFailsFilter(page.Project, s.projects, s.excludeProjects) {
+			if !s.inScope(page.ID, page.Project) {
 				excluded[id] = *page
 				continue
 			}

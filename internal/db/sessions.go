@@ -1265,6 +1265,11 @@ func (db *DB) GetSessionFull(
 	return s, nil
 }
 
+// GetSessionForMirrorWindow returns the row exactly as ListSessionsForMirrorWindow returns it.
+func (db *DB) GetSessionForMirrorWindow(ctx context.Context, id string) (*Session, error) {
+	return db.getSessionFullUncoalesced(ctx, id)
+}
+
 // GetArtifactExportSession returns uncoalesced names and omits applied launcher parents.
 func (db *DB) GetArtifactExportSession(
 	ctx context.Context, id string,

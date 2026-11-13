@@ -54,7 +54,7 @@ A serving role that cannot create tables needs an upgraded push, or
 archive's rebuild removes only the deleted-session links that archive pushed.
 Links with no recorded archive, from older pushes or permanent deletion in the
 replica, stay and can reappear after an archive discards its matching copy.
-A deleted session remains visible as a missing record. Project filters use the
+A deleted session remains visible as a missing record. Label filters use the
 project saved with its links in SQLite, including after a rebuild or a deletion
 before the first push.
 
@@ -103,10 +103,10 @@ legacy `local` rows; it does not rename recorded session keys.
 For multiple PostgreSQL destinations, use named `[pg.NAME]` blocks and
 `default_pg` instead of the legacy single `[pg]` block. Named target names are
 normalized case-insensitively, and `all`, `local`, plus the legacy `[pg]` field
-names `url`, `schema`, `machine_name`, `allow_insecure`, `projects`, and
-`exclude_projects`, `raw_tenant`, `raw_derivation`, `raw_poll_seconds`,
-`raw_attempt_seconds`, and `raw_max_attempts` are unavailable as `[pg.NAME]`
-names.
+names `url`, `schema`, `machine_name`, `allow_insecure`, `projects`,
+`exclude_projects`, `project_remotes`, `raw_tenant`, `raw_derivation`,
+`raw_poll_seconds`, `raw_attempt_seconds`, and `raw_max_attempts` are unavailable
+as `[pg.NAME]` names.
 
 ### 2. Push Sessions
 
@@ -178,6 +178,7 @@ agentsview replica pg push [target] [flags]
 | `--no-vectors`       | `false` | Skip the semantic-search vector phase for this run                                                                             |
 | `--embed`            | `false` | Push sessions, then build and push vectors; watch builds after syncs in the background and pushes vectors on the next interval |
 | `--projects`         |         | Comma-separated projects to push (inclusive)                                                                                   |
+| `--project-remotes`  |         | Comma-separated Git remotes whose resolved sessions to push                                                                    |
 | `--exclude-projects` |         | Comma-separated projects to exclude                                                                                            |
 | `--all-projects`     | `false` | Ignore configured project filters for this run                                                                                 |
 | `--watch`            | `false` | Run continuously, pushing on change plus a periodic floor                                                                      |
@@ -330,9 +331,42 @@ projects = ["alpha", "beta"]
 # or: exclude_projects = ["scratch"]
 ```
 
-CLI flags override config values. Use
+CLI label flags override configured label filters. Use
 [`agentsview project list`](/docs/commands/#agentsview-projects) to list available
 project names.
+
+To select by repository identity instead of a project label, use:
+
+```bash
+agentsview replica pg push --project-remotes github.com/example/widgets
+```
+
+Or set `project_remotes = ["github.com/example/widgets"]` in the target's
+`[pg]` or `[pg.NAME]` configuration. HTTPS, SSH, SCP-style Git URLs and
+`host/path` normalize to the same remote. Local paths, empty entries and globs
+are rejected. Non-default ports and IPv6 hosts need the full URL form; Git reads
+`host:path` as an SCP-style remote. A session is selected only when its own
+snapshot resolves unambiguously to a listed Git remote. Labels, folder rules
+and related sessions do not change that selection. Sessions without a matching
+snapshot are omitted; a snapshot backfilled later is picked up by an
+incremental push. A checkout with more than one distinct remote when its
+identity was recorded is excluded, even if one remote is named `origin`.
+
+Remote selection limits sessions, project identity observations, session
+identity snapshots and vector work. Remote-scoped pushes omit cursor usage
+events, diagnostics, machine labels and aliases, retained commit links and
+worktree mappings. Pricing is still published. Identity publication replaces
+this scope's owned identity rows when they change. Session and vector rows
+already pushed are not retracted when a session later leaves the selection or
+is deleted locally. Under remote selection, a usage-only archive clears only the
+selected sessions' vectors. `--embed` still builds embeddings for the whole local
+archive, and only the selected sessions' vectors are pushed.
+
+Remote selection cannot be combined with project label includes or excludes,
+including across flags and configuration. A flag replaces configuration from
+its own family. `--all-projects` clears the configured scope and cannot be
+combined with any explicit scope flag. `replica pg status` reports the push
+position for the configured `project_remotes`, or no scope with `--all-projects`.
 
 Filtered pushes keep their own local push watermark for each target/filter set.
 For example, repeated `agentsview replica pg push --projects alpha,beta` runs use a
@@ -732,6 +766,7 @@ allow_insecure = false
 | `allow_insecure`   | `false`      | Allow non-TLS connections to non-loopback hosts                        |
 | `projects`         |              | Array of project names to include in push                              |
 | `exclude_projects` |              | Array of project names to exclude from push                            |
+| `project_remotes`  |              | Array of Git remotes to select by resolved repository identity         |
 
 To manage more than one PostgreSQL destination, define named `[pg.NAME]` blocks
 and select the effective default target with `default_pg`:

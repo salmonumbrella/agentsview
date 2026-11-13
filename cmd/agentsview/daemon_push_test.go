@@ -264,3 +264,22 @@ func TestPostDaemonPushReportsWhetherThePushStarted(t *testing.T) {
 		})
 	}
 }
+
+func TestDaemonPushOldDaemonRejectsRemoteScopeWithoutRetry(t *testing.T) {
+	attempts := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		var body map[string]jsontext.Value
+		if !assert.NoError(t, json.UnmarshalRead(r.Body, &body)) {
+			return
+		}
+		assert.Contains(t, body, "project_remotes")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"errors":[{"location":"body.project_remotes","message":"unexpected property"}]}`))
+	}))
+	t.Cleanup(ts.Close)
+	_, err := postDaemonPush[storage.PushResult, storage.PushProgress](t.Context(), transport{URL: ts.URL}, "", replicaPushOperations["pg"], apiclient.DaemonPushRequest{ProjectRemotes: []string{"example.com/org/repo"}, WatchBatch: &apiclient.SyncWatchBatch{}}, nil)
+	var notStarted storage.PushNotStartedError
+	require.ErrorAs(t, err, &notStarted)
+	assert.Equal(t, 1, attempts)
+}

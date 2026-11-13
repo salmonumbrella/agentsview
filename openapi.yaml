@@ -852,6 +852,10 @@ components:
           type: boolean
         no_vectors:
           type: boolean
+        project_remotes:
+          items:
+            type: string
+          type: array
         projects:
           items:
             type: string

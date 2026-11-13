@@ -120,7 +120,7 @@ func (s *Sync) migrateCodexPages(
 			return fmt.Errorf("reading original Codex rollout: %w", err)
 		}
 		if syncScope && head != nil && head.Agent == old.agent && threads[old.id].Agent == old.agent &&
-			(old.archive == "" || old.archive == s.archiveID) && projectFailsFilter(head.Project, s.projects, s.excludeProjects) {
+			(old.archive == "" || old.archive == s.archiveID) && !s.inScope(old.id, head.Project) {
 			// A filtered page restore still ends its source's thread scope.
 			// Publish that dependency without the excluded project's content.
 			if _, err := tx.ExecContext(ctx, `UPDATE sessions SET
@@ -158,7 +158,7 @@ func (s *Sync) migrateCodexPages(
 		if page == nil || page.Agent != old.agent {
 			return fmt.Errorf("cannot replace legacy Codex thread: retained page %s is unavailable", pageID)
 		}
-		if projectFailsFilter(page.Project, s.projects, s.excludeProjects) {
+		if !s.inScope(pageID, page.Project) {
 			return fmt.Errorf(
 				"push stopped: Codex thread %s has pins or other edits that must move to its page in project %q, "+
 					"which this push excludes, so the thread was kept; add that project to --projects or the projects setting, "+

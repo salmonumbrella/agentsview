@@ -2911,7 +2911,7 @@ func TestFilteredPushAdoptsOwnerlessRowsFromLegacyUnscopedMarker(t *testing.T) {
 		"seed local push marker")
 
 	projects := []string{"proj"}
-	scope := pushSyncStateScope("team-target", projects, nil)
+	scope := pushSyncStateScope("team-target", projects, nil, nil)
 	sync := &Sync{
 		pg:              pg,
 		local:           localDB,
@@ -3445,7 +3445,7 @@ func TestSessionProvenanceBackfillCompletesPerFilterScope(t *testing.T) {
 	// marker scoped to the target only ("" here), shared with the
 	// unfiltered sync's unscoped keys.
 	projects := []string{"proj"}
-	filterScope := pushSyncStateScope("", projects, nil)
+	filterScope := pushSyncStateScope("", projects, nil, nil)
 	filtered := &Sync{
 		pg:                 unfiltered.pg,
 		local:              localDB,
@@ -3746,4 +3746,160 @@ func TestFilteredPushReconcilesProjectMoveCommittedDuringPush(t *testing.T) {
 		`SELECT COUNT(*) FROM sessions WHERE id = $1`, sessionID,
 	).Scan(&count))
 	assert.Zero(t, count, "a session moved out of scope during the push must leave the remote")
+}
+
+func TestRemoteScopePushIncludesSnapshotOnlyBackfill(t *testing.T) {
+	syncer, local, pg, ctx := newSessionProvenancePushSync(t, "agentsview_remote_backfill_test")
+	seedProvenanceSession(t, local, "parent", "workstation", "project", "")
+	seedProvenanceSession(t, local, "late", "workstation", "project", "")
+	_, err := local.SetSessionExternalParent(ctx, "late", "parent")
+	require.NoError(t, err)
+	raw, err := sql.Open("sqlite3", local.Path())
+	require.NoError(t, err)
+	_, err = raw.ExecContext(ctx, `UPDATE sessions SET sync_marker = '2000-01-01T00:00:00Z' WHERE id = 'late'`)
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+	syncer.projectRemotes = []string{"example.com/team/repo"}
+	scope := pushSyncStateScope("", nil, nil, syncer.projectRemotes)
+	syncer.syncState = newScopedSyncStateStore(handoffSyncState{local}, scope, false)
+	syncer.syncStateTarget = scope
+	_, err = syncer.Push(ctx, true, nil)
+	require.NoError(t, err)
+	var count int
+	require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE id = 'late'`).Scan(&count))
+	assert.Zero(t, count)
+	require.NoError(t, local.UpsertProjectIdentityObservation(ctx, export.ProjectIdentityObservation{
+		SessionID: "late", Project: "project", Machine: "workstation", RootPath: "/workspace/repo",
+		GitRemote: "https://example.com/team/repo.git", RemoteResolution: export.ProjectResolutionResolved,
+		ObservedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+	}))
+	result, err := syncer.Push(ctx, false, nil)
+	require.NoError(t, err)
+	assert.False(t, result.Full)
+	assert.Equal(t, 1, result.SessionsPushed)
+	require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE id = 'late'`).Scan(&count))
+	assert.Equal(t, 1, count)
+	var parent string
+	require.NoError(t, pg.QueryRowContext(ctx, `SELECT parent_session_id FROM sessions WHERE id = 'late'`).Scan(&parent))
+	assert.Equal(t, "parent", parent)
+}
+
+func TestRemoteScopePushPublishesOnlyMatchingIdentities(t *testing.T) {
+	syncer, local, pg, ctx := newSessionProvenancePushSync(t, "agentsview_remote_canaries_test")
+	for _, tc := range []struct {
+		id, label, remote string
+		resolution        export.ProjectResolution
+	}{
+		{"repo", "shared", "https://example.com/team/repo.git", export.ProjectResolutionResolved},
+		{"renamed", "renamed", "https://example.com/team/repo.git", export.ProjectResolutionResolved},
+		{"personal", "shared", "https://example.com/personal/repo.git", export.ProjectResolutionResolved},
+		{"ambiguous", "shared", "", export.ProjectResolutionAmbiguous},
+		{"none", "shared", "", export.ProjectResolutionUnknown},
+		{"child", "shared", "https://example.com/other/repo.git", export.ProjectResolutionResolved},
+		{"missing", "shared", "", ""},
+	} {
+		session := db.Session{ID: tc.id, Project: tc.label, Machine: "workstation", Agent: "claude", MessageCount: 1}
+		if tc.id == "child" {
+			session.ParentSessionID = new("repo")
+		}
+		require.NoError(t, local.UpsertSession(ctx, session))
+		require.NoError(t, local.InsertMessages(ctx, []db.Message{{SessionID: tc.id, Ordinal: 0, Role: "assistant", Content: "canary-" + tc.id, ContentLength: len("canary-" + tc.id)}}))
+		if tc.resolution != "" {
+			require.NoError(t, local.UpsertProjectIdentityObservation(ctx, export.ProjectIdentityObservation{SessionID: tc.id, Project: tc.label, Machine: "workstation", RootPath: "/work/" + tc.id, GitRemote: tc.remote, RemoteResolution: tc.resolution, ObservedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)}))
+		}
+	}
+	dbtest.SeedRetainedCommitLink(t, local, "repo", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	_, err := local.AppendDiagnostic(ctx, db.DiagnosticEvent{ID: "01900000-0000-7000-8000-000000000001", Source: "worker", Message: "diagnostic canary", OccurredAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)})
+	require.NoError(t, err)
+	_, err = local.CreateWorktreeProjectMapping(ctx, db.WorktreeProjectMapping{Machine: "workstation", PathPrefix: "/work/repo", Layout: db.WorktreeMappingLayoutExplicit, Project: "shared", Enabled: true})
+	require.NoError(t, err)
+	syncer.projectRemotes = []string{"example.com/team/repo"}
+	scope := pushSyncStateScope("", nil, nil, syncer.projectRemotes)
+	syncer.syncState = newScopedSyncStateStore(handoffSyncState{local}, scope, false)
+	syncer.syncStateTarget = scope
+	_, err = syncer.Push(ctx, true, nil)
+	require.NoError(t, err)
+	rows, err := pg.QueryContext(ctx, `SELECT session_id, content FROM messages ORDER BY session_id`)
+	require.NoError(t, err)
+	var got []string
+	for rows.Next() {
+		var id, content string
+		require.NoError(t, rows.Scan(&id, &content))
+		got = append(got, id+":"+content)
+	}
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+	assert.Equal(t, []string{"renamed:canary-renamed", "repo:canary-repo"}, got)
+	for _, tc := range []struct {
+		table string
+		want  int
+	}{
+		{"sessions", 2}, {"source_project_identity_observations", 2}, {"source_session_project_identity_snapshots", 2},
+		{"source_project_identity_observation_scopes", 2}, {"source_session_project_identity_snapshot_scopes", 2},
+		{"source_worktree_project_mappings", 0}, {"retained_commit_links", 0}, {"diagnostic_events", 0},
+	} {
+		assert.Equal(t, tc.want, pgTableCount(t, ctx, pg, tc.table), tc.table)
+	}
+	_, err = syncer.Push(ctx, false, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 2, pgTableCount(t, ctx, pg, "source_session_project_identity_snapshots"))
+
+	// Another filtered publisher owns the personal observation independently.
+	foreign := &Sync{pg: pg, local: local, machine: "workstation", schema: syncer.schema, schemaDone: true, projects: []string{"shared"}}
+	foreignScope := pushSyncStateScope("", foreign.projects, nil, nil)
+	foreign.syncState = newScopedSyncStateStore(handoffSyncState{local}, foreignScope, false)
+	foreign.syncStateTarget = foreignScope
+	_, err = foreign.Push(ctx, true, nil)
+	require.NoError(t, err)
+	require.NoError(t, local.UpsertProjectIdentityObservation(ctx, export.ProjectIdentityObservation{
+		Project: "renamed", Machine: "workstation", RootPath: "/work/new-observation", GitRemote: "https://example.com/team/repo.git",
+		RemoteResolution: export.ProjectResolutionResolved, ObservedAt: time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC),
+	}))
+	_, err = syncer.Push(ctx, false, nil)
+	require.NoError(t, err)
+	var personal int
+	require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM source_project_identity_observations WHERE normalized_remote = 'example.com/personal/repo'`).Scan(&personal))
+	assert.Equal(t, 1, personal)
+
+	empty := &Sync{pg: pg, local: local, machine: "workstation", schema: syncer.schema, schemaDone: true, projectRemotes: []string{"example.com/no/match"}}
+	emptyScope := pushSyncStateScope("", nil, nil, empty.projectRemotes)
+	empty.syncState = newScopedSyncStateStore(handoffSyncState{local}, emptyScope, false)
+	empty.syncStateTarget = emptyScope
+	_, err = empty.Push(ctx, true, nil)
+	require.NoError(t, err)
+	var owned int
+	require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM source_session_project_identity_snapshot_scopes WHERE publication_scope = $1`, emptyScope).Scan(&owned))
+	assert.Zero(t, owned)
+	require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM source_project_identity_observations WHERE normalized_remote = 'example.com/personal/repo'`).Scan(&personal))
+	assert.Equal(t, 1, personal)
+}
+
+func TestRemoteScopeRetriesSnapshotChangedDuringPush(t *testing.T) {
+	syncer, local, pg, ctx := newSessionProvenancePushSync(t, "agentsview_remote_late_snapshot_test")
+	seedProvenanceSession(t, local, "early", "workstation", "project", "")
+	seedProvenanceSession(t, local, "late", "workstation", "project", "")
+	require.NoError(t, local.UpsertProjectIdentityObservation(ctx, export.ProjectIdentityObservation{SessionID: "early", Project: "project", Machine: "workstation", RootPath: "/work/early", GitRemote: "https://example.com/team/repo.git", RemoteResolution: export.ProjectResolutionResolved, ObservedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)}))
+	raw, err := sql.Open("sqlite3", local.Path())
+	require.NoError(t, err)
+	_, err = raw.ExecContext(ctx, `UPDATE sessions SET sync_marker = '2000-01-01T00:00:00Z' WHERE id = 'late'`)
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+	syncer.projectRemotes = []string{"example.com/team/repo"}
+	scope := pushSyncStateScope("", nil, nil, syncer.projectRemotes)
+	syncer.syncState = newScopedSyncStateStore(handoffSyncState{local}, scope, false)
+	syncer.syncStateTarget = scope
+	syncer.afterPushBatch = func() {
+		syncer.afterPushBatch = nil
+		require.NoError(t, local.UpsertProjectIdentityObservation(ctx, export.ProjectIdentityObservation{SessionID: "late", Project: "project", Machine: "workstation", RootPath: "/work/late", GitRemote: "https://example.com/team/repo.git", RemoteResolution: export.ProjectResolutionResolved, ObservedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)}))
+	}
+	_, err = syncer.Push(ctx, true, nil)
+	require.NoError(t, err)
+	var count int
+	require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE id = 'late'`).Scan(&count))
+	assert.Zero(t, count)
+	result, err := syncer.Push(ctx, false, nil)
+	require.NoError(t, err)
+	assert.False(t, result.Full)
+	require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE id = 'late'`).Scan(&count))
+	assert.Equal(t, 1, count)
 }

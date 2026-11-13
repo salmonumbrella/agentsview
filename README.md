@@ -673,9 +673,9 @@ exclude_projects = ["scratch"]
 
 Named target names are normalized case-insensitively. `all`, `local`, and the
 legacy `[pg]` field names `url`, `schema`, `machine_name`, `allow_insecure`,
-`projects`, `exclude_projects`, `raw_tenant`, `raw_derivation`,
-`raw_poll_seconds`, `raw_attempt_seconds`, and `raw_max_attempts` cannot be used
-for `[pg.NAME]`.
+`projects`, `exclude_projects`, `project_remotes`, `raw_tenant`,
+`raw_derivation`, `raw_poll_seconds`, `raw_attempt_seconds`, and
+`raw_max_attempts` cannot be used for `[pg.NAME]`.
 
 `AGENTSVIEW_PG_URL`, `AGENTSVIEW_PG_SCHEMA`, and `AGENTSVIEW_PG_MACHINE` still
 work, but in named-target mode they apply only to the effective default target.

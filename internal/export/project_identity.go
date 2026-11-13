@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -67,18 +68,69 @@ func NormalizeGitRemote(raw string) (string, bool) {
 		host = normalizeGitRemoteHost(host, "", "")
 	}
 
+	cleaned, ok := cleanGitRemotePath(repoPath)
+	if host == "" || !ok {
+		return "", false
+	}
+	return host + "/" + cleaned, true
+}
+
+func cleanGitRemotePath(repoPath string) (string, bool) {
 	repoPath = strings.TrimSpace(repoPath)
-	if host == "" || repoPath == "" {
+	if repoPath == "" {
 		return "", false
 	}
 	cleaned := path.Clean("/" + strings.ReplaceAll(repoPath, "\\", "/"))
 	cleaned = strings.Trim(cleaned, "/")
 	cleaned = strings.TrimSuffix(cleaned, ".git")
 	cleaned = strings.Trim(cleaned, "/")
-	if cleaned == "" || cleaned == "." {
-		return "", false
+	return cleaned, cleaned != "" && cleaned != "."
+}
+
+// NormalizeProjectRemotes validates and canonicalizes a repository push scope.
+func NormalizeProjectRemotes(remotes []string) ([]string, error) {
+	var result []string
+	for _, raw := range remotes {
+		raw = strings.TrimSpace(raw)
+		if raw == "" || strings.ContainsAny(raw, "*?\\") || strings.HasPrefix(raw, ".") {
+			return nil, fmt.Errorf("invalid project remote %q", raw)
+		}
+		normalized, ok := NormalizeGitRemote(raw)
+		if !ok && !strings.Contains(raw, ":") && !strings.HasPrefix(raw, "/") {
+			normalized, ok = NormalizeGitRemote("https://" + raw)
+		}
+		if !ok {
+			return nil, fmt.Errorf("invalid project remote %q", raw)
+		}
+		if err := ValidateProjectRemotes([]string{normalized}); err != nil {
+			return nil, fmt.Errorf("invalid project remote %q", raw)
+		}
+		result = append(result, normalized)
 	}
-	return host + "/" + cleaned, true
+	sort.Strings(result)
+	return slices.Compact(result), nil
+}
+
+// ValidateProjectRemotes checks canonical push scope values without rewriting them.
+func ValidateProjectRemotes(remotes []string) error {
+	for _, remote := range remotes {
+		invalid := func() error { return fmt.Errorf("invalid project remote %q", remote) }
+		host, repo, ok := strings.Cut(remote, "/")
+		if !ok || host == "" || repo == "" || strings.Contains(remote, "://") ||
+			strings.IndexFunc(remote, unicode.IsSpace) >= 0 || strings.ContainsAny(repo, "*?#[]\\") {
+			return invalid()
+		}
+		u, err := url.Parse("//" + host)
+		if err != nil || u.User != nil || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" ||
+			host != normalizeGitRemoteHost(u.Hostname(), "", u.Port()) {
+			return invalid()
+		}
+		cleaned, ok := cleanGitRemotePath(repo)
+		if !ok || repo != cleaned {
+			return invalid()
+		}
+	}
+	return nil
 }
 
 func normalizeGitRemoteHost(host, scheme, port string) string {

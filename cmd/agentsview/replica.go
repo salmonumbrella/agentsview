@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/server"
 	"go.kenn.io/agentsview/internal/storage"
 	syncpkg "go.kenn.io/agentsview/internal/sync"
@@ -23,16 +24,20 @@ import (
 // ReplicaPushConfig carries the `<backend> push` flags plus the watch loop's
 // internal per-push scope.
 type ReplicaPushConfig struct {
-	Full            bool
-	AllTargets      bool
-	ProjectsFlag    string
-	ExcludeProjects string
-	AllProjects     bool
-	Watch           bool
-	NoStartDaemon   bool
-	Debounce        time.Duration
-	Interval        time.Duration
-	NoVectors       bool
+	Full               bool
+	AllTargets         bool
+	ProjectsFlag       string
+	ProjectRemotes     string
+	ProjectRemotesSet  bool
+	ProjectsSet        bool
+	ExcludeProjectsSet bool
+	ExcludeProjects    string
+	AllProjects        bool
+	Watch              bool
+	NoStartDaemon      bool
+	Debounce           time.Duration
+	Interval           time.Duration
+	NoVectors          bool
 	// Embed builds pending embeddings in this process before each push
 	// (pg push --embed). It requires the local archive writer.
 	Embed bool
@@ -222,11 +227,13 @@ func runReplicaPushTarget(
 		return err
 	}
 
-	projects, excludeProjects, err := resolvePushProjects(target, cfg)
+	projects, excludeProjects, remotes, err := resolvePushProjects(target, cfg)
 	if err != nil {
 		return err
 	}
 
+	target.ProjectRemotes = remotes
+	target.ProjectRemotesErr = nil
 	result, err := writer.ReplicaPush(
 		ctx, backend, target, cfg, projects, excludeProjects,
 	)
@@ -484,7 +491,7 @@ func runReplicaStatusTarget(
 	if target.Target.URL == "" {
 		return errors.New("url not configured")
 	}
-	projects, excludeProjects, err := resolvePushProjects(
+	projects, excludeProjects, remotes, err := resolvePushProjects(
 		target,
 		ReplicaPushConfig{
 			ProjectsFlag:    cfg.ProjectsFlag,
@@ -496,6 +503,8 @@ func runReplicaStatusTarget(
 		return err
 	}
 
+	target.ProjectRemotes = remotes
+	target.ProjectRemotesErr = nil
 	now := time.Now()
 	path := replicaWatchHealthPath(appCfg.DataDir, backend.Name())
 	rec, recErr := loadReplicaWatchRecord(path)
@@ -815,34 +824,47 @@ func writeReplicaServeRuntimeRecord(name string, rt *serveRuntime) bool {
 // configured scope; --all-projects clears it.
 func resolvePushProjects(
 	target storage.ConfiguredReplica, cfg ReplicaPushConfig,
-) (projects, exclude []string, err error) {
+) (projects, exclude, remotes []string, err error) {
+	labelFlag := cfg.ProjectsSet || cfg.ExcludeProjectsSet || cfg.ProjectsFlag != "" || cfg.ExcludeProjects != ""
+	remoteFlag := cfg.ProjectRemotesSet || cfg.ProjectRemotes != ""
 	if cfg.ProjectsFlag != "" && cfg.ExcludeProjects != "" {
-		return nil, nil, errors.New("--projects and --exclude-projects are mutually exclusive")
+		return nil, nil, nil, errors.New("--projects and --exclude-projects are mutually exclusive")
 	}
-	if cfg.AllProjects &&
-		(cfg.ProjectsFlag != "" || cfg.ExcludeProjects != "") {
-		return nil, nil, errors.New("--all-projects cannot be combined with " +
-			"--projects or --exclude-projects",
-		)
+	if labelFlag && remoteFlag {
+		return nil, nil, nil, errors.New("project_remotes and project labels are mutually exclusive")
 	}
-	projects = target.Projects
-	exclude = target.ExcludeProjects
 	if cfg.AllProjects {
-		projects = nil
-		exclude = nil
+		if labelFlag || remoteFlag {
+			return nil, nil, nil, errors.New("--all-projects cannot be combined with project scope flags")
+		}
+		return nil, nil, nil, nil
 	}
+	if labelFlag && (len(target.ProjectRemotes) > 0 || target.ProjectRemotesErr != nil) || remoteFlag && (len(target.Projects) > 0 || len(target.ExcludeProjects) > 0) {
+		return nil, nil, nil, errors.New("project_remotes and project labels are mutually exclusive")
+	}
+	projects, exclude, remotes = target.Projects, target.ExcludeProjects, target.ProjectRemotes
 	if cfg.ProjectsFlag != "" {
-		projects = splitProjectList(cfg.ProjectsFlag)
-		exclude = nil
+		projects, exclude = splitProjectList(cfg.ProjectsFlag), nil
 	}
 	if cfg.ExcludeProjects != "" {
-		exclude = splitProjectList(cfg.ExcludeProjects)
-		projects = nil
+		exclude, projects = splitProjectList(cfg.ExcludeProjects), nil
 	}
-	if len(projects) > 0 && len(exclude) > 0 {
-		return nil, nil, errors.New("projects and exclude_projects are mutually exclusive")
+	if remoteFlag {
+		if strings.TrimSpace(cfg.ProjectRemotes) == "" {
+			return nil, nil, nil, errors.New("project_remotes cannot be empty")
+		}
+		remotes, err = export.NormalizeProjectRemotes(strings.Split(cfg.ProjectRemotes, ","))
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	} else if target.ProjectRemotesErr != nil {
+		return nil, nil, nil, target.ProjectRemotesErr
 	}
-	return projects, exclude, nil
+	// Remotes were canonicalized above; the daemon and constructor check what they receive.
+	if err = storage.ValidateProjectFilterCombination(projects, exclude, remotes); err != nil {
+		return nil, nil, nil, err
+	}
+	return projects, exclude, remotes, nil
 }
 
 func splitProjectList(s string) []string {

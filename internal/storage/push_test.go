@@ -97,7 +97,7 @@ func TestValidateProjectFilters(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateProjectFilters(tt.projects, tt.exclude)
+			err := ValidateProjectFilters(tt.projects, tt.exclude, nil)
 			if tt.wantErr != "" {
 				require.EqualError(t, err, tt.wantErr)
 				return
@@ -141,4 +141,49 @@ func TestMirrorPushResultDurationWireFormat(t *testing.T) {
 	assert.Equal(t, 4, decoded.SessionsPushed)
 	assert.Equal(t, 750*time.Millisecond, decoded.Duration)
 	assert.True(t, decoded.ArchiveRebuilt)
+}
+
+func TestValidateProjectRemoteFilters(t *testing.T) {
+	for _, tc := range []struct {
+		name                       string
+		projects, exclude, remotes []string
+		wantErr                    bool
+	}{
+		{name: "remote", remotes: []string{"github.com/org/repo"}},
+		{name: "mixed include", projects: []string{"label"}, remotes: []string{"github.com/org/repo"}, wantErr: true},
+		{name: "mixed exclude", exclude: []string{"label"}, remotes: []string{"github.com/org/repo"}, wantErr: true},
+		{name: "invalid", remotes: []string{"/tmp/repo"}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateProjectFilters(tc.projects, tc.exclude, tc.remotes)
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestValidateProjectFilterCombination(t *testing.T) {
+	for _, tc := range []struct {
+		name                       string
+		projects, exclude, remotes []string
+		wantErr                    string
+	}{
+		{name: "remote alone", remotes: []string{"example.com/org/repo"}},
+		{name: "remote and include", projects: []string{"label"}, remotes: []string{"example.com/org/repo"}, wantErr: "project_remotes and project labels are mutually exclusive"},
+		{name: "remote and exclude", exclude: []string{"label"}, remotes: []string{"example.com/org/repo"}, wantErr: "project_remotes and project labels are mutually exclusive"},
+		{name: "include and exclude", projects: []string{"one"}, exclude: []string{"two"}, wantErr: "projects and exclude_projects are mutually exclusive"},
+		{name: "does not judge remote grammar", remotes: []string{"/tmp/repo"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateProjectFilterCombination(tc.projects, tc.exclude, tc.remotes)
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.EqualError(t, err, tc.wantErr)
+			}
+		})
+	}
 }

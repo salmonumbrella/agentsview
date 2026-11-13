@@ -83,3 +83,36 @@ func TestBackendNewPusherRejectsPushBatchSize(t *testing.T) {
 	require.EqualError(t, err,
 		"push_batch_size is a ClickHouse setting; PostgreSQL push does not accept it (got 250)")
 }
+
+func TestBackendResolveTargetNormalizesProjectRemotes(t *testing.T) {
+	cfg := config.Config{PG: config.PGConfig{URL: "postgres://localhost/db", ProjectRemotes: []string{"git@example.com:org/repo.git", "example.com/org/repo"}}}
+	target, err := (Backend{}).ResolveTarget(cfg, storage.ReplicaTargetRef{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"example.com/org/repo"}, target.ProjectRemotes)
+}
+
+func TestResolveTargetDefersProjectRemoteErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		input, want []string
+		wantErr     string
+	}{
+		{"absent", nil, nil, ""},
+		{"valid", []string{"https://example.com:8443/org/repo"}, []string{"example.com:8443/org/repo"}, ""},
+		{"empty", []string{}, nil, "project_remotes cannot be empty"},
+		{"invalid", []string{"/local/path"}, nil, "invalid project remote"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target, err := (Backend{}).ResolveTarget(config.Config{PG: config.PGConfig{URL: "postgres://localhost/db", ProjectRemotes: tc.input}}, storage.ReplicaTargetRef{})
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, target.ProjectRemotes)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, target.ProjectRemotesErr, tc.wantErr)
+				_, err = (Backend{}).LastPushAt(t.Context(), nil, target, nil, nil)
+				require.ErrorContains(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, target.ProjectRemotesErr)
+			}
+		})
+	}
+}
