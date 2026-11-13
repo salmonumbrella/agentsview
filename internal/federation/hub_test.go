@@ -404,3 +404,94 @@ func TestHubPulseProtectsComputedSummaryCost(t *testing.T) {
 	assert.Nil(t, later.Totals["tokens"].Value)
 	assert.Nil(t, later.Totals["cost_microdollars"].Value)
 }
+
+func TestHubPulsePreservesSummaryModelSplitImages(t *testing.T) {
+	for _, scenario := range []string{"all", "two"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := t.Context()
+			archive, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "hub.db"))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, archive.Close()) })
+			cfg, err := config.Default()
+			require.NoError(t, err)
+			cfg.Federation.Hub.SuggestedProjects = []string{}
+			hub := NewService("hub", "hub", cfg.Federation.Hub, archive)
+			digest, err := export.DigestCanonical(cfg.Federation.Hub)
+			require.NoError(t, err)
+			remote := "github.com/example/split"
+			key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
+			started := "2020-07-29T09:00:00Z"
+			names := []string{"a", "b", "c"}
+			enrollments := make([]string, 3)
+			apply := func(i int, sequence int64, split bool) {
+				t.Helper()
+				name := names[i]
+				spoke, share := "spoke-"+name, "share-"+name
+				x := []int{3, 5, 7}[i]
+				models := map[string]db.SessionModelUsageBreakdown{"x": {InputTokens: x, HasCost: true, Cost: money.Money{Microdollars: int64(x * 10)}}}
+				if split {
+					x, y := i+1, i+2
+					models = map[string]db.SessionModelUsageBreakdown{"x": {InputTokens: x, HasCost: true, Cost: money.Money{Microdollars: int64(x * 10)}}, "y": {InputTokens: y, HasCost: true, Cost: money.Money{Microdollars: int64(y * 10)}}}
+				}
+				payload := SummaryRecord{SessionID: name, Remote: remote, ProjectKey: key, Agent: "codex", StartedAt: &started, Outcome: "unknown", ByModel: models}
+				hash, err := export.DigestCanonical(payload)
+				require.NoError(t, err)
+				ack, err := hub.ApplyBatch(ctx, enrollments[i], spoke, share, Batch{Protocol: ProtocolVersion, SpokeInstance: spoke, ShareUID: share, Epoch: 1, Sequence: sequence, Records: []BatchRecord{{RecordUID: name, Kind: "session_summary", Hash: hash, Payload: &payload}}})
+				require.NoError(t, err)
+				assert.Empty(t, ack.Refused)
+			}
+			for i, name := range names {
+				spoke, share := "spoke-"+name, "share-"+name
+				enrollment, _, err := hub.Enroll(ctx, spoke, name, "")
+				require.NoError(t, err)
+				enrollments[i] = enrollment.UID
+				_, err = hub.RegisterShare(ctx, enrollment.UID, spoke, share, ShareManifest{Protocol: ProtocolVersion, SpokeInstance: spoke, ShareUID: share, Epoch: 1, Remote: remote, ProjectKey: key, Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: digest})
+				require.NoError(t, err)
+				apply(i, 1, false)
+			}
+			first, err := hub.Pulse(ctx, "2020-07-29")
+			require.NoError(t, err)
+			require.NotNil(t, first.Totals["tokens"].Value)
+			assert.EqualValues(t, 15, *first.Totals["tokens"].Value)
+			require.NotNil(t, first.Totals["cost_microdollars"].Value)
+			assert.EqualValues(t, 150, *first.Totals["cost_microdollars"].Value)
+			for i := range names {
+				if scenario == "all" || i > 0 {
+					apply(i, 2, true)
+				}
+			}
+			later, err := hub.Pulse(ctx, "2020-07-29")
+			require.NoError(t, err)
+			if scenario == "two" {
+				assert.True(t, later.Suppressed)
+				assert.Empty(t, later.Projects)
+				assert.Nil(t, later.Totals["tokens"].Value)
+				return
+			}
+			assert.False(t, later.Suppressed)
+			require.Len(t, later.Projects, 1)
+			project := later.Projects[0]
+			require.NotNil(t, project.Totals["tokens"].Value)
+			assert.EqualValues(t, 15, *project.Totals["tokens"].Value)
+			require.NotNil(t, project.Totals["cost_microdollars"].Value)
+			assert.EqualValues(t, 150, *project.Totals["cost_microdollars"].Value)
+			require.Len(t, project.Models, 2)
+			for _, model := range project.Models {
+				require.NotNil(t, model.Metrics["sessions"].Value)
+				assert.EqualValues(t, 3, *model.Metrics["sessions"].Value)
+				require.NotNil(t, model.Metrics["tokens"].Value)
+				require.NotNil(t, model.Metrics["cost_microdollars"].Value)
+				switch model.Key {
+				case "x":
+					assert.EqualValues(t, 6, *model.Metrics["tokens"].Value)
+					assert.EqualValues(t, 60, *model.Metrics["cost_microdollars"].Value)
+				case "y":
+					assert.EqualValues(t, 9, *model.Metrics["tokens"].Value)
+					assert.EqualValues(t, 90, *model.Metrics["cost_microdollars"].Value)
+				default:
+					t.Errorf("unexpected model %q", model.Key)
+				}
+			}
+		})
+	}
+}
