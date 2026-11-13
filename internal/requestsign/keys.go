@@ -12,28 +12,44 @@ import (
 	"strings"
 )
 
-// IsPrivateFile reports whether an open file is regular and owner-only.
-func IsPrivateFile(file *os.File) bool { return isPrivateRegularFile(file) }
+var (
+	ErrPrivateOpen     = errors.New("opening private signing file failed")
+	ErrPrivateMode     = errors.New("signing files must be private regular files")
+	ErrPrivateRead     = errors.New("reading private signing file failed")
+	ErrPrivateTooLarge = errors.New("private file is too large")
+)
 
-func readPrivate(path string, limit int64) ([]byte, error) {
+// ReadPrivate reads a bounded owner-only regular file.
+func ReadPrivate(path string, limit int64) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, errors.New("opening private signing file failed")
+		return nil, ErrPrivateOpen
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() || !isPrivateRegularFile(f) {
-		return nil, errors.New("signing files must be private regular files")
+		return nil, ErrPrivateMode
 	}
 	b, err := io.ReadAll(io.LimitReader(f, limit+1))
-	if err != nil || int64(len(b)) > limit {
-		return nil, errors.New("reading private signing file failed")
+	if err != nil {
+		return nil, ErrPrivateRead
+	}
+	if int64(len(b)) > limit {
+		return nil, ErrPrivateTooLarge
 	}
 	return b, nil
 }
 
+func readSigningPrivate(path string, limit int64) ([]byte, error) {
+	b, err := ReadPrivate(path, limit)
+	if errors.Is(err, ErrPrivateTooLarge) {
+		return nil, ErrPrivateRead
+	}
+	return b, err
+}
+
 func ReadSecret(path string) ([]byte, error) {
-	b, err := readPrivate(path, 4096)
+	b, err := readSigningPrivate(path, 4096)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +78,7 @@ type PolicyKey struct {
 // A malformed or unreadable entry denies the entire policy, never a cached key.
 func ReadPolicy(file string) (Policy, map[string]Key, error) {
 	var policy Policy
-	b, err := readPrivate(file, 64<<10)
+	b, err := readSigningPrivate(file, 64<<10)
 	if err != nil {
 		return policy, nil, err
 	}

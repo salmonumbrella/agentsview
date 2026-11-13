@@ -11,17 +11,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestIsPrivateFileMode(t *testing.T) {
+func TestReadPrivateModeAndLimit(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "file")
 	require.NoError(t, os.WriteFile(path, []byte("fixture"), 0600))
-	file, err := os.Open(path)
+	data, err := ReadPrivate(path, 7)
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, file.Close()) })
-	for _, tc := range []struct {
-		mode os.FileMode
-		want bool
-	}{{0600, true}, {0640, false}, {0644, false}} {
-		require.NoError(t, os.Chmod(path, tc.mode))
-		assert.Equal(t, tc.want, IsPrivateFile(file))
+	assert.Equal(t, "fixture", string(data))
+	for _, mode := range []os.FileMode{0640, 0644} {
+		require.NoError(t, os.Chmod(path, mode))
+		_, err := ReadPrivate(path, 7)
+		assert.ErrorIs(t, err, ErrPrivateMode)
 	}
+	require.NoError(t, os.Chmod(path, 0600))
+	_, err = ReadPrivate(path, 6)
+	assert.ErrorIs(t, err, ErrPrivateTooLarge)
 }

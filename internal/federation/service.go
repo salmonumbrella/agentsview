@@ -8,8 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
-	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"unicode"
@@ -66,20 +64,16 @@ func readCredential(ctx context.Context, path string) (string, error) {
 	if !filepath.IsAbs(path) {
 		return "", inputError("credential file path must be absolute")
 	}
-	f, err := os.Open(path)
+	b, err := requestsign.ReadPrivate(path, 4096)
 	if err != nil {
-		return "", inputError("cannot open credential file")
-	}
-	defer f.Close()
-	if !requestsign.IsPrivateFile(f) {
-		return "", inputError("credential file must be a regular file readable only by its owner (mode 0600)")
-	}
-	b, err := io.ReadAll(io.LimitReader(f, 4097))
-	if err != nil {
-		return "", inputError("cannot open credential file")
-	}
-	if len(b) > 4096 {
-		return "", inputError("credential file is too large")
+		switch {
+		case errors.Is(err, requestsign.ErrPrivateMode):
+			return "", inputError("credential file must be a regular file readable only by its owner (mode 0600)")
+		case errors.Is(err, requestsign.ErrPrivateTooLarge):
+			return "", inputError("credential file is too large")
+		default:
+			return "", inputError("cannot open credential file")
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return "", err
