@@ -1550,3 +1550,43 @@ func TestFederationPulseProtectsPublishedHistoryAfterTombstone(t *testing.T) {
 	assert.Nil(t, later.Totals["tokens"].Value)
 	assert.Nil(t, later.Totals["cost_microdollars"].Value)
 }
+
+// Search fees are native message accounting, not federation summary ingress.
+func TestFederationSharedSearchFeeKeeper(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.UpsertModelPricingContext(ctx, []ModelPricing{{ModelPattern: "fee-model", InputPerMTok: money.Money{Microdollars: 1000000}}}))
+	started := "2026-07-28T09:00:00Z"
+	for _, item := range []struct{ name, usage string }{
+		{"a", `{"input_tokens":10,"server_tool_use":{"web_search_requests":1}}`},
+		{"b", `{"input_tokens":20,"server_tool_use":{"web_search_requests":1}}`},
+		{"c", `{"input_tokens":30,"server_tool_use":{"web_search_requests":1}}`},
+	} {
+		enrollment, spoke, share := "e-"+item.name, "s-"+item.name, "h-"+item.name
+		require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: item.name, CredentialSHA256: "digest-" + item.name}))
+		_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+		require.NoError(t, err)
+		record := FederationHubRecord{UID: item.name, Hash: "hash", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: item.name, Project: "example/repo", Agent: "claude", StartedAt: &started, MessageCount: 1}, Signals: SessionSignalUpdate{Outcome: "unknown"}, Messages: []Message{{SessionID: item.name, Ordinal: 0, Role: "assistant", Timestamp: started, Model: "fee-model", TokenUsage: jsontext.Value(item.usage)}}, ReplaceMessages: true}}
+		_, err = d.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", []FederationHubRecord{record})
+		require.NoError(t, err)
+	}
+	now := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	day, err := d.ExportReportingDay(ctx, ReportingExportOptions{Date: now.AddDate(0, 0, -1), Now: now, SchemaVersion: export.ReportingJointSchemaVersion})
+	require.NoError(t, err)
+	assert.EqualValues(t, 60, day.Hours[9].Usage.Totals.InputTokens)
+	assert.EqualValues(t, 30060, day.Hours[9].Usage.Totals.Cost.Microdollars)
+	tx, err := d.getReader().BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	date := now.AddDate(0, 0, -1)
+	for _, item := range []struct {
+		id   string
+		cost int64
+	}{{"a", 10010}, {"b", 10020}, {"c", 10030}} {
+		source, err := d.loadReportingExportSourceScoped(ctx, tx, date, now, export.ReportingJointSchemaVersion, map[string]struct{}{item.id: {}})
+		require.NoError(t, err)
+		hours, err := reportingHoursFromSource(ctx, source.forDate(date, now), date, 24, export.ReportingJointSchemaVersion, nil, time.Hour)
+		require.NoError(t, err)
+		assert.EqualValues(t, item.cost, hours[9].Usage.Totals.Cost.Microdollars)
+	}
+}
