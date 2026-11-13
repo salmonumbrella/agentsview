@@ -402,6 +402,34 @@ func TestFederationPulseKeepsRetainedAndOmitsPurgedContributions(t *testing.T) {
 	}
 }
 
+func TestFederationPulseSubagentTakesPrecedenceOverAutomation(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	for _, id := range []string{"a", "b", "c"} {
+		enrollment, spoke, share := "enr-"+id, "spoke-"+id, "share-"+id
+		require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: id, CredentialSHA256: "digest-" + id}))
+		_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+		require.NoError(t, err)
+		started, parent := "2026-07-28T09:00:00Z", "parent-"+id
+		parentRecord := FederationHubRecord{UID: parent, Hash: "parent-hash", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: parent, Project: "example/repo", Agent: "codex", StartedAt: &started}, Signals: SessionSignalUpdate{Outcome: "unknown"}}}
+		child := "child-" + id
+		childRecord := FederationHubRecord{UID: child, Hash: "child-hash", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: child, Project: "example/repo", Agent: "codex", StartedAt: &started, IsAutomated: true, ParentSessionID: &parent, RelationshipType: "subagent"}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: 10, OccurredAt: started, DedupKey: child}}}}
+		_, err = d.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", []FederationHubRecord{parentRecord, childRecord})
+		require.NoError(t, err)
+	}
+	pulse, err := d.readFederationPulse(ctx, "2026-07-28", 3, time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	require.False(t, pulse.Suppressed)
+	assert.Equal(t, Ptr(int64(6)), pulse.Totals["sessions"].Value)
+	assert.Equal(t, Ptr(int64(0)), pulse.Totals["automated_sessions"].Value)
+	assert.Equal(t, Ptr(float64(0)), pulse.Ratios["automation_share"].Value)
+	require.Len(t, pulse.Categories, 2)
+	assert.Equal(t, "interactive", pulse.Categories[0].Key)
+	assert.Equal(t, Ptr(int64(3)), pulse.Categories[0].Metrics["sessions"].Value)
+	assert.Equal(t, "subagent", pulse.Categories[1].Key)
+	assert.Equal(t, Ptr(int64(3)), pulse.Categories[1].Metrics["sessions"].Value)
+}
+
 func TestFederationPulseIncludesDatedMessageLessSignals(t *testing.T) {
 	d := testDB(t)
 	ctx := t.Context()
