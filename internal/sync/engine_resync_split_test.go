@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/money"
 	"go.kenn.io/agentsview/internal/parser"
 	"go.kenn.io/agentsview/internal/testjsonl"
 )
@@ -170,6 +171,67 @@ func TestCanceledResyncDoesNotRecordSourceFailure(t *testing.T) {
 	require.Error(t, next.err)
 	assert.False(t, next.cachedFailure,
 		"a failure seen while the pass was being canceled may be an artifact of cancellation")
+}
+
+// A staged replacement cannot publish, and the installed replacement must
+// preserve history while the retired physical archive can no longer publish.
+func TestResyncPulseKeepsHistoryAndRetiresOldReader(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx := t.Context()
+	e, database, _ := newResyncSplitEngine(t)
+	day := time.Now().UTC().AddDate(0, 0, -2)
+	start := day.Format(time.DateOnly) + "T09:00:00Z"
+	older := day.AddDate(0, 0, -1).Format(time.DateOnly) + "T09:00:00Z"
+	for i, name := range []string{"a", "b", "c"} {
+		enrollment, spoke, share := "e-"+name, "s-"+name, "h-"+name
+		require.NoError(t, database.CreateFederationEnrollment(ctx, db.FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: name, CredentialSHA256: "digest-" + name}))
+		_, err := database.PutFederationHubShare(ctx, spoke, db.FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active", Retention: "member-controlled"})
+		require.NoError(t, err)
+		cost := money.Money{Microdollars: int64((i + 1) * 100)}
+		record := db.FederationHubRecord{UID: name, Hash: "initial", Remote: "example/repo", ProjectKey: "project", Write: db.SessionBatchWrite{Session: db.Session{ID: name, Project: "example/repo", Agent: "codex", StartedAt: &start}, Signals: db.SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []db.UsageEvent{{Source: "federation", Model: "model", InputTokens: (i + 1) * 10, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: start, DedupKey: "model"}}}}
+		_, err = database.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch-1", []db.FederationHubRecord{record})
+		require.NoError(t, err)
+	}
+	cost := money.Money{Microdollars: 70}
+	record := db.FederationHubRecord{UID: "a-older", Hash: "initial", Remote: "example/repo", ProjectKey: "project", Write: db.SessionBatchWrite{Session: db.Session{ID: "a-older", Project: "example/repo", Agent: "codex", StartedAt: &older}, Signals: db.SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []db.UsageEvent{{Source: "federation", Model: "model", InputTokens: 7, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: older, DedupKey: "model"}}}}
+	_, err := database.CommitFederationBatch(ctx, "e-a", "s-a", "h-a", "policy", 1, 2, "batch-2", []db.FederationHubRecord{record})
+	require.NoError(t, err)
+	first, err := database.FederationPulse(ctx, day.Format(time.DateOnly), 3)
+	require.NoError(t, err)
+	require.NotNil(t, first.Totals["tokens"].Value)
+	assert.EqualValues(t, 60, *first.Totals["tokens"].Value)
+	require.NotNil(t, first.Totals["cost_microdollars"].Value)
+	assert.EqualValues(t, 600, *first.Totals["cost_microdollars"].Value)
+	retired, err := db.OpenIsolated(ctx, database.Path())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, retired.Close()) })
+	_, err = retired.FederationPulse(ctx, day.Format(time.DateOnly), 3)
+	require.NoError(t, err)
+
+	tempPath, stats, err := e.ResyncBuild(ctx, nil)
+	require.NoError(t, err)
+	require.False(t, stats.Aborted, "warnings: %v", stats.Warnings)
+	staged, err := db.OpenIsolated(ctx, tempPath)
+	require.NoError(t, err)
+	pending, err := staged.FederationPulse(ctx, day.Format(time.DateOnly), 3)
+	require.Error(t, err)
+	assert.Empty(t, pending.Projects)
+	assert.Nil(t, pending.Totals)
+	require.NoError(t, staged.Close())
+	installed, err := e.SwapResyncDatabase(ctx, tempPath)
+	require.NoError(t, err)
+	require.True(t, installed)
+	require.NoError(t, e.ResetCachesAfterSwap(ctx))
+	old, err := retired.FederationPulse(ctx, day.AddDate(0, 0, -1).Format(time.DateOnly), 3)
+	require.Error(t, err)
+	assert.Empty(t, old.Projects)
+	assert.Nil(t, old.Totals)
+	later, err := database.FederationPulse(ctx, day.AddDate(0, 0, -1).Format(time.DateOnly), 3)
+	require.NoError(t, err)
+	assert.True(t, later.Suppressed)
+	assert.Empty(t, later.Projects)
+	assert.Nil(t, later.Totals["tokens"].Value)
+	assert.Nil(t, later.Totals["cost_microdollars"].Value)
 }
 
 // TestResyncBuildThenSwapMatchesResyncAll drives the split resync path
