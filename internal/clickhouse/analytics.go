@@ -32,7 +32,7 @@ func (s *Store) loadAnalyticsSessions(
 	}
 	// Every analytics panel on a page lists the same sessions; keep the
 	// rows per parts and predicate so one page reads them once.
-	fingerprint, err := s.tablePartsFingerprint(ctx, []string{"sessions", "messages"})
+	fingerprint, err := s.tablePartsFingerprint(ctx, []string{"sessions", "messages", "usage_events"})
 	if err != nil {
 		return nil, err
 	}
@@ -93,10 +93,36 @@ func chBuildAnalyticsWhere(f db.AnalyticsFilter, dateCol, tablePrefix string, in
 	where, args := readbase.AnalyticsWhere(f, dateCol, tablePrefix, includeDate, chTimestampSQL, localDate, localDateArgs, db.ClickHouseQueryDialect())
 	if includeTime && (f.DayOfWeek != nil || f.Hour != nil) {
 		pred, pargs := chAnalyticsMessageTimeExists(f, tablePrefix+"id")
-		where += " AND " + pred
+		usagePred, usageArgs := chAnalyticsFederationTimeExists(f, tablePrefix)
+		where += " AND (" + pred + " OR " + usagePred + ")"
 		args = append(args, pargs...)
+		args = append(args, usageArgs...)
 	}
 	return where, args
+}
+
+func chAnalyticsFederationTimeExists(f db.AnalyticsFilter, prefix string) (string, []any) {
+	preds := []string{prefix + "started_at IS NOT NULL"}
+	usagePred := "u.source = 'federation'"
+	var args []any
+	if pred, values := readbase.AnalyticsCSVPredicate("u.model", f.Model, db.ClickHouseQueryDialect()); pred != "" {
+		usagePred += " AND " + pred
+		args = append(args, values...)
+	}
+	if f.DayOfWeek != nil {
+		expr, values := chAnalyticsDayOfWeekExpr(prefix+"started_at", f)
+		preds = append(preds, expr+" = ?")
+		args = append(args, append(values, *f.DayOfWeek)...)
+	}
+	if f.Hour != nil {
+		expr, values := chAnalyticsHourExpr(prefix+"started_at", f)
+		preds = append(preds, expr+" = ?")
+		args = append(args, append(values, *f.Hour)...)
+	}
+	// Keep session-time expressions outside the subquery for ClickHouse.
+	timePreds := strings.Join(preds, " AND ")
+	// The subquery precedes the time expressions so its parameters come first.
+	return "(" + prefix + "id IN (SELECT u.session_id FROM usage_events u WHERE " + usagePred + ") AND " + timePreds + ")", args
 }
 
 func chAnalyticsLocalDateExpr(

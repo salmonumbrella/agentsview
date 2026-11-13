@@ -1858,6 +1858,9 @@ fixtures retain this field; missing identities remain source-local.
   per-message output is the fallback. Known-model tokens use catalog
   estimates. A usable receipt after the latest reported-cost shutdown clears
   that stale cost only when receipts supply the per-call usage.
+  Source rechecked 2026-11-13: a shutdown with a reported total and no model
+  metrics creates one cost-only `copilot` event. Summary delivery carries that
+  total through the unknown-model breakdown when no model usage is allocated.
 
 - **Receipt schema:** Reverified 2026-10-31 against the published
   [Copilot CLI 1.0.105 Linux x64 package](https://registry.npmjs.org/@github/copilot-linux-x64/-/copilot-linux-x64-1.0.105.tgz)

@@ -121,9 +121,15 @@ func (s *Analytics) analyticsSessionsModelTimeFiltered(
 	if err != nil {
 		return nil, err
 	}
+	stats := make(map[string]db.MessageStats)
+	if err := s.addFederationStats(ctx, candidateIDs, f, stats); err != nil {
+		return nil, err
+	}
 	out := make([]AnalyticsSession, 0, len(sessions))
 	for _, session := range sessions {
-		if _, ok := scope[session.ID]; ok {
+		_, matched := scope[session.ID]
+		_, federation := stats[session.ID]
+		if matched || federation {
 			out = append(out, session)
 		}
 	}
@@ -139,7 +145,11 @@ func (s *Analytics) getAnalyticsFilteredMessageStats(
 	if err != nil {
 		return nil, err
 	}
-	return scope.StatsBySession(), nil
+	stats := scope.StatsBySession()
+	if err := s.addFederationStats(ctx, sessionIDs, f, stats); err != nil {
+		return nil, err
+	}
+	return stats, nil
 }
 
 func (s *Analytics) analyticsSessionsWithModelMessageCounts(
@@ -326,6 +336,60 @@ func (s *Analytics) GetAnalyticsActivity(
 	}
 	if err := s.addActivityAgentCounts(ctx, f, granularity, buckets); err != nil {
 		return db.ActivityResponse{}, err
+	}
+	// Federation summaries have no message rows or dashboard message facts.
+	// Their usage events identify the already-mirrored summary sessions.
+	sessions, err := s.analyticsSessions(ctx, f)
+	if err != nil {
+		return db.ActivityResponse{}, err
+	}
+	ids := make([]string, 0, len(sessions))
+	for _, session := range sessions {
+		ids = append(ids, session.ID)
+	}
+	stats := make(map[string]db.MessageStats)
+	if err := s.addFederationStats(ctx, ids, f, stats); err != nil {
+		return db.ActivityResponse{}, err
+	}
+	messageSessions := make(map[string]bool)
+	if err := s.backend.VisitSessionIDSets(ctx, ids, func(ctx context.Context, idSet string, args []any) error {
+		rows, err := s.backend.QueryContext(ctx, `SELECT DISTINCT session_id FROM messages WHERE session_id IN `+idSet, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			messageSessions[id] = true
+		}
+		return rows.Err()
+	}); err != nil {
+		return db.ActivityResponse{}, err
+	}
+	unknownBuckets := make(map[string]bool)
+	for _, session := range sessions {
+		stat, ok := stats[session.ID]
+		date := db.BucketDate(AnalyticsLocalDate(analyticsDateTime(session), f.Timezone), granularity)
+		if !ok {
+			if !messageSessions[session.ID] {
+				unknownBuckets[date] = true
+			}
+			continue
+		}
+		if entry := buckets[date]; entry != nil {
+			entry.Messages += stat.Messages
+			entry.UserMessages += stat.UserMessages
+			entry.ByAgent[session.Agent] += stat.Messages
+		}
+	}
+	// No ownership marker reaches mirrors for a summary without usage. Do
+	// not report a bucket's counts as zero (or a partial sum) when a session
+	// in it has neither messages nor federation usage, including zero counts.
+	for date := range unknownBuckets {
+		delete(buckets, date)
 	}
 	out := db.ActivityResponse{Granularity: granularity}
 	keys := db.SortedKeys(buckets)

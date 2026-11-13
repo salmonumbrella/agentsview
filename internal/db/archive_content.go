@@ -534,6 +534,14 @@ func applyArchiveContentToCopiedSessionsTx(
 	if err != nil {
 		return err
 	}
+	// Trash can be copied before federation state. Consult the source owner,
+	// rather than relying on a destination ownership row already existing.
+	if oldDBHasTable(ctx, tx, "federation_records") {
+		_, err = tx.ExecContext(ctx, `UPDATE sessions SET outcome=(SELECT o.outcome FROM old_db.sessions o WHERE o.id=sessions.id),health_grade=(SELECT o.health_grade FROM old_db.sessions o WHERE o.id=sessions.id) WHERE id IN (SELECT id FROM `+tempIDsTable+`) AND EXISTS(SELECT 1 FROM old_db.federation_records r WHERE r.session_id=sessions.id)`)
+		if err != nil {
+			return fmt.Errorf("restoring copied federation signals: %w", err)
+		}
+	}
 	if err := refreshCopiedCodexForkDigestsTx(ctx, tx, tempIDsTable); err != nil {
 		return err
 	}

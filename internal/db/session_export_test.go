@@ -1541,6 +1541,82 @@ func TestSessionExportUsageUsesPageReadSnapshot(t *testing.T) {
 	assert.Equal(t, 10, rows[0].ModelUsage.OutputTokens)
 }
 
+func TestFederationSelectionRestrictsClaudeSnapshotPeers(t *testing.T) {
+	d := testSessionExportDB(t)
+	ctx := t.Context()
+	seedSessionExportPricing(t, d)
+	for _, id := range []string{"parent", "peer"} {
+		insertExportSession(t, d, Session{ID: id, Project: "snapshot", Machine: "install", Agent: "claude", FilePath: Ptr(id), StartedAt: Ptr("2026-05-01T10:00:00Z")})
+	}
+	insertMessages(t, d,
+		Message{SessionID: "parent", Ordinal: 0, Role: "assistant", Model: "model-computed", ClaudeMessageID: "shared", ClaudeRequestID: "request", TokenUsage: jsontext.Value(`{"input_tokens":100,"output_tokens":5}`)},
+		Message{SessionID: "peer", Ordinal: 0, Role: "assistant", Model: "model-computed", ClaudeMessageID: "shared", ClaudeRequestID: "request", TokenUsage: jsontext.Value(`{"input_tokens":1000,"output_tokens":100}`)},
+	)
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		for _, q := range []string{
+			`INSERT INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install')`,
+			`INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) SELECT id,machine,agent,file_path FROM sessions WHERE id IN ('parent','peer')`,
+			`INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) SELECT id,project,machine,'2026-05-01T00:00:00Z','resolved',1,CASE id WHEN 'parent' THEN 'github.com/example/shared' ELSE 'github.com/example/private' END,'git_remote','key' FROM sessions WHERE id IN ('parent','peer')`,
+		} {
+			if _, err := tx.ExecContext(ctx, q); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	selected, err := d.SelectFederationSessions(ctx, "github.com/example/shared", "")
+	require.NoError(t, err)
+	require.Len(t, selected.Rows, 1)
+	assert.Equal(t, 100, selected.Rows[0].ModelUsage.InputTokens)
+	assert.Equal(t, 5, selected.Rows[0].ModelUsage.OutputTokens)
+	for _, statements := range [][]string{
+		{`UPDATE session_project_identity_snapshots SET normalized_remote='github.com/example/shared' WHERE session_id='peer'`, `INSERT INTO federation_exclusions(session_id,reason) VALUES('peer','fixture')`},
+		{`DELETE FROM federation_exclusions WHERE session_id='peer'`, `INSERT INTO artifact_imported_sessions(origin,gid,manifest_hash,imported_session_id) VALUES('fixture','peer','hash','peer')`},
+		{`DELETE FROM artifact_imported_sessions WHERE imported_session_id='peer'`, `UPDATE sessions SET started_at='2026-04-01T00:00:00Z' WHERE id='peer'`},
+	} {
+		require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+			for _, q := range statements {
+				if _, err := tx.ExecContext(ctx, q); err != nil {
+					return err
+				}
+			}
+			return nil
+		}))
+		selected, err = d.SelectFederationSessions(ctx, "github.com/example/shared", "2026-05-01")
+		require.NoError(t, err)
+		require.Len(t, selected.Rows, 1)
+		assert.Equal(t, 100, selected.Rows[0].ModelUsage.InputTokens)
+		assert.Equal(t, 5, selected.Rows[0].ModelUsage.OutputTokens)
+	}
+	// Both contributors are selected, with more than one SQL chunk between
+	// their IDs. The chunk boundary must not change the snapshot owner.
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE sessions SET started_at='2026-05-01T10:00:00Z' WHERE id='peer'`); err != nil {
+			return err
+		}
+		for i := 0; i < maxSQLVars; i++ {
+			id := fmt.Sprintf("paz-%03d", i)
+			if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,file_path,started_at) VALUES(?,'snapshot','install','claude',?,'2026-05-01T10:00:00Z')`, id, id); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES(?,'install','claude',?)`, id, id); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES(?,'snapshot','install','2026-05-01T00:00:00Z','resolved',1,'github.com/example/shared','git_remote','key')`, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	selected, err = d.SelectFederationSessions(ctx, "github.com/example/shared", "2026-05-01")
+	require.NoError(t, err)
+	require.Len(t, selected.Rows, maxSQLVars+2)
+	rows := sessionExportRowsByID(selected.Rows)
+	assert.Equal(t, 1000, rows["parent"].ModelUsage.InputTokens)
+	assert.Equal(t, 100, rows["parent"].ModelUsage.OutputTokens)
+	assert.Zero(t, rows["peer"].ModelUsage.InputTokens)
+}
+
 func TestSessionSummaryExportSelectsCompleteClaudeSnapshotBeforeDedup(t *testing.T) {
 	for _, tc := range []struct {
 		name                string

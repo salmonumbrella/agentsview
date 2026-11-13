@@ -263,6 +263,12 @@ func (s *Server) humaFederationPutShare(ctx context.Context, in *federationPeerI
 	if err = federationControlError(err); err != nil {
 		return nil, err
 	}
+	if v.Changed {
+		if s.broadcaster != nil {
+			s.broadcaster.Emit("sessions")
+		}
+		s.notifySessionMutation()
+	}
 	return &jsonOutput[federation.ShareView]{Body: v}, nil
 }
 func (s *Server) humaFederationBatch(ctx context.Context, in *federationPeerInput) (*federationBatchOutput, error) {
@@ -283,6 +289,12 @@ func (s *Server) humaFederationBatch(ctx context.Context, in *federationPeerInpu
 	}
 	if err = federationControlError(err); err != nil {
 		return nil, err
+	}
+	if v.Changed {
+		if s.broadcaster != nil {
+			s.broadcaster.Emit("sessions")
+		}
+		s.notifySessionMutation()
 	}
 	return &federationBatchOutput{Status: http.StatusOK, Body: v}, nil
 }
@@ -312,6 +324,12 @@ func (s *Server) humaFederationReconcile(ctx context.Context, in *federationPeer
 	}
 	if err = federationControlError(err); err != nil {
 		return nil, err
+	}
+	if result.Changed {
+		if s.broadcaster != nil {
+			s.broadcaster.Emit("sessions")
+		}
+		s.notifySessionMutation()
 	}
 	return &jsonOutput[db.FederationInventoryResult]{Body: result}, nil
 }

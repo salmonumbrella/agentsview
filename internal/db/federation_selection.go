@@ -46,13 +46,17 @@ func (db *DB) SelectFederationSessions(ctx context.Context, remote, since string
 		return out, err
 	}
 	out.NotIdentifiable += withoutIdentity
+	allowed := make(map[string]bool, len(out.IDs))
+	for _, id := range out.IDs {
+		allowed[id] = true
+	}
 	err = QueryChunkedSize(out.IDs, maxSQLVars, func(ids []string) error {
 		placeholders, args := InPlaceholders(ids)
 		found, e := db.querySessionExportRowsFrom(ctx, tx, "sessions.id IN "+placeholders, args, 1e12, sessionExportCursorPayload{}, len(ids), sessionExportActivitySource{})
 		if e != nil {
 			return e
 		}
-		if _, e = db.attachSessionExportUsage(ctx, tx, found); e != nil {
+		if _, e = db.attachSessionExportUsageWithin(ctx, tx, found, allowed); e != nil {
 			return e
 		}
 		out.Rows = append(out.Rows, found...)
@@ -222,7 +226,33 @@ func (db *DB) selectFederationPage(ctx context.Context, remote, since, after str
 		if err != nil {
 			return out, err
 		}
-		if _, err = db.attachSessionExportUsage(ctx, tx, out.Rows); err != nil {
+		filterPeers := func(ids []string) (map[string]bool, error) {
+			allowed := make(map[string]bool)
+			err := QueryChunkedSize(ids, 400, func(chunk []string) error {
+				placeholders, idArgs := InPlaceholders(chunk)
+				args := []any{remote, since, since}
+				args = append(args, idArgs...)
+				rows, err := tx.QueryContext(ctx, `SELECT s.id FROM sessions s JOIN session_project_identity_snapshots snap ON snap.session_id=s.id
+					WHERE s.deleted_at IS NULL AND snap.normalized_remote=? AND snap.remote_resolution='resolved'
+					AND snap.key_source='git_remote' AND snap.remote_candidate_count<=1 AND `+federationLocalOrigin+`
+					AND NOT EXISTS (SELECT 1 FROM federation_exclusions e WHERE e.session_id=s.id)
+					AND (?='' OR julianday(s.started_at)>=julianday(?)) AND s.id IN `+placeholders, args...)
+				if err != nil {
+					return err
+				}
+				defer rows.Close()
+				for rows.Next() {
+					var id string
+					if err := rows.Scan(&id); err != nil {
+						return err
+					}
+					allowed[id] = true
+				}
+				return rows.Err()
+			})
+			return allowed, err
+		}
+		if _, err = db.attachSessionExportUsageFiltered(ctx, tx, out.Rows, nil, filterPeers); err != nil {
 			return out, err
 		}
 		for _, row := range out.Rows {

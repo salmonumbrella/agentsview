@@ -267,7 +267,7 @@ func (db *DB) CopyFederationStateFrom(ctx context.Context, sourcePath string) er
 		return err
 	}
 	defer tx.Rollback()
-	for table, columns := range map[string]string{"federation_enrollments": "enrollment_uid,spoke_archive_id,member,spoke_name,credential_sha256,created_at,last_handshake_at,revoked_at", "federation_links": "link_uid,hub_origin,hub_archive_id,enrollment_uid,member,token_file,protocol_version,state,created_at", "federation_shares": "share_uid,link_uid,normalized_remote,level,attribution,since,audience,state,consent_json,policy_digest,created_at,epoch,sequence,source_generation,sync_cursor,usage_cursor,deletion_cursor,pending_batch,stop_intent,stop_receipt", "federation_exclusions": "session_id,reason,created_at", "federation_deliveries": "share_uid,record_uid,session_id,hash,state,attempt_hash", "federation_quarantine": "share_uid,error,sequence", "federation_hub_shares": "share_uid,enrollment_uid,normalized_remote,project_key,level,attribution,audience,policy_digest,epoch,sequence,last_batch_digest,last_refused,state,retention,reconcile_round,reconcile_boundary,completed_epoch", "federation_records": "share_uid,record_uid,session_id,hash,assistant_count,epoch"} {
+	for table, columns := range map[string]string{"federation_enrollments": "enrollment_uid,spoke_archive_id,member,spoke_name,credential_sha256,created_at,last_handshake_at,revoked_at", "federation_links": "link_uid,hub_origin,hub_archive_id,enrollment_uid,member,token_file,protocol_version,state,created_at", "federation_shares": "share_uid,link_uid,normalized_remote,level,attribution,since,audience,state,consent_json,policy_digest,created_at,epoch,sequence,source_generation,sync_cursor,usage_cursor,deletion_cursor,pending_batch,stop_intent,stop_receipt", "federation_exclusions": "session_id,reason,created_at", "federation_deliveries": "share_uid,record_uid,session_id,hash,state,attempt_hash,hub_origin,hub_archive_id,normalized_remote", "federation_quarantine": "share_uid,error,sequence", "federation_hub_shares": "share_uid,enrollment_uid,normalized_remote,project_key,level,attribution,audience,policy_digest,epoch,sequence,last_batch_digest,last_refused,state,retention,reconcile_round,reconcile_boundary,completed_epoch", "federation_records": "share_uid,record_uid,session_id,hash,assistant_count,epoch"} {
 		var present int
 		if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM federation_old.sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&present); err != nil {
 			return err
@@ -296,6 +296,17 @@ func (db *DB) CopyFederationStateFrom(ctx context.Context, sourcePath string) er
 		selectColumns := strings.Join(expressions, ",")
 		if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO `+table+` (`+columns+`) SELECT `+selectColumns+` FROM federation_old.`+table); err != nil {
 			return fmt.Errorf("copying federation state: %w", err)
+		}
+	}
+	// Recover older live rows from the source joins, independent of table copy order.
+	var joins int
+	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM federation_old.sqlite_master WHERE type='table' AND name IN ('federation_shares','federation_links')`).Scan(&joins); err != nil {
+		return err
+	}
+	if joins == 2 {
+		_, err = tx.ExecContext(ctx, `UPDATE federation_deliveries AS d SET hub_origin=COALESCE((SELECT l.hub_origin FROM federation_old.federation_shares s JOIN federation_old.federation_links l ON l.link_uid=s.link_uid WHERE s.share_uid=d.share_uid),''),hub_archive_id=COALESCE((SELECT l.hub_archive_id FROM federation_old.federation_shares s JOIN federation_old.federation_links l ON l.link_uid=s.link_uid WHERE s.share_uid=d.share_uid),''),normalized_remote=COALESCE((SELECT s.normalized_remote FROM federation_old.federation_shares s WHERE s.share_uid=d.share_uid),'') WHERE d.hub_origin='' AND d.hub_archive_id='' AND d.normalized_remote=''`)
+		if err != nil {
+			return err
 		}
 	}
 	if err := stampFederationVersion(ctx, tx); err != nil {
@@ -566,12 +577,15 @@ func (db *DB) AdvanceFederationCursors(ctx context.Context, uid string, epoch in
 }
 
 type FederationDelivery struct {
-	ShareUID    string `json:"share_uid"`
-	RecordUID   string `json:"record_uid"`
-	SessionID   string `json:"session_id"`
-	Hash        string `json:"hash"`
-	State       string `json:"state"`
-	AttemptHash string `json:"attempt_hash"`
+	ShareUID         string `json:"share_uid"`
+	RecordUID        string `json:"record_uid"`
+	SessionID        string `json:"session_id"`
+	Hash             string `json:"hash"`
+	State            string `json:"state"`
+	AttemptHash      string `json:"attempt_hash"`
+	HubOrigin        string `json:"hub_origin"`
+	HubArchiveID     string `json:"hub_archive_id"`
+	NormalizedRemote string `json:"normalized_remote"`
 }
 type FederationQuarantine struct {
 	ShareUID string `json:"share_uid"`
@@ -580,7 +594,7 @@ type FederationQuarantine struct {
 }
 
 func (db *DB) FederationLedger(ctx context.Context, share string) (map[string]FederationDelivery, error) {
-	rows, err := db.getReader().QueryContext(ctx, `SELECT share_uid,record_uid,session_id,hash,state,attempt_hash FROM federation_deliveries WHERE share_uid=?`, share)
+	rows, err := db.getReader().QueryContext(ctx, `SELECT share_uid,record_uid,session_id,hash,state,attempt_hash,hub_origin,hub_archive_id,normalized_remote FROM federation_deliveries WHERE share_uid=?`, share)
 	if err != nil {
 		return nil, err
 	}
@@ -588,17 +602,38 @@ func (db *DB) FederationLedger(ctx context.Context, share string) (map[string]Fe
 	out := map[string]FederationDelivery{}
 	for rows.Next() {
 		var d FederationDelivery
-		if err = rows.Scan(&d.ShareUID, &d.RecordUID, &d.SessionID, &d.Hash, &d.State, &d.AttemptHash); err != nil {
+		if err = rows.Scan(&d.ShareUID, &d.RecordUID, &d.SessionID, &d.Hash, &d.State, &d.AttemptHash, &d.HubOrigin, &d.HubArchiveID, &d.NormalizedRemote); err != nil {
 			return nil, err
 		}
 		out[d.RecordUID] = d
 	}
 	return out, rows.Err()
 }
+
+func (db *DB) FederationLedgerShares(ctx context.Context) ([]string, error) {
+	rows, err := db.getReader().QueryContext(ctx, `SELECT DISTINCT share_uid FROM federation_deliveries ORDER BY share_uid`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var shares []string
+	for rows.Next() {
+		var uid string
+		if err := rows.Scan(&uid); err != nil {
+			return nil, err
+		}
+		shares = append(shares, uid)
+	}
+	return shares, rows.Err()
+}
 func (db *DB) RecordFederationAttempt(ctx context.Context, share string, deliveries []FederationDelivery) error {
 	return db.Update(ctx, func(tx *sql.Tx) error {
+		var origin, archive, remote string
+		if err := tx.QueryRowContext(ctx, `SELECT l.hub_origin,l.hub_archive_id,s.normalized_remote FROM federation_shares s JOIN federation_links l ON l.link_uid=s.link_uid WHERE s.share_uid=?`, share).Scan(&origin, &archive, &remote); err != nil {
+			return err
+		}
 		for _, d := range deliveries {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO federation_deliveries(share_uid,record_uid,session_id,hash,state,attempt_hash) VALUES(?,?,?,'','unconfirmed',?) ON CONFLICT(share_uid,record_uid) DO UPDATE SET session_id=excluded.session_id,attempt_hash=excluded.attempt_hash`, share, d.RecordUID, d.SessionID, d.Hash); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO federation_deliveries(share_uid,record_uid,session_id,hash,state,attempt_hash,hub_origin,hub_archive_id,normalized_remote) VALUES(?,?,?,'','unconfirmed',?,?,?,?) ON CONFLICT(share_uid,record_uid) DO UPDATE SET session_id=excluded.session_id,attempt_hash=excluded.attempt_hash,hub_origin=CASE WHEN federation_deliveries.hub_origin='' THEN excluded.hub_origin ELSE federation_deliveries.hub_origin END,hub_archive_id=CASE WHEN federation_deliveries.hub_archive_id='' THEN excluded.hub_archive_id ELSE federation_deliveries.hub_archive_id END,normalized_remote=CASE WHEN federation_deliveries.normalized_remote='' THEN excluded.normalized_remote ELSE federation_deliveries.normalized_remote END`, share, d.RecordUID, d.SessionID, d.Hash, origin, archive, remote); err != nil {
 				return err
 			}
 		}
@@ -634,8 +669,12 @@ func (db *DB) SaveFederationPending(ctx context.Context, share string, sequence 
 		if n != 1 {
 			return ErrFederationSequence
 		}
+		var origin, archive, remote string
+		if err := tx.QueryRowContext(ctx, `SELECT l.hub_origin,l.hub_archive_id,s.normalized_remote FROM federation_shares s JOIN federation_links l ON l.link_uid=s.link_uid WHERE s.share_uid=?`, share).Scan(&origin, &archive, &remote); err != nil {
+			return err
+		}
 		for _, d := range attempts {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO federation_deliveries(share_uid,record_uid,session_id,hash,state,attempt_hash) VALUES(?,?,?,'','unconfirmed',?) ON CONFLICT(share_uid,record_uid) DO UPDATE SET session_id=excluded.session_id,attempt_hash=excluded.attempt_hash`, share, d.RecordUID, d.SessionID, d.Hash); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO federation_deliveries(share_uid,record_uid,session_id,hash,state,attempt_hash,hub_origin,hub_archive_id,normalized_remote) VALUES(?,?,?,'','unconfirmed',?,?,?,?) ON CONFLICT(share_uid,record_uid) DO UPDATE SET session_id=excluded.session_id,attempt_hash=excluded.attempt_hash,hub_origin=CASE WHEN federation_deliveries.hub_origin='' THEN excluded.hub_origin ELSE federation_deliveries.hub_origin END,hub_archive_id=CASE WHEN federation_deliveries.hub_archive_id='' THEN excluded.hub_archive_id ELSE federation_deliveries.hub_archive_id END,normalized_remote=CASE WHEN federation_deliveries.normalized_remote='' THEN excluded.normalized_remote ELSE federation_deliveries.normalized_remote END`, share, d.RecordUID, d.SessionID, d.Hash, origin, archive, remote); err != nil {
 				return err
 			}
 		}
@@ -657,8 +696,12 @@ func (db *DB) CommitFederationAcknowledgment(ctx context.Context, share string, 
 		if n != 1 {
 			return ErrFederationSequence
 		}
+		var origin, archive, remote string
+		if err := tx.QueryRowContext(ctx, `SELECT l.hub_origin,l.hub_archive_id,s.normalized_remote FROM federation_shares s JOIN federation_links l ON l.link_uid=s.link_uid WHERE s.share_uid=?`, share).Scan(&origin, &archive, &remote); err != nil {
+			return err
+		}
 		for _, d := range deliveries {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO federation_deliveries(share_uid,record_uid,session_id,hash,state) VALUES(?,?,?,?,?) ON CONFLICT(share_uid,record_uid) DO UPDATE SET session_id=excluded.session_id,hash=CASE WHEN excluded.state='tombstoned' THEN federation_deliveries.hash ELSE excluded.hash END,state=excluded.state,attempt_hash=CASE WHEN excluded.state='tombstoned' THEN federation_deliveries.attempt_hash ELSE '' END`, share, d.RecordUID, d.SessionID, d.Hash, d.State); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO federation_deliveries(share_uid,record_uid,session_id,hash,state,hub_origin,hub_archive_id,normalized_remote) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(share_uid,record_uid) DO UPDATE SET session_id=excluded.session_id,hash=CASE WHEN excluded.state='tombstoned' THEN federation_deliveries.hash ELSE excluded.hash END,state=excluded.state,attempt_hash=CASE WHEN excluded.state='tombstoned' THEN federation_deliveries.attempt_hash ELSE '' END,hub_origin=CASE WHEN federation_deliveries.hub_origin='' THEN excluded.hub_origin ELSE federation_deliveries.hub_origin END,hub_archive_id=CASE WHEN federation_deliveries.hub_archive_id='' THEN excluded.hub_archive_id ELSE federation_deliveries.hub_archive_id END,normalized_remote=CASE WHEN federation_deliveries.normalized_remote='' THEN excluded.normalized_remote ELSE federation_deliveries.normalized_remote END`, share, d.RecordUID, d.SessionID, d.Hash, d.State, origin, archive, remote); err != nil {
 				return err
 			}
 		}

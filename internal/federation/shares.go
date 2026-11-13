@@ -36,14 +36,12 @@ type SummaryRecord struct {
 	ProjectKey            string                                   `json:"project_key"`
 	Remote                string                                   `json:"normalized_remote"`
 	Agent                 string                                   `json:"agent"`
-	Models                []string                                 `json:"models"`
 	StartedAt             *string                                  `json:"started_at"`
 	EndedAt               *string                                  `json:"ended_at"`
 	MessageCount          int                                      `json:"message_count"`
 	UserMessageCount      int                                      `json:"user_message_count"`
 	AssistantMessageCount int                                      `json:"assistant_message_count"`
 	ToolCount             int                                      `json:"total_tool_count"`
-	Usage                 SummaryUsage                             `json:"usage"`
 	ByModel               map[string]db.SessionModelUsageBreakdown `json:"by_model"`
 	Automated             bool                                     `json:"is_automated"`
 	Outcome               string                                   `json:"outcome"`
@@ -177,7 +175,11 @@ func previewFromSelection(g ShareGrant, hub *HubStatus, selected db.FederationSe
 			return p, sumErr
 		}
 		p.Usage.HasCost = p.Usage.HasCost && u.HasCost
-		record := SummaryRecord{SessionID: row.ID, ProjectKey: selected.ProjectKeys[row.ID], Remote: g.Project, Agent: row.Agent, Models: row.ModelUsage.Models, StartedAt: row.StartedAt, EndedAt: row.EndedAt, MessageCount: row.MessageCount, UserMessageCount: row.UserMessageCount, AssistantMessageCount: row.AssistantMessageCount, ToolCount: selected.ToolCounts[row.ID], Usage: SummaryUsage{InputTokens: row.ModelUsage.InputTokens, OutputTokens: row.ModelUsage.OutputTokens, CacheCreationInputTokens: row.ModelUsage.CacheCreationInputTokens, CacheReadInputTokens: row.ModelUsage.CacheReadInputTokens, ReasoningTokens: row.ModelUsage.ReasoningTokens, Cost: row.ModelUsage.Cost, HasCost: row.ModelUsage.HasCost}, ByModel: row.ModelUsage.ByModel, Automated: row.IsAutomated, Outcome: selected.Outcomes[row.ID], Health: selected.Health[row.ID]}
+		byModel := row.ModelUsage.ByModel
+		if len(byModel) == 0 && row.ModelUsage.HasCost {
+			byModel = map[string]db.SessionModelUsageBreakdown{"<unknown>": {Model: "<unknown>", Cost: row.ModelUsage.Cost, HasCost: true, CostSource: export.CostSourceReported}}
+		}
+		record := SummaryRecord{SessionID: row.ID, ProjectKey: selected.ProjectKeys[row.ID], Remote: g.Project, Agent: row.Agent, StartedAt: row.StartedAt, EndedAt: row.EndedAt, MessageCount: row.MessageCount, UserMessageCount: row.UserMessageCount, AssistantMessageCount: row.AssistantMessageCount, ToolCount: selected.ToolCounts[row.ID], ByModel: byModel, Automated: row.IsAutomated, Outcome: selected.Outcomes[row.ID], Health: selected.Health[row.ID]}
 		if row.ParentSessionID != nil && selectedIDs[*row.ParentSessionID] {
 			record.ParentID = row.ParentSessionID
 			record.Relationship = row.RelationshipType
@@ -327,36 +329,56 @@ type DeliveryCounts struct {
 	Refused     int `json:"refused"`
 	Unconfirmed int `json:"unconfirmed"`
 }
+
+func deliveryCounts(ledger map[string]db.FederationDelivery) (out DeliveryCounts) {
+	for _, d := range ledger {
+		if d.AttemptHash != "" {
+			out.Unconfirmed++
+		}
+		switch d.State {
+		case "sent":
+			out.Sent++
+		case "refused":
+			out.Refused++
+		}
+	}
+	return out
+}
+
 type ShareDetails struct {
-	Share      db.FederationShare       `json:"share"`
-	Delivery   DeliveryCounts           `json:"delivery"`
-	Quarantine *db.FederationQuarantine `json:"quarantine,omitempty"`
+	Share      db.FederationShare               `json:"share"`
+	Delivery   DeliveryCounts                   `json:"delivery"`
+	Quarantine *db.FederationQuarantine         `json:"quarantine,omitempty"`
+	Records    map[string]db.FederationDelivery `json:"records"`
+	Historical bool                             `json:"historical"`
 }
 
 func (s *Service) Share(ctx context.Context, uid string) (ShareDetails, error) {
 	var out ShareDetails
-	link, err := s.currentLink(ctx)
-	if err != nil {
-		return out, err
-	}
-	out.Share, err = s.db.GetFederationShare(ctx, link.UID, uid)
-	if err != nil {
-		return out, err
-	}
 	ledger, err := s.db.FederationLedger(ctx, uid)
 	if err != nil {
 		return out, err
 	}
-	for _, d := range ledger {
-		if d.AttemptHash != "" {
-			out.Delivery.Unconfirmed++
+	link, err := s.db.GetFederationLink(ctx)
+	if err == nil {
+		out.Share, err = s.db.GetFederationShare(ctx, link.UID, uid)
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return out, err
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		if len(ledger) == 0 {
+			return out, sql.ErrNoRows
 		}
-		if d.State == "sent" {
-			out.Delivery.Sent++
-		} else if d.State == "refused" {
-			out.Delivery.Refused++
+		out.Historical = true
+		out.Share.UID = uid
+		for _, d := range ledger {
+			out.Share.NormalizedRemote = d.NormalizedRemote
+			break
 		}
 	}
+	out.Records = ledger
+	out.Delivery = deliveryCounts(ledger)
 	quarantines, err := s.db.FederationQuarantines(ctx)
 	if err != nil {
 		return out, err

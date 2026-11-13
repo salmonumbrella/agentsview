@@ -135,6 +135,46 @@ func (s MessageScope) StatsBySession() map[string]MessageStats {
 	return out
 }
 
+// addFederationAnalyticsStats keeps summary counts at session grain while
+// selecting token totals from the matching federation usage events.
+func (db *DB) addFederationAnalyticsStats(ctx context.Context, ids []string, f AnalyticsFilter, stats map[string]MessageStats) error {
+	models := f.MessageScopeFilter().Models
+	return queryChunked(UniqueAnalyticsIDs(ids), func(chunk []string) error {
+		ph, args := InPlaceholders(chunk)
+		rows, err := db.getReader().QueryContext(ctx, `SELECT s.id,s.message_count,s.user_message_count,COALESCE(s.started_at,''),u.model,u.output_tokens FROM sessions s JOIN usage_events u ON u.session_id=s.id WHERE u.source='federation' AND s.id IN `+ph, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id, start, model string
+			var messages, users, output int
+			if err := rows.Scan(&id, &messages, &users, &start, &model, &output); err != nil {
+				return err
+			}
+			if len(models) > 0 {
+				if _, ok := models[model]; !ok {
+					continue
+				}
+			}
+			if f.HasTimeFilter() {
+				local, ok := LocalTime(start, f.location())
+				if !ok || !f.matchesTimeFilter(local) {
+					continue
+				}
+			}
+			stat := stats[id]
+			stat.Messages, stat.UserMessages = messages, users
+			if output > 0 {
+				stat.OutputTokens += output
+				stat.HasOutputTokens = true
+			}
+			stats[id] = stat
+		}
+		return rows.Err()
+	})
+}
+
 // TimingBySession projects matched rows into the velocity timing view.
 func (s MessageScope) TimingBySession() map[string][]TimingMessage {
 	out := make(map[string][]TimingMessage, len(s))

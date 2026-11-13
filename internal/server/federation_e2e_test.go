@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -34,11 +35,16 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	hub := federation.NewService("hub", "hub-a", policy, hubDB)
 	_, token, err := hub.Enroll(ctx, "spoke-a", "member-a", "")
 	require.NoError(t, err)
-	server := New(config.Config{Host: "127.0.0.1", Port: 8080}, hubDB, nil, WithFederation(hub))
+	var mutations atomic.Int32
+	server := New(config.Config{Host: "127.0.0.1", Port: 8080}, hubDB, nil, WithFederation(hub), WithSessionMutationNotifier(func() { mutations.Add(1) }))
+	server.broadcaster = NewBroadcaster(0)
+	events, unsubscribe := server.broadcaster.Subscribe()
+	defer unsubscribe()
 	var captured bytes.Buffer
 	dropFirst := true
 	conflictNext, rejectNext := false, false
 	offline := false
+	changeContributorAfterBatch := false
 	batches := 0
 	var batchBodies []string
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -78,6 +84,21 @@ func TestFederationSummaryDelivery(t *testing.T) {
 			conn, _, e := w.(http.Hijacker).Hijack()
 			require.NoError(t, e)
 			require.NoError(t, conn.Close())
+			return
+		}
+		if changeContributorAfterBatch && r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/batches") {
+			changeContributorAfterBatch = false
+			buffered := httptest.NewRecorder()
+			server.Handler().ServeHTTP(buffered, r)
+			require.Equal(t, http.StatusOK, buffered.Code)
+			require.NoError(t, spokeDB.PutFederationExclusion(ctx, "a-snapshot-peer", "fixture"))
+			for key, values := range buffered.Header() {
+				for _, value := range values {
+					w.Header().Add(key, value)
+				}
+			}
+			w.WriteHeader(buffered.Code)
+			_, _ = w.Write(buffered.Body.Bytes())
 			return
 		}
 		server.Handler().ServeHTTP(w, r)
@@ -188,6 +209,12 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(dryJSON), "CANARY")
 	assert.NotEqual(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, nil))
+	assert.Equal(t, int32(1), mutations.Load())
+	require.NotEmpty(t, events)
+	assert.Equal(t, "sessions", (<-events).Scope)
+	var committed int
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='session-a'`).Scan(&committed))
+	assert.Equal(t, 1, committed)
 	shares, err := spokeDB.ListFederationShares(ctx, func() string { link, e := spokeDB.GetFederationLink(ctx); require.NoError(t, e); return link.UID }())
 	require.NoError(t, err)
 	require.Len(t, shares, 1)
@@ -210,18 +237,61 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	assert.Zero(t, first.Sent)
 	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &first))
 	assert.Equal(t, 1, first.Sent)
+	assert.Equal(t, int32(2), mutations.Load())
+	require.NotEmpty(t, events)
+	assert.Equal(t, "sessions", (<-events).Scope)
 	require.GreaterOrEqual(t, len(batchBodies), 2)
-	assert.NotContains(t, batchBodies[1], "session-b")
 	assert.NotContains(t, captured.String(), "CANARY")
 	var machine, project string
-	var messages, tools, usage, input int
-	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT machine,project,(SELECT count(*) FROM messages WHERE session_id=s.id),(SELECT count(*) FROM tool_calls WHERE session_id=s.id),(SELECT count(*) FROM usage_events WHERE session_id=s.id),(SELECT COALESCE(sum(input_tokens),0) FROM usage_events WHERE session_id=s.id) FROM sessions s WHERE id='session-a'`).Scan(&machine, &project, &messages, &tools, &usage, &input))
+	var messages, tools, usage, input, output int
+	var hasOutput bool
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT machine,project,(SELECT count(*) FROM messages WHERE session_id=s.id),(SELECT count(*) FROM tool_calls WHERE session_id=s.id),(SELECT count(*) FROM usage_events WHERE session_id=s.id),(SELECT COALESCE(sum(input_tokens),0) FROM usage_events WHERE session_id=s.id),total_output_tokens,has_total_output_tokens FROM sessions s WHERE id='session-a'`).Scan(&machine, &project, &messages, &tools, &usage, &input, &output, &hasOutput))
 	assert.Equal(t, "federated", machine)
 	assert.Equal(t, remote, project)
 	assert.Zero(t, messages)
 	assert.Zero(t, tools)
 	assert.Equal(t, 1, usage)
 	assert.Equal(t, 100, input)
+	assert.Equal(t, 20, output)
+	assert.True(t, hasOutput)
+	var unchangedBatch federation.Batch
+	require.NoError(t, json.Unmarshal([]byte(batchBodies[1]), &unchangedBatch))
+	require.Len(t, unchangedBatch.Records, 2)
+	assert.Equal(t, "session-a", unchangedBatch.Records[0].RecordUID)
+	assert.Equal(t, "session-b", unchangedBatch.Records[1].RecordUID)
+	assert.Equal(t, "tombstone", unchangedBatch.Records[1].Kind)
+	assert.Nil(t, unchangedBatch.Records[1].Payload)
+	unchangedAck, err := federation.PostBatch(ctx, peer.URL, token, "spoke-a", unchangedBatch)
+	require.NoError(t, err)
+	assert.Equal(t, unchangedBatch.Sequence, unchangedAck.Committed)
+	assert.Equal(t, int32(2), mutations.Load())
+	assert.Empty(t, events)
+	require.NoError(t, hubDB.Update(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `CREATE TRIGGER fail_summary_update BEFORE UPDATE ON sessions WHEN NEW.id='session-a' BEGIN SELECT RAISE(ABORT,'synthetic write failure'); END`)
+		return err
+	}))
+	failedBatch := unchangedBatch
+	failedBatch.Sequence++
+	failedBatch.Records = append([]federation.BatchRecord(nil), unchangedBatch.Records...)
+	failedBatch.Records[0].Payload.MessageCount++
+	failedBatch.Records[0].Hash, err = export.DigestCanonical(failedBatch.Records[0].Payload)
+	require.NoError(t, err)
+	_, err = federation.PostBatch(ctx, peer.URL, token, "spoke-a", failedBatch)
+	require.Error(t, err)
+	assert.Equal(t, int32(2), mutations.Load())
+	assert.Empty(t, events)
+	var afterFailedWrite int
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT message_count FROM sessions WHERE id='session-a'`).Scan(&afterFailedWrite))
+	assert.Equal(t, 3, afterFailedWrite)
+	require.NoError(t, hubDB.Update(ctx, func(tx *sql.Tx) error { _, err := tx.ExecContext(ctx, `DROP TRIGGER fail_summary_update`); return err }))
+	invalidBatch := unchangedBatch
+	invalidBatch.Sequence++
+	invalidBatch.Records = append([]federation.BatchRecord(nil), unchangedBatch.Records...)
+	invalidBatch.Records[0].Hash = "invalid"
+	_, err = federation.PostBatch(ctx, peer.URL, token, "spoke-a", invalidBatch)
+	require.Error(t, err)
+	assert.Equal(t, int32(2), mutations.Load())
+	assert.Empty(t, events)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
 	rec := httptest.NewRecorder()
 	server.Handler().ServeHTTP(rec, req)
@@ -255,12 +325,73 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	var summary db.AnalyticsSummary
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &summary))
-	assert.Equal(t, 2, summary.TotalSessions)
-	assert.Equal(t, 4, summary.TotalMessages)
+	assert.Equal(t, 1, summary.TotalSessions)
+	assert.Equal(t, 3, summary.TotalMessages)
 	assert.NotContains(t, rec.Body.String(), "CANARY")
+	require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO usage_events(session_id,source,model,output_tokens,cost_microdollars,cost_status,cost_source,occurred_at,dedup_key) VALUES('session-a','fixture','model-b',7,25,'exact','reported','2026-01-02T00:00:00Z','b')`)
+		return err
+	}))
+	var modelGrowth federation.PushResult
+	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &modelGrowth))
+	assert.Equal(t, 1, modelGrowth.Sent)
+	assert.Equal(t, int32(3), mutations.Load())
+	require.NotEmpty(t, events)
+	assert.Equal(t, "sessions", (<-events).Scope)
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT total_output_tokens,has_total_output_tokens FROM sessions WHERE id='session-a'`).Scan(&output, &hasOutput))
+	assert.Equal(t, 27, output)
+	assert.True(t, hasOutput)
+	var removedCount int
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='session-b'`).Scan(&removedCount))
+	assert.Zero(t, removedCount)
+	for _, tc := range []struct {
+		model                            string
+		sessions, messages, output, cost int
+	}{
+		{"model-a", 1, 3, 20, 50}, {"model-b", 1, 3, 7, 25}, {"absent", 0, 0, 0, 0},
+	} {
+		req = httptest.NewRequest(http.MethodGet, "/api/v1/analytics/summary?from=2026-01-02&to=2026-01-02&timezone=UTC&include_one_shot=true&model="+tc.model, nil)
+		rec = httptest.NewRecorder()
+		server.Handler().ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var scoped db.AnalyticsSummary
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &scoped))
+		assert.Equal(t, tc.sessions, scoped.TotalSessions)
+		assert.Equal(t, tc.messages, scoped.TotalMessages)
+		assert.Equal(t, tc.output, scoped.TotalOutputTokens)
+		req = httptest.NewRequest(http.MethodGet, "/api/v1/usage/summary?from=2026-01-02&to=2026-01-02&timezone=UTC&model="+tc.model, nil)
+		rec = httptest.NewRecorder()
+		server.Handler().ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var filteredUsage service.UsageSummaryResult
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &filteredUsage))
+		assert.EqualValues(t, tc.cost, filteredUsage.Totals.TotalCost.Microdollars)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/analytics/activity?from=2026-01-02&to=2026-01-02&timezone=UTC&include_one_shot=true&model=model-a", nil)
+	rec = httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var activity db.ActivityResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &activity))
+	require.Len(t, activity.Series, 1)
+	assert.Equal(t, 1, activity.Series[0].Sessions)
+	assert.Equal(t, 3, activity.Series[0].Messages)
+	assert.Zero(t, activity.Series[0].ToolCalls)
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/analytics/activity?from=2026-01-02&to=2026-01-02&timezone=UTC&include_one_shot=true", nil)
+	rec = httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &activity))
+	require.Len(t, activity.Series, 1)
+	assert.Equal(t, 1, activity.Series[0].Sessions)
+	assert.Equal(t, 3, activity.Series[0].Messages)
+	assert.Zero(t, activity.Series[0].ToolCalls)
 	var again federation.PushResult
 	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &again))
 	assert.Zero(t, again.Sent)
+	assert.Equal(t, int32(3), mutations.Load())
+	assert.Empty(t, events)
+	assert.Equal(t, 1, again.Unchanged)
 	require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
 		_, e := tx.ExecContext(ctx, `UPDATE sessions SET message_count=4 WHERE id='session-a'`)
 		return e
@@ -269,6 +400,8 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	assert.NotEqual(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, nil))
 	rejectNext = true
 	assert.NotEqual(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, nil))
+	assert.Equal(t, int32(3), mutations.Load())
+	assert.Empty(t, events)
 	quarantines, err := spokeDB.FederationQuarantines(ctx)
 	require.NoError(t, err)
 	require.Len(t, quarantines, 1)
@@ -276,6 +409,9 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	var changed federation.PushResult
 	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &changed))
 	assert.Equal(t, 1, changed.Sent)
+	assert.Equal(t, int32(4), mutations.Load())
+	require.NotEmpty(t, events)
+	assert.Equal(t, "sessions", (<-events).Scope)
 	quarantines, err = spokeDB.FederationQuarantines(ctx)
 	require.NoError(t, err)
 	assert.Empty(t, quarantines)
@@ -310,6 +446,8 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &refused))
 	assert.Equal(t, 1, refused.Refused)
 	assert.Equal(t, 1, refused.Quarantined)
+	assert.Equal(t, int32(4), mutations.Load())
+	assert.Empty(t, events)
 	var existingProject, existingMachine string
 	var existingCount int
 	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT project,machine,message_count FROM sessions WHERE id='collision'`).Scan(&existingProject, &existingMachine, &existingCount))
@@ -359,7 +497,156 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	var details federation.ShareDetails
 	require.Equal(t, http.StatusOK, request(http.MethodGet, "/api/v1/federation/shares/"+shares[0].UID, nil, &details))
 	assert.Equal(t, 1, details.Delivery.Unconfirmed)
-	assert.Equal(t, "unconfirmed", afterAttempt["session-b"].State)
+	assert.Equal(t, "tombstoned", afterAttempt["session-b"].State)
+	// Copilot shutdown reports can contain a cost without model token metrics.
+	// Exercise the real grant and delivery path for both zero and nonzero cost.
+	require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
+		for _, tc := range []struct {
+			id   string
+			cost int
+		}{{"cost-only", 30000}, {"cost-zero", 0}} {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES(?,'fixture','install-a','copilot',?,'2026-06-02T00:00:00Z',1)`, tc.id, tc.id); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES(?,'install-a','copilot',?)`, tc.id, tc.id); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES(?,'fixture','install-a','2026-06-02T00:00:00Z','resolved',1,?,'git_remote',?)`, tc.id, remote, key); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO usage_events(session_id,source,model,cost_microdollars,cost_status,cost_source,occurred_at,dedup_key) VALUES(?,'shutdown','copilot',?,'exact','copilot-reported','2026-06-02T00:00:00Z','total')`, tc.id, tc.cost); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	var costs federation.PushResult
+	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &costs))
+	assert.Equal(t, 2, costs.Sent)
+	for _, tc := range []struct {
+		id   string
+		cost int
+	}{{"cost-only", 30000}, {"cost-zero", 0}} {
+		var count, cost, output int
+		var model string
+		require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*),sum(cost_microdollars),sum(output_tokens),min(model) FROM usage_events WHERE session_id=?`, tc.id).Scan(&count, &cost, &output, &model))
+		assert.Equal(t, 1, count)
+		assert.Equal(t, tc.cost, cost)
+		assert.Zero(t, output)
+		assert.Equal(t, "<unknown>", model)
+		var hasOutput bool
+		require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT has_total_output_tokens FROM sessions WHERE id=?`, tc.id).Scan(&hasOutput))
+		assert.False(t, hasOutput)
+	}
+	require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE usage_events SET cost_microdollars=45000 WHERE session_id='cost-only'`)
+		return err
+	}))
+	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &costs))
+	assert.Equal(t, 1, costs.Sent)
+	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &costs))
+	assert.Zero(t, costs.Sent)
+	var finalCost, costRows int
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*),sum(cost_microdollars) FROM usage_events WHERE session_id='cost-only'`).Scan(&costRows, &finalCost))
+	assert.Equal(t, 1, costRows)
+	assert.Equal(t, 45000, finalCost)
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/usage/summary?from=2026-06-02&to=2026-06-02&timezone=UTC", nil)
+	rec = httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var costSummary service.UsageSummaryResult
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &costSummary))
+	assert.EqualValues(t, 45000, costSummary.Totals.TotalCost.Microdollars)
+	assert.Zero(t, costSummary.Totals.OutputTokens)
+	exported, err := hubDB.ExportSessionSummaries(ctx, db.SessionExportOptions{Filter: db.SessionFilter{Project: remote}, Limit: 100, Format: "json"})
+	require.NoError(t, err)
+	foundCost := false
+	for _, row := range exported.Rows {
+		if row.ID == "cost-only" {
+			foundCost = true
+			require.NotNil(t, row.ModelUsage)
+			assert.True(t, row.ModelUsage.HasCost)
+			assert.EqualValues(t, 45000, row.ModelUsage.Cost.Microdollars)
+		}
+	}
+	assert.True(t, foundCost)
+	// Change the contributor set after the first real hub batch commits and
+	// before the second is assembled. The later parent must be refreshed.
+	require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
+		for i := -1; i <= 1000; i++ {
+			id := fmt.Sprintf("m-batch-%04d", i)
+			if i == -1 {
+				id = "a-snapshot-peer"
+			}
+			if i == 1000 {
+				id = "z-snapshot-parent"
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES(?,'fixture','install-a','claude',?,'2026-01-02T00:00:00Z',1)`, id, id); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES(?,'install-a','claude',?)`, id, id); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES(?,'fixture','install-a','2026-01-01T00:00:00Z','resolved',1,?,'git_remote',?)`, id, remote, key); err != nil {
+				return err
+			}
+			if i == -1 || i == 1000 {
+				usage := `{"input_tokens":1000,"output_tokens":100}`
+				if i == 1000 {
+					usage = `{"input_tokens":100,"output_tokens":5}`
+				}
+				if _, err := tx.ExecContext(ctx, `INSERT INTO messages(session_id,ordinal,role,model,claude_message_id,claude_request_id,token_usage) VALUES(?,0,'assistant','model-a','shared','request',?)`, id, usage); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}))
+	// Preview and dry run use the same grant-bounded projection as delivery.
+	// Excluding the larger snapshot peer leaves only the parent's own usage.
+	require.NoError(t, spokeDB.PutFederationExclusion(ctx, "a-snapshot-peer", "fixture"))
+	var boundedPreview federation.SharePreview
+	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/shares/preview", federation.ShareGrant{Project: remote, Level: "summary", Attribution: "pooled", Since: "2026-01-02"}, &boundedPreview))
+	boundedDry, err := spoke.DryRun(ctx)
+	require.NoError(t, err)
+	var boundedParent *federation.SummaryRecord
+	for i := range boundedDry {
+		if boundedDry[i].SessionID == "z-snapshot-parent" {
+			boundedParent = &boundedDry[i]
+		}
+	}
+	require.NotNil(t, boundedParent)
+	assert.Equal(t, 100, boundedParent.ByModel["model-a"].InputTokens)
+	assert.Equal(t, 5, boundedParent.ByModel["model-a"].OutputTokens)
+	require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `DELETE FROM federation_exclusions WHERE session_id='a-snapshot-peer'`)
+		return err
+	}))
+	var fullPreview federation.SharePreview
+	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/shares/preview", federation.ShareGrant{Project: remote, Level: "summary", Attribution: "pooled", Since: "2026-01-02"}, &fullPreview))
+	assert.Equal(t, 900, fullPreview.Usage.InputTokens-boundedPreview.Usage.InputTokens)
+	assert.Equal(t, 95, fullPreview.Usage.OutputTokens-boundedPreview.Usage.OutputTokens)
+	changeContributorAfterBatch = true
+	var batchesBeforeChange = batches
+	var chunked federation.PushResult
+	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &chunked))
+	assert.GreaterOrEqual(t, batches-batchesBeforeChange, 2)
+	var parentInput, parentOutput int
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT COALESCE(sum(input_tokens),0),COALESCE(sum(output_tokens),0) FROM usage_events WHERE session_id='z-snapshot-parent'`).Scan(&parentInput, &parentOutput))
+	assert.Equal(t, 100, parentInput)
+	assert.Equal(t, 5, parentOutput)
+	require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE sessions SET message_count=6 WHERE id='session-a'`)
+		return err
+	}))
+	beforeExclusion, err := spokeDB.FederationLedger(ctx, shares[0].UID)
+	require.NoError(t, err)
+	dropFirst = true
+	assert.NotEqual(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, nil))
+	uncertain, err := spokeDB.FederationLedger(ctx, shares[0].UID)
+	require.NoError(t, err)
+	assert.Equal(t, beforeExclusion["session-a"].Hash, uncertain["session-a"].Hash)
+	assert.NotEmpty(t, uncertain["session-a"].AttemptHash)
 	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/exclusions", map[string]string{"session_id": "session-a"}, nil))
 	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/shares/"+shares[0].UID+"/pause", nil, nil))
 	offline = true
@@ -367,10 +654,16 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	stopped, err := spokeDB.GetFederationShare(ctx, shares[0].LinkUID, shares[0].UID)
 	require.NoError(t, err)
 	assert.Equal(t, "pending", stopped.StopReceipt)
+	stopEvents, unsubscribeStop := server.broadcaster.Subscribe()
+	defer unsubscribeStop()
+	beforeStopMutations := mutations.Load()
 	offline = false
 	var paused federation.PushResult
 	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &paused))
 	assert.Zero(t, paused.Sent)
+	assert.Equal(t, beforeStopMutations+1, mutations.Load())
+	require.NotEmpty(t, stopEvents)
+	assert.Equal(t, "sessions", (<-stopEvents).Scope)
 	var spokeCount, hubCount, hubUsage int
 	require.NoError(t, spokeDB.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='session-a'`).Scan(&spokeCount))
 	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='session-a'), (SELECT count(*) FROM usage_events WHERE session_id='session-a')`).Scan(&hubCount, &hubUsage))
@@ -386,6 +679,48 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	ledger, err = spokeDB.FederationLedger(ctx, shares[0].UID)
 	require.NoError(t, err)
 	assert.NotEmpty(t, ledger, "withdrawal must preserve local delivery accounting")
+	require.Equal(t, http.StatusOK, request(http.MethodDelete, "/api/v1/federation/link", nil, nil))
+	var offlineStatus federation.Status
+	require.Equal(t, http.StatusOK, request(http.MethodGet, "/api/v1/federation/link", nil, &offlineStatus))
+	require.Len(t, offlineStatus.History, 1)
+	assert.Equal(t, peer.URL, offlineStatus.History[0].HubOrigin)
+	assert.Equal(t, "hub-a", offlineStatus.History[0].HubArchiveID)
+	assert.Equal(t, remote, offlineStatus.History[0].NormalizedRemote)
+	var history federation.ShareDetails
+	require.Equal(t, http.StatusOK, request(http.MethodGet, "/api/v1/federation/shares/"+shares[0].UID, nil, &history))
+	assert.True(t, history.Historical)
+	assert.Greater(t, history.Delivery.Sent, 0)
+	assert.Equal(t, 2, history.Delivery.Unconfirmed)
+	assert.Equal(t, "session-a", history.Records["session-a"].SessionID)
+	assert.Equal(t, excludedAttempt, history.Records["session-b"].AttemptHash)
+	assert.Equal(t, beforeExclusion["session-a"].Hash, history.Records["session-a"].Hash)
+	assert.Equal(t, uncertain["session-a"].AttemptHash, history.Records["session-a"].AttemptHash)
+	otherDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "other-hub.db"))
+	otherHub := federation.NewService("hub", "hub-b", policy, otherDB)
+	_, otherToken, err := otherHub.Enroll(ctx, "spoke-a", "member-a", "")
+	require.NoError(t, err)
+	otherServer := New(config.Config{Host: "127.0.0.1", Port: 8080}, otherDB, nil, WithFederation(otherHub))
+	otherPeer := httptest.NewServer(otherServer.Handler())
+	t.Cleanup(otherPeer.Close)
+	otherFile := filepath.Join(testutil.PrivateTempDir(t), "other-credential")
+	require.NoError(t, os.WriteFile(otherFile, []byte(otherToken), 0600))
+	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/link", map[string]string{"hub": otherPeer.URL, "hub_archive": "hub-b", "credential_file": otherFile}, nil))
+	require.Equal(t, http.StatusOK, request(http.MethodGet, "/api/v1/federation/link", nil, &offlineStatus))
+	require.Len(t, offlineStatus.History, 1)
+	assert.False(t, offlineStatus.History[0].Current)
+	assert.Equal(t, peer.URL, offlineStatus.History[0].HubOrigin)
+	assert.Equal(t, "hub-a", offlineStatus.History[0].HubArchiveID)
+	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/shares/preview", federation.ShareGrant{Project: remote, Level: "summary", Attribution: "pooled", Since: "2026-01-02"}, &preview))
+	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/shares", preview, nil))
+	newLink, err := spokeDB.GetFederationLink(ctx)
+	require.NoError(t, err)
+	newShares, err := spokeDB.ListFederationShares(ctx, newLink.UID)
+	require.NoError(t, err)
+	require.Len(t, newShares, 1)
+	assert.NotEqual(t, shares[0].UID, newShares[0].UID)
+	require.Equal(t, http.StatusOK, request(http.MethodGet, "/api/v1/federation/shares/"+shares[0].UID, nil, &history))
+	assert.Equal(t, uncertain["session-a"].AttemptHash, history.Records["session-a"].AttemptHash)
+	assert.Equal(t, peer.URL, history.Records["session-a"].HubOrigin)
 	assertArchiveHasNoCanary(t, hubDB)
 }
 

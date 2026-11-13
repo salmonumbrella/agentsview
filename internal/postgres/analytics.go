@@ -253,7 +253,11 @@ func (s *Store) getAnalyticsFilteredMessageStats(
 	if scope == nil {
 		return map[string]db.MessageStats{}, nil
 	}
-	return scope.StatsBySession(), nil
+	stats := scope.StatsBySession()
+	if err := s.addFederationAnalyticsStats(ctx, sessionIDs, f, stats); err != nil {
+		return nil, err
+	}
+	return stats, nil
 }
 
 // analyticsLocation loads the timezone from the filter.
@@ -358,6 +362,20 @@ func (s *Store) filteredSessionIDs(
 			"iterating filtered session IDs: %w", err,
 		)
 	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	candidates, err := s.analyticsModelCandidateSessionIDs(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	stats := make(map[string]db.MessageStats)
+	if err := s.addFederationAnalyticsStats(ctx, candidates, f, stats); err != nil {
+		return nil, err
+	}
+	for id := range stats {
+		ids[id] = true
+	}
 	return ids, nil
 }
 
@@ -379,6 +397,13 @@ func (s *Store) filteredSessionIDsModel(
 	}
 	ids := make(map[string]bool)
 	for id := range scope {
+		ids[id] = true
+	}
+	stats := make(map[string]db.MessageStats)
+	if err := s.addFederationAnalyticsStats(ctx, sessionIDs, f, stats); err != nil {
+		return nil, err
+	}
+	for id := range stats {
 		ids[id] = true
 	}
 	return ids, nil
@@ -581,7 +606,7 @@ func (s *Store) getAnalyticsModelsForSessionIDs(
 		placeholders := pgInPlaceholders(chunk, pb)
 		rows, err := s.pg.QueryContext(ctx, `
 			SELECT DISTINCT model
-			FROM messages
+			FROM (SELECT session_id,model FROM messages UNION ALL SELECT session_id,model FROM usage_events WHERE source='federation') AS model_rows
 			WHERE session_id IN `+placeholders+`
 			AND model <> ''
 			ORDER BY model`,
@@ -646,7 +671,7 @@ func (s *Store) getAnalyticsModelsForSessionIDsFiltered(
 			SELECT model,
 				COALESCE(TO_CHAR(timestamp AT TIME ZONE 'UTC',
 					'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')
-			FROM messages
+			FROM (SELECT session_id,model,timestamp FROM messages UNION ALL SELECT u.session_id,u.model,s.started_at AS timestamp FROM usage_events u JOIN sessions s ON s.id=u.session_id WHERE u.source='federation') AS model_rows
 			WHERE session_id IN `+placeholders+`
 			AND model <> ''`,
 			pb.args...,
@@ -926,12 +951,14 @@ func (s *Store) GetAnalyticsActivity(
 	}
 
 	query := `SELECT ` + pgDateColS + `, s.agent, s.id,
-		m.role, m.has_thinking, m.is_system, COALESCE(m.source_subtype, ''), COUNT(*)
+		m.role, m.has_thinking, m.is_system, COALESCE(m.source_subtype, ''), COUNT(*),
+		s.message_count, s.user_message_count,
+		EXISTS(SELECT 1 FROM usage_events u WHERE u.session_id=s.id AND u.source='federation')
 		FROM sessions s
 		LEFT JOIN messages m ON m.session_id = s.id
 		WHERE ` + strings.Join(preds, " AND ") + `
 		GROUP BY s.id, ` + pgDateColS +
-		`, s.agent, m.role, m.has_thinking, m.is_system, m.source_subtype`
+		`, s.agent, s.message_count, s.user_message_count, m.role, m.has_thinking, m.is_system, m.source_subtype`
 
 	rows, err := s.pg.QueryContext(
 		ctx, query, pb.args...,
@@ -946,6 +973,7 @@ func (s *Store) GetAnalyticsActivity(
 
 	buckets := make(map[string]*db.ActivityEntry)
 	sessionSeen := make(map[string]string)
+	unknownBuckets := make(map[string]bool)
 	var sessionIDs []string
 
 	for rows.Next() {
@@ -954,10 +982,11 @@ func (s *Store) GetAnalyticsActivity(
 		var role *string
 		var sourceSubtype string
 		var hasThinking, isSystem *bool
-		var count int
+		var count, summaryMessages, summaryUsers int
+		var federation bool
 		if err := rows.Scan(
 			&tsVal, &agent, &sid, &role,
-			&hasThinking, &isSystem, &sourceSubtype, &count,
+			&hasThinking, &isSystem, &sourceSubtype, &count, &summaryMessages, &summaryUsers, &federation,
 		); err != nil {
 			return db.ActivityResponse{},
 				fmt.Errorf(
@@ -1004,6 +1033,12 @@ func (s *Store) GetAnalyticsActivity(
 			if hasThinking != nil && *hasThinking {
 				entry.ThinkingMessages += count
 			}
+		} else if federation {
+			entry.Messages += summaryMessages
+			entry.UserMessages += summaryUsers
+			entry.ByAgent[agent] += summaryMessages
+		} else {
+			unknownBuckets[bucket] = true
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -1025,6 +1060,11 @@ func (s *Store) GetAnalyticsActivity(
 		}
 	}
 
+	// A replica cannot identify a message-less summary with no usage events.
+	// Omit the whole bucket rather than present a partial count as complete.
+	for bucket := range unknownBuckets {
+		delete(buckets, bucket)
+	}
 	series := make([]db.ActivityEntry, 0, len(buckets))
 	for _, e := range buckets {
 		series = append(series, *e)

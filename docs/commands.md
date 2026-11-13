@@ -2948,13 +2948,22 @@ and keeps a session out of all shares in this archive, including after removal
 or rejoining. `federation push --dry-run` prints selected summaries locally. Run
 `federation push` to deliver active shares now; the spoke also retries on a
 schedule. `federation status` and `federation share show` report delivery and
-quarantine counts. Shares confirmed with an earlier delivery-enabled notice retain that consent.
-Shares confirmed with the earlier notice that nothing is sent need a fresh
-`share add` confirmation before delivery. Local delivery history remains
-available after removal. A batch without an acknowledgment is unconfirmed and
-may have reached the hub. Excluded payloads are not replayed to resolve that
-uncertainty; reconciliation or withdrawal repairs the hub instead. Usage from shared sessions is dated at the
-session’s start.
+quarantine counts. Status lists each ledger's original hub and repository,
+including shares removed or left while offline. Use the share UID with
+`share show` to inspect record IDs, confirmed hashes, states, and unconfirmed
+attempted hashes without contacting the hub. Older orphaned entries may have
+unknown context. Sent and unconfirmed counts can overlap. Shares confirmed
+with the earlier notice that nothing is sent need a fresh `share add`
+confirmation before delivery. An unacknowledged batch may have reached the
+hub. Excluded payloads are not replayed to resolve that uncertainty;
+reconciliation or withdrawal repairs the hub instead. Usage from shared
+sessions is dated at the session's start. Model-filtered session summaries
+retain session-level message counts and show the selected model's usage;
+transcript and tool analytics have no message or tool rows for summary shares.
+On PostgreSQL, DuckDB and ClickHouse, an activity bucket is omitted when a
+session in it has neither message rows nor federation usage events, including
+ordinary sessions with zero stored counts. The replica cannot determine that
+session's activity counts without those inputs.
 
 Selection requires the session's own unambiguous repository identity and proof
 that it came from this installation. Imported and uncertain sessions are

@@ -37,6 +37,7 @@ type ShareView struct {
 	State     string `json:"state"`
 	Committed int64  `json:"committed"`
 	Epoch     int64  `json:"epoch"`
+	Changed   bool   `json:"-"`
 }
 type Batch struct {
 	Protocol      int           `json:"protocol"`
@@ -55,6 +56,7 @@ type BatchRecord struct {
 type BatchAck struct {
 	Committed int64             `json:"committed"`
 	Refused   map[string]string `json:"refused"`
+	Changed   bool              `json:"-"`
 }
 
 // DecodeBatch checks the record limit before allocating decoded payloads.

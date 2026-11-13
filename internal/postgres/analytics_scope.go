@@ -118,3 +118,40 @@ func (s *Store) resolveAnalyticsMessageScope(
 
 	return bySession, nil
 }
+
+func (s *Store) addFederationAnalyticsStats(ctx context.Context, ids []string, f db.AnalyticsFilter, stats map[string]db.MessageStats) error {
+	models := f.MessageScopeFilter().Models
+	return pgQueryChunked(db.UniqueAnalyticsIDs(ids), func(chunk []string) error {
+		pb := &paramBuilder{}
+		ph := pgInPlaceholders(chunk, pb)
+		rows, err := s.pg.QueryContext(ctx, `SELECT s.id,s.message_count,s.user_message_count,s.started_at,u.model,u.output_tokens FROM sessions s JOIN usage_events u ON u.session_id=s.id WHERE u.source='federation' AND s.id IN `+ph, pb.args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id, model string
+			var start *time.Time
+			var messages, users, output int
+			if err := rows.Scan(&id, &messages, &users, &start, &model, &output); err != nil {
+				return err
+			}
+			if len(models) > 0 {
+				if _, ok := models[model]; !ok {
+					continue
+				}
+			}
+			if f.HasTimeFilter() && (start == nil || !matchesTimeFilter(f, start.In(analyticsLocation(f)))) {
+				continue
+			}
+			stat := stats[id]
+			stat.Messages, stat.UserMessages = messages, users
+			if output > 0 {
+				stat.OutputTokens += output
+				stat.HasOutputTokens = true
+			}
+			stats[id] = stat
+		}
+		return rows.Err()
+	})
+}

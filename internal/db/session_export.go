@@ -931,6 +931,21 @@ func (db *DB) querySessionExportRowsFrom(
 func (db *DB) attachSessionExportUsage(
 	ctx context.Context, q sessionExportQuerier, rows []SessionSummaryRow,
 ) (*export.PricingBlock, error) {
+	return db.attachSessionExportUsageWithin(ctx, q, rows, nil)
+}
+
+// allowed limits contributing snapshot peers for federation grants. Nil keeps
+// the ordinary export's cross-filter snapshot behavior.
+func (db *DB) attachSessionExportUsageWithin(
+	ctx context.Context, q sessionExportQuerier, rows []SessionSummaryRow, allowed map[string]bool,
+) (*export.PricingBlock, error) {
+	return db.attachSessionExportUsageFiltered(ctx, q, rows, allowed, nil)
+}
+
+func (db *DB) attachSessionExportUsageFiltered(
+	ctx context.Context, q sessionExportQuerier, rows []SessionSummaryRow, allowed map[string]bool,
+	filter func([]string) (map[string]bool, error),
+) (*export.PricingBlock, error) {
 	if len(rows) == 0 {
 		return nil, nil
 	}
@@ -943,7 +958,7 @@ func (db *DB) attachSessionExportUsage(
 	for i := range rows {
 		accum[rows[i].ID] = newSessionExportUsageAccum()
 	}
-	if err := forEachSessionUsageCredit(ctx, q, sessionExportIDs(rows), resolver,
+	if err := forEachSessionUsageCreditFiltered(ctx, q, sessionExportIDs(rows), resolver, allowed, filter,
 		func(credit sessionUsageCredit) error {
 			a, ok := accum[credit.owner]
 			if !ok {
@@ -992,6 +1007,21 @@ func forEachSessionUsageCredit(
 	ctx context.Context, q sessionExportQuerier, sessionIDs []string,
 	resolver *export.PricingResolver, fn func(sessionUsageCredit) error,
 ) error {
+	return forEachSessionUsageCreditWithin(ctx, q, sessionIDs, resolver, nil, fn)
+}
+
+func forEachSessionUsageCreditWithin(
+	ctx context.Context, q sessionExportQuerier, sessionIDs []string,
+	resolver *export.PricingResolver, allowed map[string]bool, fn func(sessionUsageCredit) error,
+) error {
+	return forEachSessionUsageCreditFiltered(ctx, q, sessionIDs, resolver, allowed, nil, fn)
+}
+
+func forEachSessionUsageCreditFiltered(
+	ctx context.Context, q sessionExportQuerier, sessionIDs []string,
+	resolver *export.PricingResolver, allowed map[string]bool,
+	filter func([]string) (map[string]bool, error), fn func(sessionUsageCredit) error,
+) error {
 	query, args := sessionExportUsageQuery(sessionIDs)
 	usageRows, err := querySessionExportUsageRows(ctx, q, query, args)
 	if err != nil {
@@ -1001,7 +1031,21 @@ func forEachSessionUsageCredit(
 	if err != nil {
 		return err
 	}
-	usageRows = append(usageRows, peers...)
+	if filter != nil {
+		ids := make([]string, 0, len(peers))
+		for _, peer := range peers {
+			ids = append(ids, peer.sessionID)
+		}
+		allowed, err = filter(ids)
+		if err != nil {
+			return err
+		}
+	}
+	for _, peer := range peers {
+		if allowed == nil || allowed[peer.sessionID] {
+			usageRows = append(usageRows, peer)
+		}
+	}
 
 	snapshotRows := make([]activity.UsageRow, len(usageRows))
 	for i, r := range usageRows {

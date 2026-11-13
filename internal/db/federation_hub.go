@@ -17,6 +17,7 @@ type FederationHubShare struct {
 	UID, EnrollmentUID, Remote, ProjectKey, Level, Attribution, Audience, PolicyDigest, State, Retention string
 	Epoch, Sequence                                                                                      int64
 	Resume, Rebuild                                                                                      bool
+	Changed                                                                                              bool
 }
 type FederationHubRecord struct {
 	UID, Hash, Remote, ProjectKey string
@@ -27,6 +28,7 @@ type FederationHubRecord struct {
 type FederationBatchResult struct {
 	Committed int64             `json:"committed"`
 	Refused   map[string]string `json:"refused"`
+	Changed   bool              `json:"-"`
 }
 
 func (db *DB) PutFederationHubShare(ctx context.Context, spoke string, share FederationHubShare) (FederationHubShare, error) {
@@ -116,6 +118,7 @@ func (db *DB) PutFederationHubShare(ctx context.Context, spoke string, share Fed
 	if err == nil {
 		db.notifyUsageSessions(purged)
 		pending.flush()
+		share.Changed = len(purged) > 0
 	}
 	return share, err
 }
@@ -222,7 +225,7 @@ func (db *DB) CommitFederationBatch(ctx context.Context, enrollment, spoke, shar
 		return result, err
 	}
 	for _, write := range writes {
-		if _, err = tx.ExecContext(ctx, `UPDATE sessions SET is_automated=?,parent_session_id=?,relationship_type=? WHERE id=?`, write.Session.IsAutomated, write.Session.ParentSessionID, write.Session.RelationshipType, write.Session.ID); err != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE sessions SET is_automated=?,parent_session_id=?,relationship_type=?,outcome=?,health_grade=? WHERE id=?`, write.Session.IsAutomated, write.Session.ParentSessionID, write.Session.RelationshipType, write.Signals.Outcome, write.Signals.HealthGrade, write.Session.ID); err != nil {
 			return result, err
 		}
 	}
@@ -243,6 +246,7 @@ func (db *DB) CommitFederationBatch(ctx context.Context, enrollment, spoke, shar
 	revocations.flush()
 	pending.flush()
 	result.Committed = sequence
+	result.Changed = len(ids) > 0 || len(purged) > 0
 	return result, nil
 }
 
@@ -332,6 +336,7 @@ type FederationInventoryResult struct {
 	Missing  []string `json:"missing"`
 	Extra    []string `json:"extra"`
 	Complete bool     `json:"complete"`
+	Changed  bool     `json:"-"`
 }
 
 // ReconcileFederationPage compares only the authenticated share's records.
@@ -472,6 +477,7 @@ func (db *DB) ReconcileFederationPage(ctx context.Context, enrollment, spoke, sh
 	if err == nil {
 		db.notifyUsageSessions(purged)
 		pending.flush()
+		result.Changed = len(purged) > 0
 	}
 	return result, err
 }

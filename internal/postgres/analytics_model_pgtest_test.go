@@ -13,6 +13,73 @@ import (
 	"go.kenn.io/agentsview/internal/db"
 )
 
+func TestFederationSummaryModelAnalytics(t *testing.T) {
+	_, store := prepareUsageSchema(t, "agentsview_federation_model_analytics_test")
+	ctx := t.Context()
+	_, err := store.DB().ExecContext(ctx, `INSERT INTO sessions(id,machine,project,agent,started_at,message_count,user_message_count,total_output_tokens,has_total_output_tokens) VALUES('summary','federated','alpha','claude','2024-06-01T09:00:00Z',3,1,27,TRUE)`)
+	require.NoError(t, err)
+	_, err = store.DB().ExecContext(ctx, `INSERT INTO usage_events(session_id,source,model,output_tokens,cost_microdollars,cost_status,cost_source,occurred_at,dedup_key) VALUES ('summary','federation','model-a',20,50,'exact','reported','2024-06-01T09:00:00Z','a'),('summary','federation','model-b',7,25,'exact','reported','2024-06-01T09:00:00Z','b')`)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		model                      string
+		sessions, messages, output int
+	}{{"", 1, 3, 27}, {"model-a", 1, 3, 20}, {"model-b", 1, 3, 7}, {"absent", 0, 0, 0}} {
+		f := db.AnalyticsFilter{From: "2024-06-01", To: "2024-06-01", Timezone: "UTC", Model: tc.model}
+		summary, err := store.GetAnalyticsSummary(ctx, f)
+		require.NoError(t, err)
+		assert.Equal(t, tc.sessions, summary.TotalSessions, tc.model)
+		assert.Equal(t, tc.messages, summary.TotalMessages, tc.model)
+		assert.Equal(t, tc.output, summary.TotalOutputTokens, tc.model)
+		usage, err := store.GetDailyUsage(ctx, db.UsageFilter{From: "2024-06-01", To: "2024-06-01", Timezone: "UTC", Model: tc.model})
+		require.NoError(t, err)
+		cost := 75
+		if tc.model == "model-a" {
+			cost = 50
+		} else if tc.model == "model-b" {
+			cost = 25
+		} else if tc.model == "absent" {
+			cost = 0
+		}
+		assert.EqualValues(t, cost, usage.Totals.TotalCost.Microdollars)
+		if tc.model == "" {
+			assert.Equal(t, []string{"model-a", "model-b"}, summary.Models)
+		} else if tc.sessions != 0 {
+			assert.Equal(t, []string{tc.model}, summary.Models)
+		}
+		hour := 9
+		f.Hour = &hour
+		timed, err := store.GetAnalyticsSummary(ctx, f)
+		require.NoError(t, err)
+		assert.Equal(t, tc.sessions, timed.TotalSessions)
+		assert.Equal(t, tc.output, timed.TotalOutputTokens)
+		f.Hour = nil
+		activity, err := store.GetAnalyticsActivity(ctx, f, "day")
+		require.NoError(t, err)
+		if tc.sessions == 0 {
+			assert.Empty(t, activity.Series)
+			continue
+		}
+		require.Len(t, activity.Series, 1)
+		assert.Equal(t, 3, activity.Series[0].Messages)
+		assert.Zero(t, activity.Series[0].ToolCalls)
+	}
+}
+
+func TestActivityDoesNotInferFederationFromMachineName(t *testing.T) {
+	_, store := prepareUsageSchema(t, "agentsview_activity_unknown_federation_test")
+	ctx := t.Context()
+	_, err := store.DB().ExecContext(ctx, `INSERT INTO sessions(id,machine,project,agent,started_at,message_count,user_message_count) VALUES ('ordinary','federated','alpha','claude','2024-06-01T09:00:00Z',1,0),('no-usage','federated','alpha','claude','2024-06-02T09:00:00Z',0,0)`)
+	require.NoError(t, err)
+	_, err = store.DB().ExecContext(ctx, `INSERT INTO messages(session_id,ordinal,role,content,timestamp,content_length,is_system,model) VALUES('ordinary',0,'assistant','answer','2024-06-01T09:00:00Z',6,FALSE,'model-a')`)
+	require.NoError(t, err)
+	activity, err := store.GetAnalyticsActivity(ctx, db.AnalyticsFilter{From: "2024-06-01", To: "2024-06-02", Timezone: "UTC"}, "day")
+	require.NoError(t, err)
+	require.Len(t, activity.Series, 1)
+	assert.Equal(t, "2024-06-01", activity.Series[0].Date)
+	assert.Equal(t, 1, activity.Series[0].Sessions)
+	assert.Equal(t, 1, activity.Series[0].Messages)
+}
+
 func TestStoreGetAnalyticsActivityModelFilterCountsOnlyMatchingMessages(
 	t *testing.T,
 ) {

@@ -13,6 +13,10 @@ func TestDecodeBatchRejectsExcessAndUnknownPayloadFields(t *testing.T) {
 	assert.ErrorContains(t, err, "invalid federation batch")
 	_, err = DecodeBatch([]byte(`{"protocol":1,"spoke_instance":"s","share_uid":"x","epoch":1,"sequence":1,"records":[{"record_uid":"a","kind":"session_summary","hash":"x","payload":{"cwd":"private"}}]}`))
 	require.Error(t, err)
+	for _, extra := range []string{`"usage":{}`, `"models":[]`} {
+		_, err = DecodeBatch([]byte(`{"protocol":1,"spoke_instance":"s","share_uid":"x","epoch":1,"sequence":1,"records":[{"record_uid":"a","kind":"session_summary","hash":"x","payload":{` + extra + `}}]}`))
+		require.Error(t, err)
+	}
 }
 
 func TestDecodeBatchRejectsUnknownEnvelopeAndOversize(t *testing.T) {

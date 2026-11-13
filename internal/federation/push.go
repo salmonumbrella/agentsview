@@ -580,6 +580,18 @@ func (s *Service) postFederationRecords(ctx context.Context, link db.FederationL
 		if err != nil {
 			return err
 		}
+		var consent SharePreview
+		if err = json.Unmarshal([]byte(share.ConsentJSON), &consent); err != nil {
+			return inputError("invalid federation consent")
+		}
+		preview, err := previewFromSelection(ShareGrant{Project: share.NormalizedRemote, Level: share.Level, Attribution: share.Attribution, Since: share.Since}, &HubStatus{PolicyDigest: share.PolicyDigest, Policy: &consent.Policy}, selection)
+		if err != nil {
+			return err
+		}
+		fresh := make(map[string]SummaryRecord, len(preview.Records))
+		for _, record := range preview.Records {
+			fresh[record.SessionID] = record
+		}
 		allowed := make(map[string]bool, len(selection.IDs))
 		for _, id := range selection.IDs {
 			allowed[id] = true
@@ -592,15 +604,14 @@ func (s *Service) postFederationRecords(ctx context.Context, link db.FederationL
 				}
 				continue
 			}
-			if !allowed[record.RecordUID] || record.Payload == nil {
+			payload, ok := fresh[record.RecordUID]
+			if !allowed[record.RecordUID] || !ok || record.Payload == nil {
 				continue
 			}
-			if record.Payload.ParentID != nil && !selection.EligibleParents[*record.Payload.ParentID] {
-				record.Payload.ParentID, record.Payload.Relationship = nil, nil
-				record.Hash, err = export.DigestCanonical(record.Payload)
-				if err != nil {
-					return err
-				}
+			record.Payload = &payload
+			record.Hash, err = export.DigestCanonical(record.Payload)
+			if err != nil {
+				return err
 			}
 			filtered = append(filtered, record)
 		}
@@ -611,6 +622,9 @@ func (s *Service) postFederationRecords(ctx context.Context, link db.FederationL
 		encoded, err := jsonv2.Marshal(batch)
 		if err != nil {
 			return err
+		}
+		if len(encoded) > 16<<20 {
+			return inputError("federation batch exceeds size limit")
 		}
 		var attempts []db.FederationDelivery
 		for _, record := range batch.Records {

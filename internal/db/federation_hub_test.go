@@ -7,8 +7,48 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/money"
 )
+
+func TestFederationSignalsSurviveStoragePoliciesAndTrashCopy(t *testing.T) {
+	for _, policy := range []config.ArchiveContent{config.ArchiveContentFull, config.ArchiveContentTranscripts, config.ArchiveContentUsage} {
+		t.Run(string(policy), func(t *testing.T) {
+			ctx := t.Context()
+			source, target := testDB(t), testDB(t)
+			source.SetArchiveContent(policy)
+			target.SetArchiveContent(policy)
+			require.NoError(t, source.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr", SpokeArchiveID: "spoke", Member: "member", CredentialSHA256: "digest"}))
+			_, err := source.PutFederationHubShare(ctx, "spoke", FederationHubShare{UID: "share", EnrollmentUID: "enr", Remote: "remote", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+			require.NoError(t, err)
+			r := FederationHubRecord{UID: "shared", Hash: "one", Remote: "remote", ProjectKey: "key", Write: SessionBatchWrite{Session: Session{ID: "shared", Project: "remote", Machine: "federated", Agent: "claude", MessageCount: 3}, Signals: SessionSignalUpdate{Outcome: "completed", HealthGrade: Ptr("A")}}}
+			_, err = source.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 1, "first", []FederationHubRecord{r})
+			require.NoError(t, err)
+			r.Hash, r.Write.Signals.Outcome, r.Write.Signals.HealthGrade = "two", "errored", Ptr("D")
+			_, err = source.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 2, "second", []FederationHubRecord{r})
+			require.NoError(t, err)
+			_, err = source.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 2, "second", []FederationHubRecord{r})
+			require.NoError(t, err)
+			require.NoError(t, source.UpdateSessionSignals(ctx, "shared", SessionSignalUpdate{}))
+			if policy.UsageOnly() {
+				require.NoError(t, source.SettleUsageOnlySignals(ctx, "shared"))
+			}
+			_, err = source.SoftDeleteSessions(ctx, []string{"shared"})
+			require.NoError(t, err)
+			_, err = target.CopyTrashedDataFrom(ctx, source.Path())
+			require.NoError(t, err)
+			require.NoError(t, target.CopyFederationStateFrom(ctx, source.Path()))
+			var outcome, health string
+			var messages, tools, findings int
+			require.NoError(t, target.rawReader().QueryRowContext(ctx, `SELECT outcome,health_grade,(SELECT count(*) FROM messages WHERE session_id=s.id),(SELECT count(*) FROM tool_calls WHERE session_id=s.id),(SELECT count(*) FROM secret_findings WHERE session_id=s.id) FROM sessions s WHERE id='shared'`).Scan(&outcome, &health, &messages, &tools, &findings))
+			assert.Equal(t, "errored", outcome)
+			assert.Equal(t, "D", health)
+			assert.Zero(t, messages)
+			assert.Zero(t, tools)
+			assert.Zero(t, findings)
+		})
+	}
+}
 
 func TestFederationBatchOwnershipAndRevocation(t *testing.T) {
 	d := testDB(t)
@@ -170,9 +210,15 @@ func TestFederatedSessionAndUsageSurviveRebuildCopy(t *testing.T) {
 	cost := money.Money{Microdollars: 125}
 	largeInput := MaxPlausibleTokens + 17
 	start := "2026-01-02T00:00:00Z"
-	record := FederationHubRecord{UID: "shared", Hash: "hash", Remote: "example.org/repo", ProjectKey: "key", AssistantCount: 2, Write: SessionBatchWrite{Session: Session{ID: "shared", Project: "example.org/repo", Machine: "federated", Agent: "codex", MessageCount: 4, StartedAt: &start}, UsageEvents: []UsageEvent{{SessionID: "shared", Source: "federation", Model: "model", InputTokens: largeInput, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: start, DedupKey: "model"}}}}
+	record := FederationHubRecord{UID: "shared", Hash: "hash", Remote: "example.org/repo", ProjectKey: "key", AssistantCount: 2, Write: SessionBatchWrite{Session: Session{ID: "shared", Project: "example.org/repo", Machine: "federated", Agent: "codex", MessageCount: 4, StartedAt: &start}, Signals: SessionSignalUpdate{Outcome: "completed", HealthGrade: Ptr("A")}, UsageEvents: []UsageEvent{{SessionID: "shared", Source: "federation", Model: "model", InputTokens: largeInput, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: start, DedupKey: "model"}}}}
 	_, err = source.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 1, "batch", []FederationHubRecord{record})
 	require.NoError(t, err)
+	require.NoError(t, source.UpdateSessionSignals(ctx, "shared", SessionSignalUpdate{}))
+	var outcome string
+	var health sql.NullString
+	require.NoError(t, source.rawReader().QueryRowContext(ctx, `SELECT outcome,health_grade FROM sessions WHERE id='shared'`).Scan(&outcome, &health))
+	assert.Equal(t, "completed", outcome)
+	assert.Equal(t, "A", health.String)
 	require.NoError(t, target.CopyFederationStateFrom(ctx, source.Path()))
 	copied, err := target.CopyOrphanedDataFrom(ctx, source.Path())
 	require.NoError(t, err)
@@ -186,6 +232,9 @@ func TestFederatedSessionAndUsageSurviveRebuildCopy(t *testing.T) {
 	assert.Equal(t, largeInput, input)
 	assert.Equal(t, 125, storedCost)
 	assert.Equal(t, 2, assistants)
+	require.NoError(t, target.rawReader().QueryRowContext(ctx, `SELECT outcome,health_grade FROM sessions WHERE id='shared'`).Scan(&outcome, &health))
+	assert.Equal(t, "completed", outcome)
+	assert.Equal(t, "A", health.String)
 	daily, err := target.GetDailyUsage(ctx, UsageFilter{From: "2026-01-02", To: "2026-01-02", Timezone: "UTC"})
 	require.NoError(t, err)
 	assert.Equal(t, largeInput, daily.Totals.InputTokens)

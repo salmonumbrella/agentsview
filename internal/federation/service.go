@@ -223,6 +223,15 @@ type Status struct {
 	Delivery   DeliveryCounts            `json:"delivery"`
 	Quarantine []db.FederationQuarantine `json:"quarantine"`
 	Hub        *HubStatus                `json:"hub,omitempty"`
+	History    []DeliveryHistory         `json:"history"`
+}
+type DeliveryHistory struct {
+	ShareUID         string         `json:"share_uid"`
+	HubOrigin        string         `json:"hub_origin"`
+	HubArchiveID     string         `json:"hub_archive_id"`
+	NormalizedRemote string         `json:"normalized_remote"`
+	Delivery         DeliveryCounts `json:"delivery"`
+	Current          bool           `json:"current"`
 }
 type HubStatus struct {
 	State        string                      `json:"state"`
@@ -233,6 +242,22 @@ type HubStatus struct {
 
 func (s *Service) Status(ctx context.Context) (Status, error) {
 	out := Status{ArchiveID: s.archiveID}
+	uids, err := s.db.FederationLedgerShares(ctx)
+	if err != nil {
+		return out, err
+	}
+	for _, uid := range uids {
+		ledger, e := s.db.FederationLedger(ctx, uid)
+		if e != nil {
+			return out, e
+		}
+		entry := DeliveryHistory{ShareUID: uid, Delivery: deliveryCounts(ledger)}
+		for _, d := range ledger {
+			entry.HubOrigin, entry.HubArchiveID, entry.NormalizedRemote = d.HubOrigin, d.HubArchiveID, d.NormalizedRemote
+			break
+		}
+		out.History = append(out.History, entry)
+	}
 	link, err := s.db.GetFederationLink(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, nil
@@ -246,21 +271,23 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 		return out, err
 	}
 	out.Shares = len(shares)
+	for i := range out.History {
+		for _, share := range shares {
+			if out.History[i].ShareUID == share.UID {
+				out.History[i].Current = true
+				break
+			}
+		}
+	}
 	for _, share := range shares {
 		ledger, e := s.db.FederationLedger(ctx, share.UID)
 		if e != nil {
 			return out, e
 		}
-		for _, d := range ledger {
-			if d.AttemptHash != "" {
-				out.Delivery.Unconfirmed++
-			}
-			if d.State == "sent" {
-				out.Delivery.Sent++
-			} else if d.State == "refused" {
-				out.Delivery.Refused++
-			}
-		}
+		counts := deliveryCounts(ledger)
+		out.Delivery.Sent += counts.Sent
+		out.Delivery.Refused += counts.Refused
+		out.Delivery.Unconfirmed += counts.Unconfirmed
 	}
 	out.Quarantine, err = s.db.FederationQuarantines(ctx)
 	if err != nil {
@@ -283,7 +310,8 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	h, err := Handshake(ctx, link.HubOrigin, token, s.archiveID)
 	if err != nil {
 		var input *InputError
-		if errors.Is(err, ErrHubRefused) || errors.As(err, &input) {
+		var peer *peerHTTPError
+		if errors.Is(err, ErrHubRefused) || errors.As(err, &input) || errors.As(err, &peer) {
 			out.Hub.State, out.Hub.Message = HubError, err.Error()
 			return out, nil
 		}
