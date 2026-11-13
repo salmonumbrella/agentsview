@@ -1263,3 +1263,118 @@ func TestFederationPulseRejectedDuplicateDoesNotChangeCostCompleteness(t *testin
 	assert.Equal(t, "available", pulse.Totals["cost_microdollars"].State)
 	assert.Equal(t, Ptr(int64(3000)), pulse.Totals["cost_microdollars"].Value)
 }
+
+func TestFederationPulseDatedEvidenceAndPublicReporting(t *testing.T) {
+	for _, tc := range []struct {
+		name, start, evidence string
+		messageCount          int
+	}{
+		{"existence", "2026-07-28T10:00:00Z", "", 0},
+		{"usage", "2026-07-27T10:00:00Z", `INSERT INTO usage_events(session_id,source,model,occurred_at,input_tokens) VALUES('session','fixture','model','2026-07-28T10:00:00Z',7)`, 0},
+		{"message", "2026-07-27T10:00:00Z", `INSERT INTO messages(session_id,ordinal,role,content,timestamp) VALUES('session',0,'user','fixture','2026-07-28T12:00:00+02:00')`, 1},
+		{"terminal", "2026-07-27T10:00:00Z", `INSERT INTO tool_result_events(session_id,tool_call_message_ordinal,source,status,content,timestamp) VALUES('session',0,'tool_execution','completed','','2026-07-28T10:00:00Z')`, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := testDB(t)
+			ctx := t.Context()
+			require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+				for _, q := range []string{
+					`INSERT INTO federation_enrollments(enrollment_uid,spoke_archive_id,member,credential_sha256) VALUES('e','s','a','digest')`,
+					`INSERT INTO federation_hub_shares(share_uid,enrollment_uid,normalized_remote,project_key,level,attribution,audience,policy_digest,epoch,state) VALUES('h','e','example/a','project','summary','pooled','operators','policy',1,'active')`,
+				} {
+					if _, err := tx.ExecContext(ctx, q); err != nil {
+						return err
+					}
+				}
+				if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,started_at,message_count) VALUES('session','example/a','federated','codex',?,?)`, tc.start, tc.messageCount); err != nil {
+					return err
+				}
+				if _, err := tx.ExecContext(ctx, `INSERT INTO federation_records(share_uid,record_uid,session_id,hash) VALUES('h','r','session','hash')`); err != nil {
+					return err
+				}
+				if tc.evidence != "" {
+					_, err := tx.ExecContext(ctx, tc.evidence)
+					return err
+				}
+				return nil
+			}))
+			date := time.Date(2026, 7, 28, 0, 0, 0, 0, time.UTC)
+			now := date.Add(48 * time.Hour)
+			var dates []string
+			_, err := d.readFederationPulseSnapshot(ctx, "2026-07-28", now, nil, func(_ *sql.Tx, at, _ time.Time, _ map[string]federationPulseOwner, _ reportingDaySource) error {
+				dates = append(dates, at.Format(time.DateOnly))
+				return nil
+			})
+			require.NoError(t, err)
+			assert.Equal(t, []string{"2026-07-28"}, dates)
+			pulse, err := d.readFederationPulse(ctx, "2026-07-28", 1, now)
+			require.NoError(t, err)
+			assert.Equal(t, Ptr(int64(1)), pulse.Totals["sessions"].Value)
+			day, err := d.ExportReportingDay(ctx, ReportingExportOptions{Date: date, Now: now})
+			require.NoError(t, err)
+			assert.True(t, day.HasData)
+			digest, err := d.ExportReportingDigest(ctx, ReportingDigestExportOptions{From: date, To: date, Now: now})
+			require.NoError(t, err)
+			require.Len(t, digest.Days, 1)
+			assert.Equal(t, "2026-07-28", digest.Days[0].Date)
+			assert.True(t, digest.Days[0].HasData)
+			assert.Equal(t, day.Digest, digest.Days[0].DayDigest)
+		})
+	}
+}
+
+func TestFederationPulseMidnightEvidenceCountsSessionOnce(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		for _, q := range []string{
+			`INSERT INTO federation_enrollments(enrollment_uid,spoke_archive_id,member,credential_sha256) VALUES('e','s','a','digest')`,
+			`INSERT INTO federation_hub_shares(share_uid,enrollment_uid,normalized_remote,project_key,level,attribution,audience,policy_digest,epoch,state) VALUES('h','e','example/a','project','summary','pooled','operators','policy',1,'active')`,
+			`INSERT INTO sessions(id,project,machine,agent,started_at,message_count) VALUES('session','example/a','federated','codex','2026-07-28T23:59:00Z',2)`,
+			`INSERT INTO federation_records(share_uid,record_uid,session_id,hash) VALUES('h','r','session','hash')`,
+			`INSERT INTO messages(session_id,ordinal,role,content,timestamp) VALUES('session',0,'user','fixture','2026-07-28T23:59:00Z'),('session',1,'assistant','fixture','2026-07-29T00:01:00Z')`,
+			`INSERT INTO usage_events(session_id,source,model,occurred_at,input_tokens) VALUES('session','fixture','model','2026-07-29T00:01:00Z',7)`,
+		} {
+			if _, err := tx.ExecContext(ctx, q); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	now := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		since string
+		dates []string
+	}{
+		{"2026-07-28", []string{"2026-07-28", "2026-07-29"}},
+		{"2026-07-29", []string{"2026-07-29"}},
+	} {
+		var dates []string
+		_, err := d.readFederationPulseSnapshot(ctx, tc.since, now, nil, func(_ *sql.Tx, at, _ time.Time, _ map[string]federationPulseOwner, _ reportingDaySource) error {
+			dates = append(dates, at.Format(time.DateOnly))
+			return nil
+		})
+		require.NoError(t, err)
+		assert.Equal(t, tc.dates, dates)
+		pulse, err := d.readFederationPulse(ctx, tc.since, 1, now)
+		require.NoError(t, err)
+		assert.Equal(t, Ptr(int64(1)), pulse.Totals["sessions"].Value)
+		assert.Equal(t, Ptr(int64(7)), pulse.Totals["tokens"].Value)
+	}
+	first := time.Date(2026, 7, 28, 0, 0, 0, 0, time.UTC)
+	second := first.AddDate(0, 0, 1)
+	day1, err := d.ExportReportingDay(ctx, ReportingExportOptions{Date: first, Now: now})
+	require.NoError(t, err)
+	day2, err := d.ExportReportingDay(ctx, ReportingExportOptions{Date: second, Now: now})
+	require.NoError(t, err)
+	assert.InDelta(t, 1, day1.Hours[23].Activity.Totals.AgentMinutes, 0.0001)
+	assert.InDelta(t, 1, day2.Hours[0].Activity.Totals.AgentMinutes, 0.0001)
+	assert.EqualValues(t, 7, day2.Hours[0].Usage.Totals.InputTokens)
+	digest, err := d.ExportReportingDigest(ctx, ReportingDigestExportOptions{From: first, To: second, Now: now})
+	require.NoError(t, err)
+	require.Len(t, digest.Days, 2)
+	assert.Equal(t, []string{"2026-07-28", "2026-07-29"}, []string{digest.Days[0].Date, digest.Days[1].Date})
+	assert.True(t, digest.Days[0].HasData)
+	assert.True(t, digest.Days[1].HasData)
+	assert.Equal(t, []string{day1.Digest, day2.Digest}, []string{digest.Days[0].DayDigest, digest.Days[1].DayDigest})
+}
