@@ -1585,7 +1585,7 @@ func TestFederationRestoreReconcilesAndContinuesDeletion(t *testing.T) {
 }
 
 func TestRetainedSnapshotRecoversHubSequenceWithoutSendingContent(t *testing.T) {
-	for _, mode := range []string{"same-generation snapshot", "regressed cursors", "replacement after hub progress", "replacement with proven deletion", "lost acknowledgment", "pending 503", "malformed receipt", "missing pending credential", "pending canceled", "wrong pending hub", "revoked pending credential", "conflicting pending snapshot"} {
+	for _, mode := range []string{"same-generation snapshot", "regressed cursors", "replacement after hub progress", "replacement with proven deletion", "lost acknowledgment", "pending 503", "malformed receipt", "missing pending credential", "pending canceled", "wrong pending hub", "revoked pending credential", "independent link while pending", "conflicting pending snapshot"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := t.Context()
 			hubDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "hub.db"))
@@ -1775,7 +1775,7 @@ func TestRetainedSnapshotRecoversHubSequenceWithoutSendingContent(t *testing.T) 
 				}
 				return
 			}
-			if mode == "lost acknowledgment" || mode == "pending 503" || mode == "malformed receipt" || mode == "missing pending credential" || mode == "pending canceled" || mode == "wrong pending hub" || mode == "revoked pending credential" {
+			if mode == "lost acknowledgment" || mode == "pending 503" || mode == "malformed receipt" || mode == "missing pending credential" || mode == "pending canceled" || mode == "wrong pending hub" || mode == "revoked pending credential" || mode == "independent link while pending" {
 				dropNext.Store(true)
 				require.NoError(t, spoke.Exclude(ctx, "a", "private"))
 				_, err = spoke.Push(ctx)
@@ -1785,6 +1785,35 @@ func TestRetainedSnapshotRecoversHubSequenceWithoutSendingContent(t *testing.T) 
 				pending, err := spokeDB.GetFederationShare(ctx, link.UID, uid)
 				require.NoError(t, err)
 				require.NotEmpty(t, pending.PendingBatch)
+				if mode == "independent link while pending" {
+					stopFault.Store(1)
+					require.NoError(t, spokeDB.DeleteFederationLink(ctx))
+					otherDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "other-hub.db"))
+					otherHub := federation.NewService("hub", "hub-b", cfg.Federation.Hub, otherDB)
+					_, otherToken, err := otherHub.Enroll(ctx, "spoke-a", "member", "")
+					require.NoError(t, err)
+					otherPeer := httptest.NewServer(New(config.Config{Host: "127.0.0.1", Port: 8080}, otherDB, nil, WithFederation(otherHub)).Handler())
+					t.Cleanup(otherPeer.Close)
+					otherFile := filepath.Join(testutil.PrivateTempDir(t), "credential")
+					require.NoError(t, os.WriteFile(otherFile, []byte(otherToken), 0600))
+					require.NoError(t, spoke.Join(ctx, otherPeer.URL, "hub-b", otherFile))
+					newPreview, err := spoke.PreviewShare(ctx, federation.ShareGrant{Project: remote, Level: "summary", Attribution: "pooled"})
+					require.NoError(t, err)
+					require.NoError(t, spoke.AddShare(ctx, newPreview))
+					result, err := spoke.Push(ctx)
+					require.ErrorContains(t, err, "HTTP 503")
+					assert.Equal(t, 2, result.Sent)
+					stillPending, err := spokeDB.GetFederationShare(ctx, link.UID, uid)
+					require.NoError(t, err)
+					assert.Equal(t, pending.PendingBatch, stillPending.PendingBatch)
+					var a, b, c int
+					require.NoError(t, otherDB.Reader().QueryRow(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='a'),(SELECT count(*) FROM sessions WHERE id='b'),(SELECT count(*) FROM sessions WHERE id='c')`).Scan(&a, &b, &c))
+					assert.Zero(t, a)
+					assert.Equal(t, 1, b)
+					assert.Equal(t, 1, c)
+					assert.Zero(t, inventories.Load())
+					return
+				}
 				switch mode {
 				case "pending 503":
 					stopFault.Store(1)
