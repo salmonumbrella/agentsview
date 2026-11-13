@@ -661,9 +661,13 @@ func TestFederationSameHashAttachesLaterOwnedParent(t *testing.T) {
 	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT coalesce(parent_session_id,''),relationship_type FROM sessions WHERE id='a-child'`).Scan(&gotParent, &relationship))
 	assert.Equal(t, "z-parent", gotParent)
 	assert.Equal(t, "subagent", relationship)
+	var beforeRepeat, afterRepeat string
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT sync_marker FROM sessions WHERE id='a-child'`).Scan(&beforeRepeat))
 	result, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 4, "repeat", []FederationHubRecord{child})
 	require.NoError(t, err)
 	assert.False(t, result.Changed)
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT sync_marker FROM sessions WHERE id='a-child'`).Scan(&afterRepeat))
+	assert.Equal(t, beforeRepeat, afterRepeat)
 	childID := "a-child"
 	parentRecord.Write.Session.ParentSessionID = &childID
 	parentRecord.Write.Session.RelationshipType = "subagent"
@@ -720,4 +724,20 @@ func TestFederationSameHashAttachesLaterOwnedParent(t *testing.T) {
 	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT coalesce(parent_session_id,''),relationship_type FROM sessions WHERE id='a-child'`).Scan(&gotParent, &relationship))
 	assert.Empty(t, gotParent)
 	assert.Empty(t, relationship)
+	parentRecord.Write.Session.ParentSessionID = nil
+	parentRecord.Write.Session.RelationshipType = ""
+	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 10, "return-parent", []FederationHubRecord{parentRecord})
+	require.NoError(t, err)
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE sessions SET sync_marker='2999-01-01T00:00:00.000Z' WHERE id='a-child'`)
+		return err
+	}))
+	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 11, "repair-future-marker", []FederationHubRecord{child})
+	require.NoError(t, err)
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT sync_marker FROM sessions WHERE id='a-child'`).Scan(&afterRepeat))
+	assert.Equal(t, "2999-01-01T00:00:00.000Z", afterRepeat)
+	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 12, "remove-parent-again", []FederationHubRecord{{UID: "z-parent", Tombstone: true}})
+	require.NoError(t, err)
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT sync_marker FROM sessions WHERE id='a-child'`).Scan(&afterRepeat))
+	assert.Equal(t, "2999-01-01T00:00:00.000Z", afterRepeat)
 }
