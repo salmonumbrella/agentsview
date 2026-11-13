@@ -70,6 +70,37 @@ func TestJointReportingUsageSupportFollowsPricedSurvivors(t *testing.T) {
 	assert.NotContains(t, string(encoded), "ProofRef")
 }
 
+func TestJointReportingProofDoesNotTreatAllocatedCostAsIndependent(t *testing.T) {
+	start := time.Date(2026, 7, 28, 9, 0, 0, 0, time.UTC)
+	total := money.Money{Microdollars: 107}
+	rows, err := allocateReportingUsageCosts([]activity.UsageRow{
+		{SessionID: "one", SourceSessionID: "one", Timestamp: "2026-07-28T09:05:00Z", Agent: "codex", Project: "fixture", Model: "a", InputTokens: 10, Cost: money.Money{Microdollars: 10}, Priced: true, ProofRef: 101},
+		{SessionID: "one", SourceSessionID: "one", Timestamp: "2026-07-28T09:10:00Z", Agent: "codex", Project: "fixture", Model: "b", InputTokens: 10, Cost: money.Money{Microdollars: 10}, Priced: true, SessionCost: &total, ProofRef: 102},
+		{SessionID: "two", SourceSessionID: "two", Timestamp: "2026-07-28T09:15:00Z", Agent: "codex", Project: "fixture", Model: "a", InputTokens: 5, Cost: money.Money{Microdollars: 5}, Priced: true, ProofRef: 103},
+	})
+	require.NoError(t, err)
+	require.Len(t, rows, 3)
+	assert.EqualValues(t, 53, rows[0].Cost.Microdollars)
+	assert.EqualValues(t, 54, rows[1].Cost.Microdollars)
+	assert.EqualValues(t, 5, rows[2].Cost.Microdollars)
+	sessions := map[string]activity.SessionMeta{"one": {SessionID: "one", Project: "fixture", Agent: "codex"}, "two": {SessionID: "two", Project: "fixture", Agent: "codex"}}
+	support, err := reportingHourSupport(start, time.Hour, rows, sessions, map[string]export.ProjectMapEntry{"fixture": {ProjectKey: "project"}})
+	require.NoError(t, err)
+	require.Len(t, support, 2)
+	seen := 0
+	for key, contributions := range support {
+		if first := contributions[reportingJointContributor{"one", "one"}]; first != nil {
+			seen++
+			assert.True(t, first.proofIncomplete, key.model)
+		}
+		if second := contributions[reportingJointContributor{"two", "two"}]; second != nil {
+			seen++
+			assert.False(t, second.proofIncomplete, key.model)
+		}
+	}
+	assert.Equal(t, 3, seen)
+}
+
 // TestReportingHoursMatchPerHourPairing compares every hour produced from the
 // shared daily pairs with the original implementation that paired events
 // separately for each hour.
