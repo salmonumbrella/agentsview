@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -806,4 +807,34 @@ func TestFederationCopyLegacyDeliveryObservationIsNull(t *testing.T) {
 	var at sql.NullString
 	require.NoError(t, target.rawReader().QueryRowContext(ctx, `SELECT last_delivery_at FROM federation_enrollments WHERE enrollment_uid='e'`).Scan(&at))
 	assert.False(t, at.Valid)
+}
+
+func TestFederationDeliveryObservationSurvivesReopen(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "archive.db")
+	d, err := OpenIsolated(ctx, path)
+	require.NoError(t, err)
+	closed := false
+	t.Cleanup(func() {
+		if !closed {
+			_ = d.Close()
+		}
+	})
+	require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "e", SpokeArchiveID: "spoke", Member: "member", CredentialSHA256: "digest"}))
+	_, err = d.PutFederationHubShare(ctx, "spoke", FederationHubShare{UID: "share", EnrollmentUID: "e", Remote: "example/repo", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+	require.NoError(t, err)
+	record := FederationHubRecord{UID: "record", Hash: "hash", Remote: "example/repo", ProjectKey: "key", Write: SessionBatchWrite{Session: Session{ID: "session", Project: "example/repo", Agent: "codex"}}}
+	_, err = d.CommitFederationBatch(ctx, "e", "spoke", "share", "policy", 1, 1, "batch", []FederationHubRecord{record})
+	require.NoError(t, err)
+	var before sql.NullString
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT last_delivery_at FROM federation_enrollments WHERE enrollment_uid='e'`).Scan(&before))
+	require.True(t, before.Valid)
+	require.NoError(t, d.Close())
+	closed = true
+	reopened, err := OpenIsolated(ctx, path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+	var after sql.NullString
+	require.NoError(t, reopened.rawReader().QueryRowContext(ctx, `SELECT last_delivery_at FROM federation_enrollments WHERE enrollment_uid='e'`).Scan(&after))
+	assert.Equal(t, before, after)
 }
