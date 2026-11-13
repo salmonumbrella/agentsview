@@ -2811,6 +2811,10 @@ anyone holding the hub's bearer token can read everything in its archive. Use a
 dedicated data directory for the hub and start it with
 `agentsview serve --no-sync`.
 
+Every role, including `off`, rejects federation credentials (`avfc_` values)
+on every route except the hub handshake, so a personal auth token must not begin
+with `avfc_`.
+
 ```toml
 [federation]
 role = "hub" # "off", "hub", or "spoke"
