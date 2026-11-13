@@ -377,7 +377,7 @@ func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T)
 // These regressions describe the accepted cross-release privacy requirement.
 // The publication policy is still open; no admission bypass is used here.
 func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
-	for _, scenario := range []string{"window", "reverse-window", "update", "copy-before-publication", "copy-after-publication", "cancel-before-admission", "concurrent", "purge-regrant", "untraced-write", "reopen", "second-handle", "closed-writer", "untraced-session", "untraced-record"} {
+	for _, scenario := range []string{"window", "reverse-window", "update", "copy-before-publication", "copy-after-publication", "cancel-before-admission", "concurrent", "purge-regrant", "untraced-write", "reopen", "second-handle", "closed-writer", "untraced-session", "untraced-record", "untraced-message", "untraced-tool-result", "untraced-exclusion"} {
 		t.Run(scenario, func(t *testing.T) {
 			d := testDB(t)
 			ctx := t.Context()
@@ -559,12 +559,15 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 			if scenario == "reopen" {
 				require.NoError(t, d.Reopen())
 			}
-			if scenario == "untraced-write" || scenario == "untraced-session" || scenario == "untraced-record" {
+			if scenario == "untraced-write" || scenario == "untraced-session" || scenario == "untraced-record" || scenario == "untraced-message" || scenario == "untraced-tool-result" || scenario == "untraced-exclusion" {
 				// These bypass DB.Update's traced owner and exercise source-DML fences.
 				statement := map[string]string{
-					"untraced-write":   `UPDATE usage_events SET input_tokens=17,cost_microdollars=170 WHERE session_id='a'`,
-					"untraced-session": `UPDATE sessions SET started_at='2026-07-29T09:01:00Z' WHERE id='a'`,
-					"untraced-record":  `UPDATE federation_records SET hash='changed' WHERE session_id='a'`,
+					"untraced-write":       `UPDATE usage_events SET input_tokens=17,cost_microdollars=170 WHERE session_id='a'`,
+					"untraced-session":     `UPDATE sessions SET started_at='2026-07-29T09:01:00Z' WHERE id='a'`,
+					"untraced-record":      `UPDATE federation_records SET hash='changed' WHERE session_id='a'`,
+					"untraced-message":     `INSERT INTO messages(session_id,ordinal,role,content,timestamp) VALUES('a',0,'user','synthetic','2026-07-29T09:00:00Z')`,
+					"untraced-tool-result": `INSERT INTO tool_result_events(session_id,tool_call_message_ordinal,source,status,content,timestamp) VALUES('a',0,'tool_execution','completed','synthetic','2026-07-29T09:00:00Z')`,
+					"untraced-exclusion":   `INSERT INTO federation_exclusions(session_id,reason) VALUES('a','synthetic')`,
 				}[scenario]
 				result, err := d.getWriter().ExecContext(ctx, statement)
 				require.NoError(t, err)
