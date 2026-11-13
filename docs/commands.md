@@ -134,7 +134,8 @@ count even if it started before the window.
 The pulse reports sessions, projects, usage, known cost, automation, stored
 outcomes and session-health grades. Values with too little distinct-member
 support are withheld along with totals that could reveal them by subtraction;
-missing evidence is unavailable. There are no per-member usage figures. See
+missing evidence is unavailable. A partial cost is the known amount and excludes
+unpriced amounts. There are no per-member usage figures. See
 [reporting export](reporting-export.md#federation-pulse) for the scope and
 evidence limits.
 

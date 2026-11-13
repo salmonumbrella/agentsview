@@ -22,6 +22,7 @@ import (
 	"go.kenn.io/agentsview/internal/dbtest"
 	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/federation"
+	"go.kenn.io/agentsview/internal/money"
 	"go.kenn.io/agentsview/internal/testutil"
 )
 
@@ -603,4 +604,36 @@ func TestFederationPeerOperationBoundary(t *testing.T) {
 	} {
 		assert.Equal(t, tc.want, federationPeerOperation(tc.method, tc.path), "%s %s", tc.method, tc.path)
 	}
+}
+
+func TestFederationPulseHTTPReleasesPartialKnownCost(t *testing.T) {
+	database := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "archive.db"))
+	ctx := t.Context()
+	date := time.Now().UTC().AddDate(0, 0, -2).Format(time.DateOnly)
+	for i, name := range []string{"a", "b", "c"} {
+		enrollment, spoke, share := "e-"+name, "s-"+name, "h-"+name
+		require.NoError(t, database.CreateFederationEnrollment(ctx, db.FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: name, CredentialSHA256: "digest-" + name}))
+		_, err := database.PutFederationHubShare(ctx, spoke, db.FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+		require.NoError(t, err)
+		start := date + "T09:00:00Z"
+		cost := money.Money{Microdollars: int64((i + 1) * 100)}
+		record := db.FederationHubRecord{UID: name, Hash: "hash", Remote: "example/repo", ProjectKey: "project", Write: db.SessionBatchWrite{Session: db.Session{ID: name, Project: "example/repo", Agent: "codex", StartedAt: &start}, Signals: db.SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []db.UsageEvent{
+			{Source: "fixture", Model: "known", InputTokens: 10, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: start, DedupKey: name + "-known"},
+			{Source: "fixture", Model: "synthetic-unpriced-model", InputTokens: 20, OccurredAt: start, DedupKey: name + "-unknown"},
+		}}}
+		_, err = database.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", []db.FederationHubRecord{record})
+		require.NoError(t, err)
+	}
+	svc := federation.NewService("hub", "archive", config.FederationHubConfig{MinGroupSize: 3}, database)
+	srv := New(config.Config{Host: "127.0.0.1", Port: 8080}, database, nil, WithFederation(svc))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/federation/pulse?since="+date, nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var pulse db.FederationPulse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pulse))
+	assert.Equal(t, "partial", pulse.Totals["cost_microdollars"].State)
+	require.NotNil(t, pulse.Totals["cost_microdollars"].Value)
+	assert.EqualValues(t, 600, *pulse.Totals["cost_microdollars"].Value)
+	assert.Contains(t, rec.Body.String(), `"cost_microdollars":{"value":600,"state":"partial"}`)
+	assert.NotContains(t, rec.Body.String(), "digest-a")
 }

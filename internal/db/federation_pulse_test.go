@@ -880,3 +880,45 @@ func TestFederationPulsePartialCostRespectsCompletenessSupport(t *testing.T) {
 		})
 	}
 }
+
+func TestFederationPulseCostMissingAndPricedZero(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		priced bool
+		state  string
+		value  *int64
+	}{
+		{"all unpriced", false, "unavailable", nil},
+		{"priced zero", true, "available", Ptr(int64(0))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := testDB(t)
+			ctx := t.Context()
+			start := "2026-07-28T09:00:00Z"
+			for _, name := range []string{"a", "b", "c"} {
+				enrollment, spoke, share := "e-"+name, "s-"+name, "h-"+name
+				require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: name, CredentialSHA256: "digest-" + name}))
+				_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+				require.NoError(t, err)
+				row := UsageEvent{Source: "fixture", Model: "synthetic-unpriced-model", InputTokens: 10, OccurredAt: start, DedupKey: name}
+				if tc.priced {
+					row.Cost = &money.Money{}
+					row.CostStatus = "exact"
+					row.CostSource = "reported"
+				}
+				record := FederationHubRecord{UID: name, Hash: "hash", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: name, Project: "example/repo", Agent: "codex", StartedAt: &start}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{row}}}
+				_, err = d.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", []FederationHubRecord{record})
+				require.NoError(t, err)
+			}
+			pulse, err := d.readFederationPulse(ctx, "2026-07-28", 3, time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC))
+			require.NoError(t, err)
+			assert.False(t, pulse.Suppressed)
+			assert.Equal(t, tc.state, pulse.Totals["cost_microdollars"].State)
+			assert.Equal(t, tc.value, pulse.Totals["cost_microdollars"].Value)
+			assert.Equal(t, Ptr(int64(30)), pulse.Totals["tokens"].Value)
+			require.Len(t, pulse.Models, 1)
+			assert.Equal(t, tc.state, pulse.Models[0].Metrics["cost_microdollars"].State)
+			assert.Equal(t, tc.value, pulse.Models[0].Metrics["cost_microdollars"].Value)
+		})
+	}
+}

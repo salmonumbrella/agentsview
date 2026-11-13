@@ -723,3 +723,28 @@ func assertDigestDayMatchesReportingDay(
 	}
 	assert.Equal(t, hourDigests, digest.HourDigests)
 }
+
+func TestExportHourAndDayCountMessageLessExistence(t *testing.T) {
+	dataDir := testDataDir(t)
+	database := dbtest.OpenTestDBAt(t, filepath.Join(dataDir, "sessions.db"))
+	for _, id := range []string{"a", "b", "c"} {
+		require.NoError(t, database.UpsertSession(t.Context(), db.Session{ID: id, Project: "example/repo", Agent: "codex", StartedAt: dbtest.Ptr("2026-07-28T09:00:00Z")}))
+	}
+	require.NoError(t, database.Close())
+	now := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	dayOut, _, err := executeExportSessionsCommand(newExportReportingTestRoot(now), "export", "day", "2026-07-28")
+	require.NoError(t, err)
+	var day export.ReportingDay
+	require.NoError(t, json.Unmarshal([]byte(dayOut), &day))
+	require.Len(t, day.Hours, 24)
+	assert.Equal(t, 3, day.Hours[9].Activity.Totals.NewSessions)
+	assert.Equal(t, 1, day.Hours[9].Activity.Totals.NewProjects)
+	assert.Equal(t, 3, day.Hours[9].Activity.Totals.NewUntimedSessions)
+	hourOut, _, err := executeExportSessionsCommand(newExportReportingTestRoot(now), "export", "hour", "2026-07-28-09")
+	require.NoError(t, err)
+	var hour export.ReportingHour
+	require.NoError(t, json.Unmarshal([]byte(hourOut), &hour))
+	assert.Equal(t, 3, hour.Activity.Totals.NewSessions)
+	assert.Equal(t, 1, hour.Activity.Totals.NewProjects)
+	assert.Equal(t, day.Hours[9], hour)
+}

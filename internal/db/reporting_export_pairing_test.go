@@ -54,6 +54,9 @@ func TestJointReportingUsageSupportFollowsPricedSurvivors(t *testing.T) {
 		assert.EqualValues(t, 40, contributors[reportingJointContributor{"four", "four"}].usage.inputTokens)
 		assert.EqualValues(t, 20_000, contributors[reportingJointContributor{"four", "four"}].usage.cost.Microdollars)
 		assert.True(t, contributors[reportingJointContributor{"four", "four"}].costObserved)
+		assert.False(t, contributors[reportingJointContributor{"one", "one"}].unpriced)
+		assert.True(t, contributors[reportingJointContributor{"three", "one"}].unpriced)
+		assert.True(t, contributors[reportingJointContributor{"four", "four"}].unpriced)
 	}
 }
 

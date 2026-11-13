@@ -94,26 +94,28 @@ func TestFederationPulseResponseAndOverflow(t *testing.T) {
 			_, _ = io.WriteString(w, `{"padding":"`+strings.Repeat("x", 4<<20)+`"}`)
 			return
 		}
-		_, _ = io.WriteString(w, `{"since":"2025-01-02","closed_through":"2025-01-03T12:00:00Z","totals":{"tokens":{"value":null,"state":"suppressed"},"cost_microdollars":{"value":null,"state":"unavailable"}},"projects":[{"key":"safe","totals":{"tokens":{"value":60,"state":"available"}}}],"suppressed":true}`)
+		_, _ = io.WriteString(w, `{"since":"2025-01-02","closed_through":"2025-01-03T12:00:00Z","totals":{"tokens":{"value":null,"state":"suppressed"},"cost_microdollars":{"value":600,"state":"partial"}},"projects":[{"key":"safe","totals":{"tokens":{"value":60,"state":"available"}}}],"suppressed":true}`)
 	}))
 	t.Cleanup(daemon.Close)
 	var pulse db.FederationPulse
 	require.NoError(t, fetchFederationPulse(t.Context(), daemon.URL, "operator", "2025-01-02", &pulse))
 	assert.Nil(t, pulse.Totals["tokens"].Value)
 	assert.Equal(t, "suppressed", pulse.Totals["tokens"].State)
-	assert.Equal(t, "unavailable", pulse.Totals["cost_microdollars"].State)
+	assert.Equal(t, "partial", pulse.Totals["cost_microdollars"].State)
+	require.NotNil(t, pulse.Totals["cost_microdollars"].Value)
+	assert.EqualValues(t, 600, *pulse.Totals["cost_microdollars"].Value)
 	require.Len(t, pulse.Projects, 1)
 	require.NotNil(t, pulse.Projects[0].Totals["tokens"].Value)
 	assert.EqualValues(t, 60, *pulse.Projects[0].Totals["tokens"].Value)
 	encoded, err := json.Marshal(pulse)
 	require.NoError(t, err)
 	assert.Contains(t, string(encoded), `"tokens":{"value":null,"state":"suppressed"}`)
-	assert.Contains(t, string(encoded), `"cost_microdollars":{"value":null,"state":"unavailable"}`)
+	assert.Contains(t, string(encoded), `"cost_microdollars":{"value":600,"state":"partial"}`)
 	var out bytes.Buffer
 	require.NoError(t, printFederationPulse(&out, pulse))
 	assert.Contains(t, out.String(), "tokens: 60")
 	assert.Contains(t, out.String(), "tokens: suppressed")
-	assert.Contains(t, out.String(), "cost_microdollars: unavailable")
+	assert.Contains(t, out.String(), "cost_microdollars: 600 (partial)")
 	assert.Contains(t, out.String(), "withheld")
 	oversize = true
 	err = fetchFederationPulse(t.Context(), daemon.URL, "operator", "2025-01-02", &pulse)
