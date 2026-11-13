@@ -182,7 +182,6 @@ func (s *Service) Push(ctx context.Context) (PushResult, error) {
 			if err != nil {
 				var peer *peerHTTPError
 				if errors.As(err, &peer) && peer.Status == http.StatusConflict {
-					view.Committed = ack.Committed
 					break
 				}
 				if errors.As(err, &peer) && peer.Status == http.StatusBadRequest {

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -94,6 +95,8 @@ func TestGrantChangesWaitForPush(t *testing.T) {
 			digest, err := export.DigestCanonical(policy)
 			require.NoError(t, err)
 			entered, release := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
 			batches := 0
 			hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
@@ -111,6 +114,7 @@ func TestGrantChangesWaitForPush(t *testing.T) {
 				}
 			}))
 			t.Cleanup(hub.Close)
+			t.Cleanup(unblock)
 			file := filepath.Join(testutil.PrivateTempDir(t), "credential")
 			require.NoError(t, os.WriteFile(file, []byte("avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), 0600))
 			svc := NewService("spoke", "spoke", policy, archive)
@@ -148,7 +152,13 @@ func TestGrantChangesWaitForPush(t *testing.T) {
 			assert.Contains(t, same.ConsentJSON, shareDeliveryNotice)
 			done := make(chan error, 1)
 			go func() { _, e := svc.Push(ctx); done <- e }()
-			<-entered
+			select {
+			case <-entered:
+			case err := <-done:
+				require.FailNow(t, "push ended before entering batch handler", "%v", err)
+			case <-time.After(10 * time.Second):
+				require.FailNow(t, "push did not enter batch handler")
+			}
 			timed, cancel := context.WithTimeout(ctx, 20*time.Millisecond) //nolint:kennlint // deadlinetest: push holds the semaphore until the deadline
 			defer cancel()
 			mutate := func(c context.Context) error {
@@ -161,7 +171,7 @@ func TestGrantChangesWaitForPush(t *testing.T) {
 			current, err := archive.GetFederationShare(ctx, link.UID, shares[0].UID)
 			require.NoError(t, err)
 			assert.Equal(t, "active", current.State)
-			close(release)
+			unblock()
 			require.NoError(t, <-done)
 			require.NoError(t, mutate(ctx))
 			_, err = svc.Push(ctx)
@@ -173,12 +183,12 @@ func TestGrantChangesWaitForPush(t *testing.T) {
 
 func TestPushLargeAcknowledgmentAndBatchLimit(t *testing.T) {
 	for _, tc := range []struct {
-		name              string
-		count, modelBytes int
-		refused           bool
+		name          string
+		count, models int
+		refused       bool
 	}{
 		{"large acknowledgment", 1000, 0, true},
-		{"large records split", 2, 4 << 20, false},
+		{"large records split", 2, 30000, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
@@ -189,6 +199,8 @@ func TestPushLargeAcknowledgmentAndBatchLimit(t *testing.T) {
 			digest, err := export.DigestCanonical(policy)
 			require.NoError(t, err)
 			var sizes []int
+			var batches [][]string
+			var acknowledgmentBytes int
 			var committed int64
 			hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.Method {
@@ -202,6 +214,11 @@ func TestPushLargeAcknowledgmentAndBatchLimit(t *testing.T) {
 					sizes = append(sizes, len(data))
 					var batch Batch
 					require.NoError(t, json.Unmarshal(data, &batch))
+					var ids []string
+					for _, record := range batch.Records {
+						ids = append(ids, record.RecordUID)
+					}
+					batches = append(batches, ids)
 					committed = batch.Sequence
 					refused := map[string]string{}
 					if tc.refused {
@@ -209,7 +226,10 @@ func TestPushLargeAcknowledgmentAndBatchLimit(t *testing.T) {
 							refused[record.RecordUID] = db.FederationCollision
 						}
 					}
-					_ = json.NewEncoder(w).Encode(BatchAck{Committed: committed, Refused: refused})
+					ack, e := json.Marshal(BatchAck{Committed: committed, Refused: refused})
+					require.NoError(t, e)
+					acknowledgmentBytes = len(ack)
+					_, _ = w.Write(ack)
 				}
 			}))
 			t.Cleanup(hub.Close)
@@ -226,24 +246,34 @@ func TestPushLargeAcknowledgmentAndBatchLimit(t *testing.T) {
 					return e
 				}
 				for i := 0; i < tc.count; i++ {
-					id := fmt.Sprintf("%080d", i)
-					if _, e := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES(?,'fixture','install','claude',?,'2026-01-02T00:00:00Z',1)`, id, id); e != nil {
+					id := fmt.Sprintf("fx:%077d", i)
+					if _, e := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES(?,'fixture','install','fx',?,'2026-01-02T00:00:00Z',1)`, id, id); e != nil {
 						return e
 					}
-					if _, e := tx.ExecContext(ctx, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES(?,'install','claude',?)`, id, id); e != nil {
+					if _, e := tx.ExecContext(ctx, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES(?,'install','fx',?)`, id, id); e != nil {
 						return e
 					}
 					if _, e := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES(?,'fixture','install','2026-01-01T00:00:00Z','resolved',1,?,'git_remote',?)`, id, remote, key); e != nil {
 						return e
 					}
-					if tc.modelBytes > 0 {
-						if _, e := tx.ExecContext(ctx, `INSERT INTO usage_events(session_id,source,model,input_tokens,occurred_at,dedup_key) VALUES(?,'fixture',?,1,'2026-01-02T00:00:00Z',?)`, id, strings.Repeat("m", tc.modelBytes), id); e != nil {
-							return e
-						}
-					}
 				}
 				return nil
 			}))
+			if tc.models > 0 {
+				// FX's usage-v2 model array can contain distinct models. The session
+				// writer bounds each to 128 bytes; export repeats it as key and value.
+				for i := 0; i < tc.count; i++ {
+					id := fmt.Sprintf("fx:%077d", i)
+					start := "2026-01-02T00:00:00Z"
+					events := make([]db.UsageEvent, 0, tc.models)
+					for j := 0; j < tc.models; j++ {
+						model := fmt.Sprintf("%s%08d", strings.Repeat("m", 120), j)
+						events = append(events, db.UsageEvent{SessionID: id, Source: "session", Model: model, InputTokens: 1, OccurredAt: start, DedupKey: "session:" + id + "|" + model})
+					}
+					_, err = archive.WriteSessionBatchAtomic(ctx, []db.SessionBatchWrite{{Session: db.Session{ID: id, Project: "fixture", Machine: "install", Agent: "fx", FilePath: &id, StartedAt: &start, MessageCount: 1}, UsageEvents: events}})
+					require.NoError(t, err)
+				}
+			}
 			consent, err := json.Marshal(SharePreview{DeliveryNotice: shareDeliveryNotice})
 			require.NoError(t, err)
 			require.NoError(t, archive.PutFederationShare(ctx, db.FederationShare{UID: "share", LinkUID: link.UID, NormalizedRemote: remote, Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: string(consent), PolicyDigest: digest}))
@@ -251,15 +281,24 @@ func TestPushLargeAcknowledgmentAndBatchLimit(t *testing.T) {
 			require.NoError(t, err)
 			if tc.refused {
 				assert.Equal(t, 1000, result.Refused)
+				assert.Greater(t, acknowledgmentBytes, 64<<10)
+				assert.Equal(t, int64(1), committed)
 				ledger, e := archive.FederationLedger(ctx, "share")
 				require.NoError(t, e)
 				require.Len(t, ledger, 1000)
-				for _, row := range ledger {
+				for i := 0; i < 1000; i++ {
+					id := fmt.Sprintf("fx:%077d", i)
+					row, ok := ledger[id]
+					assert.True(t, ok)
+					assert.Equal(t, id, row.RecordUID)
 					assert.Equal(t, "refused", row.State)
 				}
 			} else {
 				assert.Equal(t, 2, result.Sent)
 				require.Len(t, sizes, 2)
+				require.Len(t, batches, 2)
+				assert.Equal(t, []string{fmt.Sprintf("fx:%077d", 0)}, batches[0])
+				assert.Equal(t, []string{fmt.Sprintf("fx:%077d", 1)}, batches[1])
 				for _, size := range sizes {
 					assert.LessOrEqual(t, size, 16<<20)
 				}

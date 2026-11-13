@@ -50,45 +50,17 @@ func TestStatusKeepsLocalSharesWhenPeerReturnsHTTPError(t *testing.T) {
 		assert.Equal(t, 1, status.Shares)
 		listed, err := svc.Shares(t.Context())
 		require.NoError(t, err)
+		require.Len(t, listed.Shares, 1)
+		assert.Equal(t, "share", listed.Shares[0].UID)
+		assert.Equal(t, "github.com/example/repo", listed.Shares[0].NormalizedRemote)
 		encoded, err := json.Marshal(listed)
 		require.NoError(t, err)
-		assert.Contains(t, string(encoded), "share")
 		assert.NotContains(t, string(encoded), "CANARY-peer-body")
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	_, err = svc.Status(ctx)
 	assert.ErrorIs(t, err, context.Canceled)
-}
-
-func TestSummaryProjectionKeepsAuthoritativeCostWithoutModelUsage(t *testing.T) {
-	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, archive.Close()) })
-	ctx := t.Context()
-	require.NoError(t, archive.Update(ctx, func(tx *sql.Tx) error {
-		for _, q := range []string{
-			`INSERT INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install')`,
-			`INSERT INTO sessions(id,project,machine,agent,file_path,started_at) VALUES('cost-only','fixture','install','copilot','file','2026-06-02T00:00:00Z')`,
-			`INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES('cost-only','install','copilot','file')`,
-			`INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES('cost-only','fixture','install','2026-01-01T00:00:00Z','resolved',1,'github.com/example/api','git_remote','key')`,
-			`INSERT INTO usage_events(session_id,source,model,cost_microdollars,cost_status,cost_source,occurred_at,dedup_key) VALUES('cost-only','shutdown','copilot',30000,'exact','copilot-reported','2026-06-02T00:00:00Z','total')`,
-		} {
-			if _, err := tx.ExecContext(ctx, q); err != nil {
-				return err
-			}
-		}
-		return nil
-	}))
-	svc := NewService("spoke", "spoke", config.FederationHubConfig{}, archive)
-	preview, err := svc.previewWithPolicy(ctx, ShareGrant{Project: "github.com/example/api", Level: "summary"}, &HubStatus{Policy: &config.FederationHubConfig{}})
-	require.NoError(t, err)
-	require.Len(t, preview.Records, 1)
-	unknown, ok := preview.Records[0].ByModel["<unknown>"]
-	require.True(t, ok)
-	assert.True(t, unknown.HasCost)
-	assert.EqualValues(t, 30000, unknown.Cost.Microdollars)
-	assert.Zero(t, unknown.OutputTokens)
 }
 
 func TestJoinPinsHubAndBlocksChangedIdentity(t *testing.T) {

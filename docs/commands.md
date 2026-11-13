@@ -2960,9 +2960,11 @@ session’s start. Model-filtered session summaries retain session-level message
 counts and show the selected model's usage; transcript and tool analytics have
 no message or tool rows for summary shares.
 On PostgreSQL, DuckDB and ClickHouse, an activity bucket is omitted when a
-session in it has neither message rows nor federation usage events, including
-sessions with zero stored counts. The replica cannot determine that session's
-activity counts without those inputs.
+selected session in it has neither message rows nor federation usage events.
+The replica cannot determine that session's activity counts without those
+inputs, so the entire bucket is omitted, including otherwise known activity.
+This can also affect ordinary message-less sessions. A machine named
+`federated` alone does not establish ownership.
 
 Selection requires the session's own unambiguous repository identity and proof
 that it came from this installation. Imported and uncertain sessions are

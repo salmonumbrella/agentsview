@@ -65,8 +65,10 @@ func TestFederationBatchOwnershipAndRevocation(t *testing.T) {
 	assert.Empty(t, ack.Refused)
 	var modified string
 	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT local_modified_at FROM sessions WHERE id='session'`).Scan(&modified))
-	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 2, "unchanged", []FederationHubRecord{record})
+	ack, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 2, "unchanged", []FederationHubRecord{record})
 	require.NoError(t, err)
+	assert.False(t, ack.Changed)
+	assert.Equal(t, int64(2), ack.Committed)
 	var after string
 	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT local_modified_at FROM sessions WHERE id='session'`).Scan(&after))
 	assert.Equal(t, modified, after)
@@ -189,7 +191,7 @@ func TestFederationSessionOriginsDistinguishesOwners(t *testing.T) {
 	d := testDB(t)
 	ctx := t.Context()
 	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
-		for _, q := range []string{`INSERT INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','host')`, `INSERT INTO sessions(id,project,machine,agent,file_path) VALUES('local','p','host','claude','file')`, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES('local','host','claude','file')`, `INSERT INTO sessions(id,project,machine,agent) VALUES('old','p','other','claude')`, `INSERT INTO sessions(id,project,machine,agent) VALUES('shared','p','federated','claude')`, `INSERT INTO federation_records(share_uid,record_uid,session_id,hash) VALUES('share','shared','shared','hash')`} {
+		for _, q := range []string{`INSERT INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','host')`, `INSERT INTO sessions(id,project,machine,agent,file_path) VALUES('local','p','host','claude','file')`, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES('local','host','claude','file')`, `INSERT INTO sessions(id,project,machine,agent) VALUES('old','p','federated','claude')`, `INSERT INTO sessions(id,project,machine,agent) VALUES('shared','p','federated','claude')`, `INSERT INTO federation_records(share_uid,record_uid,session_id,hash) VALUES('share','shared','shared','hash')`} {
 			if _, e := tx.ExecContext(ctx, q); e != nil {
 				return e
 			}

@@ -30,8 +30,12 @@ func TestHubRejectsWholeBatchForKindOrHash(t *testing.T) {
 	payload := SummaryRecord{SessionID: "session", Remote: remote, ProjectKey: key, Agent: "claude"}
 	hash, err := export.DigestCanonical(payload)
 	require.NoError(t, err)
+	prefix := payload
+	prefix.SessionID = "valid-prefix"
+	prefixHash, err := export.DigestCanonical(prefix)
+	require.NoError(t, err)
 	for _, r := range []BatchRecord{{RecordUID: "session", Kind: "unknown", Hash: hash, Payload: payload}, {RecordUID: "session", Kind: "session_summary", Hash: "wrong", Payload: payload}} {
-		_, err = hub.ApplyBatch(t.Context(), enrollment.UID, "spoke", "share", Batch{Protocol: 1, SpokeInstance: "spoke", ShareUID: "share", Epoch: 1, Sequence: 1, Records: []BatchRecord{r}})
+		_, err = hub.ApplyBatch(t.Context(), enrollment.UID, "spoke", "share", Batch{Protocol: 1, SpokeInstance: "spoke", ShareUID: "share", Epoch: 1, Sequence: 1, Records: []BatchRecord{{RecordUID: "valid-prefix", Kind: "session_summary", Hash: prefixHash, Payload: prefix}, r}})
 		require.ErrorContains(t, err, "invalid federation batch")
 		var count int
 		require.NoError(t, archive.Reader().QueryRow(t.Context(), `SELECT count(*) FROM sessions`).Scan(&count))
