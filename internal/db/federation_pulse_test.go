@@ -1455,3 +1455,36 @@ func TestFederationPulseRejectsCrossContributorCostOverflow(t *testing.T) {
 	_, err = d.ExportReportingDay(ctx, ReportingExportOptions{Date: now.AddDate(0, 0, -1), Now: now, SchemaVersion: export.ReportingJointSchemaVersion})
 	require.ErrorIs(t, err, money.ErrOverflow)
 }
+
+func TestFederationPulseVisitsDayWithOnlyIntervalSpill(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		for _, q := range []string{
+			`INSERT INTO federation_enrollments(enrollment_uid,spoke_archive_id,member,credential_sha256) VALUES('e','s','a','digest')`,
+			`INSERT INTO federation_hub_shares(share_uid,enrollment_uid,normalized_remote,project_key,level,attribution,audience,policy_digest,epoch,state) VALUES('h','e','example/a','project','summary','pooled','operators','policy',1,'active')`,
+			`INSERT INTO sessions(id,project,machine,agent,started_at,message_count) VALUES('session','example/a','federated','codex','2026-07-28T23:59:00Z',2)`,
+			`INSERT INTO federation_records(share_uid,record_uid,session_id,hash) VALUES('h','r','session','hash')`,
+			`INSERT INTO messages(session_id,ordinal,role,content,timestamp) VALUES('session',0,'user','fixture','2026-07-28T23:59:00Z'),('session',1,'assistant','fixture','2026-07-30T00:01:00Z')`,
+		} {
+			if _, err := tx.ExecContext(ctx, q); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	now := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
+	var dates []string
+	_, err := d.readFederationPulseSnapshot(ctx, "2026-07-29", now, nil, func(_ *sql.Tx, at, _ time.Time, _ map[string]federationPulseOwner, _ reportingDaySource) error {
+		dates = append(dates, at.Format(time.DateOnly))
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"2026-07-29"}, dates)
+	pulse, err := d.readFederationPulse(ctx, "2026-07-29", 1, now)
+	require.NoError(t, err)
+	assert.Equal(t, Ptr(int64(1)), pulse.Totals["sessions"].Value)
+	day, err := d.ExportReportingDay(ctx, ReportingExportOptions{Date: now.AddDate(0, 0, -1), Now: now})
+	require.NoError(t, err)
+	assert.InDelta(t, 4, day.Hours[0].Activity.Totals.AgentMinutes, 0.0001)
+}
