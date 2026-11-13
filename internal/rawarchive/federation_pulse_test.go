@@ -14,7 +14,7 @@ import (
 
 // Both managed copy paths must preserve the original publication constraint.
 func TestManagedCopiesKeepFederationPulseHistory(t *testing.T) {
-	for _, method := range []string{"restore", "seed"} {
+	for _, method := range []string{"restore", "seed", "restore-old-seed"} {
 		t.Run(method, func(t *testing.T) {
 			ctx := t.Context()
 			t.Setenv("HOME", t.TempDir())
@@ -40,12 +40,28 @@ func TestManagedCopiesKeepFederationPulseHistory(t *testing.T) {
 			record := db.FederationHubRecord{UID: "a-older", Hash: "initial", Remote: "example/repo", ProjectKey: "project", Write: db.SessionBatchWrite{Session: db.Session{ID: "a-older", Project: "example/repo", Agent: "codex", StartedAt: &older}, Signals: db.SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []db.UsageEvent{{Source: "federation", Model: "model", InputTokens: 7, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: older, DedupKey: "model"}}}}
 			_, err = database.CommitFederationBatch(ctx, "e-a", "s-a", "h-a", "policy", 1, 2, "batch-2", []db.FederationHubRecord{record})
 			require.NoError(t, err)
-			if method == "seed" {
+			var oldBackupPath, oldSnapshot string
+			if method == "seed" || method == "restore-old-seed" {
 				// Capture the source before any pulse publication. The later seed
 				// must join the authority that the original creates afterward.
 				require.NoError(t, database.Close())
 				_, err = Capture(ctx, opts)
 				require.NoError(t, err)
+				if method == "restore-old-seed" {
+					seed := filepath.Join(t.TempDir(), "seed")
+					_, err = Seed(ctx, filepath.Join(opts.Destination, "capture.json"), seed, nil)
+					require.NoError(t, err)
+					seedDB, err := db.OpenIsolatedContext(ctx, filepath.Join(seed, "sessions.db"))
+					require.NoError(t, err)
+					archive, err := Open(ctx, seedDB, seed, nil)
+					require.NoError(t, err)
+					oldBackupPath = filepath.Join(t.TempDir(), "old-backup")
+					backup, err := archive.Backup(ctx, oldBackupPath, opts.Settings, "test")
+					require.NoError(t, err)
+					oldSnapshot = backup.SnapshotID
+					require.NoError(t, archive.Close())
+					require.NoError(t, seedDB.Close())
+				}
 				database, err = db.OpenIsolatedContext(ctx, filepath.Join(opts.DataDir, "sessions.db"))
 				require.NoError(t, err)
 			}
@@ -70,9 +86,13 @@ func TestManagedCopiesKeepFederationPulseHistory(t *testing.T) {
 				require.NoError(t, database.Close())
 				_, err = Restore(ctx, backupPath, backup.SnapshotID, target, nil)
 				require.NoError(t, err)
-			} else {
+			} else if method == "seed" {
 				require.NoError(t, database.Close())
 				_, err = Seed(ctx, filepath.Join(opts.Destination, "capture.json"), target, nil)
+				require.NoError(t, err)
+			} else {
+				require.NoError(t, database.Close())
+				_, err = Restore(ctx, oldBackupPath, oldSnapshot, target, nil)
 				require.NoError(t, err)
 			}
 			copied, err := db.OpenIsolatedContext(ctx, filepath.Join(target, "sessions.db"))
