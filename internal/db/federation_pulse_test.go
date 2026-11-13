@@ -963,6 +963,8 @@ func TestFederationPulseLinkFactsDoNotExposeRefusalDetails(t *testing.T) {
 	require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enrollment-private", SpokeArchiveID: "archive-private", Member: "member-private", SpokeName: "fixture-spoke", CredentialSHA256: "digest"}))
 	_, err := d.PutFederationHubShare(ctx, "archive-private", FederationHubShare{UID: "share-private", EnrollmentUID: "enrollment-private", Remote: "example/private", ProjectKey: "private-project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
 	require.NoError(t, err)
+	_, err = d.PutFederationHubShare(ctx, "archive-private", FederationHubShare{UID: "share-second", EnrollmentUID: "enrollment-private", Remote: "example/second", ProjectKey: "second-project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+	require.NoError(t, err)
 	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `UPDATE federation_enrollments SET last_handshake_at='2026-07-28T10:00:00Z', last_delivery_at='2026-07-28T09:00:00Z'`); err != nil {
 			return err
@@ -980,7 +982,7 @@ func TestFederationPulseLinkFactsDoNotExposeRefusalDetails(t *testing.T) {
 	assert.Equal(t, Ptr("2026-07-28T09:00:00Z"), link.LastDeliveryAt)
 	assert.Nil(t, link.BacklogLagSeconds.Value)
 	assert.Equal(t, "unavailable", link.BacklogLagSeconds.State)
-	assert.Equal(t, []string{"collision", "other"}, link.LatestBatchRefusals)
+	assert.Equal(t, []string{"collision", "other"}, link.StoredShareBatchRefusals)
 	encoded, err := json.Marshal(got)
 	require.NoError(t, err)
 	for _, secret := range []string{"enrollment-private", "archive-private", "member-private", "share-private", "private-project", "record-private", "unrecognized detail"} {
@@ -1385,4 +1387,46 @@ func TestFederationPulseMidnightEvidenceCountsSessionOnce(t *testing.T) {
 	assert.True(t, digest.Days[0].HasData)
 	assert.True(t, digest.Days[1].HasData)
 	assert.Equal(t, []string{day1.Digest, day2.Digest}, []string{digest.Days[0].DayDigest, digest.Days[1].DayDigest})
+}
+
+func TestFederationPulseStoredRefusalsUnionAcrossShares(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "e", SpokeArchiveID: "spoke", Member: "member", SpokeName: "spoke", CredentialSHA256: "digest"}))
+	read := func() FederationPulseLink {
+		pulse, err := d.readFederationPulse(ctx, "", 1, time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC))
+		require.NoError(t, err)
+		require.Len(t, pulse.Links, 1)
+		return pulse.Links[0]
+	}
+	assert.Empty(t, read().StoredShareBatchRefusals)
+	for _, share := range []string{"a", "b"} {
+		_, err := d.PutFederationHubShare(ctx, "spoke", FederationHubShare{UID: share, EnrollmentUID: "e", Remote: "example/" + share, ProjectKey: share, Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+		require.NoError(t, err)
+	}
+	assert.Empty(t, read().StoredShareBatchRefusals)
+	require.NoError(t, d.UpsertSession(ctx, Session{ID: "local", Project: "local", Machine: "host", Agent: "codex"}))
+	collision := FederationHubRecord{UID: "secret-record", Hash: "hash", Remote: "example/a", ProjectKey: "a", Write: SessionBatchWrite{Session: Session{ID: "local", Project: "example/a", Agent: "codex"}}}
+	refused, err := d.CommitFederationBatch(ctx, "e", "spoke", "a", "policy", 1, 1, "batch-a", []FederationHubRecord{collision})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"secret-record": FederationCollision}, refused.Refused)
+	assert.Nil(t, read().LastDeliveryAt)
+	start := "2026-07-28T09:00:00Z"
+	accepted := FederationHubRecord{UID: "b-record", Hash: "hash", Remote: "example/b", ProjectKey: "b", Write: SessionBatchWrite{Session: Session{ID: "remote", Project: "example/b", Agent: "codex", StartedAt: &start}, Signals: SessionSignalUpdate{Outcome: "unknown"}}}
+	_, err = d.CommitFederationBatch(ctx, "e", "spoke", "b", "policy", 1, 1, "batch-b", []FederationHubRecord{accepted})
+	require.NoError(t, err)
+	link := read()
+	assert.Equal(t, []string{"collision"}, link.StoredShareBatchRefusals)
+	assert.NotNil(t, link.LastDeliveryAt)
+	assert.Equal(t, "unavailable", link.BacklogLagSeconds.State)
+	encoded, err := json.Marshal(link)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"stored_share_batch_refusals":["collision"]`)
+	for _, secret := range []string{"secret-record", "example/a", "member", "session ID unavailable"} {
+		assert.NotContains(t, string(encoded), secret)
+	}
+	clean := FederationHubRecord{UID: "a-record", Hash: "hash", Remote: "example/a", ProjectKey: "a", Write: SessionBatchWrite{Session: Session{ID: "clean", Project: "example/a", Agent: "codex", StartedAt: &start}, Signals: SessionSignalUpdate{Outcome: "unknown"}}}
+	_, err = d.CommitFederationBatch(ctx, "e", "spoke", "a", "policy", 1, 2, "batch-a-clean", []FederationHubRecord{clean})
+	require.NoError(t, err)
+	assert.Empty(t, read().StoredShareBatchRefusals)
 }

@@ -133,7 +133,7 @@ func TestFederationPulseTextUsesReleasedStatesAndSeparateLinks(t *testing.T) {
 			"sessions": {Value: &count, State: "available"},
 			"tokens":   {State: "suppressed"}, "cost_microdollars": {State: "unavailable"},
 		},
-		Links: []db.FederationPulseLink{{SpokeName: "spoke", State: "contacted", LastContactAt: &contact, LatestBatchRefusals: []string{"collision"}}},
+		Links: []db.FederationPulseLink{{SpokeName: "spoke", State: "contacted", LastContactAt: &contact, StoredShareBatchRefusals: []string{"collision"}}},
 	}
 	var text bytes.Buffer
 	require.NoError(t, printFederationPulse(&text, pulse))
@@ -142,7 +142,7 @@ func TestFederationPulseTextUsesReleasedStatesAndSeparateLinks(t *testing.T) {
 	assert.Contains(t, text.String(), "cost_microdollars: unavailable")
 	assert.Contains(t, text.String(), "Some values are withheld.")
 	assert.Contains(t, text.String(), "Spoke: spoke; state: contacted; last contact: 2025-01-03T10:00:00Z; last accepting batch: unavailable; backlog lag: unavailable")
-	assert.Contains(t, text.String(), "Latest stored batch refusals: collision")
+	assert.Contains(t, text.String(), "Stored per-share batch refusals: collision")
 }
 
 func TestFederationPulseDefaultStartIsNotDisclosed(t *testing.T) {
@@ -372,4 +372,64 @@ func TestFederationPulseSurfacesDateInputError(t *testing.T) {
 	var pulse db.FederationPulse
 	err := fetchFederationPulse(t.Context(), daemon.URL, "", "2026-02-30", &pulse)
 	assert.ErrorContains(t, err, "since must be a non-future date in YYYY-MM-DD format")
+}
+
+func TestFederationPulseCommandStoredRefusalsAcrossShares(t *testing.T) {
+	dir := testDataDir(t)
+	t.Setenv("AGENTSVIEW_NO_DAEMON", "1")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.toml"), []byte("[federation]\nrole = 'hub'\n"), 0600))
+	database, err := db.OpenIsolated(t.Context(), filepath.Join(dir, "sessions.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, database.Close()) })
+	ctx := t.Context()
+	require.NoError(t, database.CreateFederationEnrollment(ctx, db.FederationEnrollment{UID: "e", SpokeArchiveID: "spoke", Member: "member", SpokeName: "fixture-spoke", CredentialSHA256: "digest"}))
+	for _, share := range []string{"a", "b"} {
+		_, err := database.PutFederationHubShare(ctx, "spoke", db.FederationHubShare{UID: share, EnrollmentUID: "e", Remote: "example/" + share, ProjectKey: share, Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+		require.NoError(t, err)
+	}
+	require.NoError(t, database.UpsertSession(ctx, db.Session{ID: "local", Project: "local", Machine: "host", Agent: "codex"}))
+	collision := db.FederationHubRecord{UID: "secret-record", Hash: "hash", Remote: "example/a", ProjectKey: "a", Write: db.SessionBatchWrite{Session: db.Session{ID: "local", Project: "example/a", Agent: "codex"}}}
+	refused, err := database.CommitFederationBatch(ctx, "e", "spoke", "a", "policy", 1, 1, "batch-a", []db.FederationHubRecord{collision})
+	require.NoError(t, err)
+	assert.Equal(t, db.FederationCollision, refused.Refused["secret-record"])
+	accepted := db.FederationHubRecord{UID: "b-record", Hash: "hash", Remote: "example/b", ProjectKey: "b", Write: db.SessionBatchWrite{Session: db.Session{ID: "remote", Project: "example/b", Agent: "codex"}, Signals: db.SessionSignalUpdate{Outcome: "unknown"}}}
+	_, err = database.CommitFederationBatch(ctx, "e", "spoke", "b", "policy", 1, 1, "batch-b", []db.FederationHubRecord{accepted})
+	require.NoError(t, err)
+	svc := federation.NewService("hub", "archive", config.FederationHubConfig{MinGroupSize: 3}, database)
+	pulse, err := svc.Pulse(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, pulse.Links, 1)
+	assert.Equal(t, []string{"collision"}, pulse.Links[0].StoredShareBatchRefusals)
+	assert.NotNil(t, pulse.Links[0].LastDeliveryAt)
+	daemon := httptest.NewUnstartedServer(nil)
+	port := daemon.Listener.Addr().(*net.TCPAddr).Port
+	srv := server.New(config.Config{Host: "127.0.0.1", Port: port}, database, nil, server.WithFederation(svc))
+	daemon.Config.Handler = srv.Handler()
+	daemon.Start()
+	t.Cleanup(daemon.Close)
+	ep := serverEndpoint(t, daemon)
+	_, err = WriteDaemonRuntime(dir, ep.Host, ep.Port, version, false)
+	require.NoError(t, err)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, daemon.URL+"/api/v1/federation/pulse", nil)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), `"stored_share_batch_refusals":["collision"]`)
+	jsonOut, err := executeCommand(newRootCommand(), "federation", "pulse", "--json")
+	require.NoError(t, err)
+	assert.Contains(t, jsonOut, `"stored_share_batch_refusals":["collision"]`)
+	textOut, err := executeCommand(newRootCommand(), "federation", "pulse")
+	require.NoError(t, err)
+	assert.Contains(t, textOut, "Stored per-share batch refusals: collision")
+	assert.Contains(t, textOut, "last accepting batch:")
+	assert.Contains(t, textOut, "backlog lag: unavailable")
+	for _, secret := range []string{"secret-record", "example/a", "session ID unavailable"} {
+		assert.NotContains(t, string(body), secret)
+		assert.NotContains(t, jsonOut, secret)
+		assert.NotContains(t, textOut, secret)
+	}
 }
