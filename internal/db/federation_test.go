@@ -104,3 +104,36 @@ func TestFederationCopyUsesNamedColumns(t *testing.T) {
 	assert.Equal(t, "spoke-a", rows[0].SpokeArchiveID)
 	assert.Equal(t, "member-a", rows[0].Member)
 }
+
+func TestFederationRevokedAfterLookupBeforeStamp(t *testing.T) {
+	database := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, database.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr-a", SpokeArchiveID: "spoke-a", Member: "member-a", CredentialSHA256: "digest-a"}))
+	reader, writer := database.rawReader(), database.rawWriter()
+	// A returned reader connection is closed, making the completed lookup observable.
+	reader.SetMaxIdleConns(0)
+	writer.SetMaxOpenConns(1)
+	conn, err := writer.Conn(ctx)
+	require.NoError(t, err)
+	defer conn.Close()
+	readClosed, writeWaits := reader.Stats().MaxIdleClosed, writer.Stats().WaitCount
+	result := make(chan error, 1)
+	go func() { _, err := database.AuthenticateFederationCredential(ctx, "digest-a", "spoke-a"); result <- err }()
+	require.Eventually(t, func() bool {
+		return reader.Stats().MaxIdleClosed > readClosed && writer.Stats().WaitCount > writeWaits
+	}, 10*time.Second, time.Second, "lookup must finish before the stamp waits for the writer")
+	_, err = conn.ExecContext(ctx, `UPDATE federation_enrollments SET revoked_at = 'revoked' WHERE enrollment_uid = 'enr-a'`)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+	select {
+	case err := <-result:
+		assert.ErrorIs(t, err, ErrFederationUnauthorized)
+	case <-time.After(10 * time.Second):
+		t.Fatal("authentication did not finish")
+	}
+	rows, err := database.ListFederationEnrollments(ctx)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Empty(t, rows[0].LastHandshakeAt)
+	assert.Equal(t, "revoked", rows[0].State)
+}

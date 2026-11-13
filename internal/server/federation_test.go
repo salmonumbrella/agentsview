@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -216,10 +217,38 @@ func TestFederationControlInputMessages(t *testing.T) {
 	srv := New(config.Config{Host: "127.0.0.1", Port: 8080}, database, nil, WithFederation(svc))
 	hub := httptest.NewServer(srv.Handler())
 	t.Cleanup(hub.Close)
+	enrollment, secret, err := svc.Enroll(t.Context(), "spoke-a", "member-a", "")
+	require.NoError(t, err)
+	require.NotEmpty(t, enrollment.UID)
+	padded, err := http.NewRequestWithContext(t.Context(), http.MethodPost, hub.URL+"/api/v1/federation/enrollments", strings.NewReader(`{"spoke_archive_id":" padded ","member":" member ","spoke_name":" laptop "}`))
+	require.NoError(t, err)
+	padded.Header.Set("Content-Type", "application/json")
+	padded.Header.Set("Origin", hub.URL)
+	created, err := http.DefaultClient.Do(padded)
+	require.NoError(t, err)
+	var createdBody struct {
+		Enrollment struct {
+			SpokeArchiveID string `json:"spoke_archive_id"`
+			Member         string `json:"member"`
+			SpokeName      string `json:"spoke_name"`
+		} `json:"enrollment"`
+		Credential string `json:"credential"`
+	}
+	require.NoError(t, json.NewDecoder(created.Body).Decode(&createdBody))
+	require.NoError(t, created.Body.Close())
+	require.Equal(t, http.StatusOK, created.StatusCode)
+	assert.Equal(t, "padded", createdBody.Enrollment.SpokeArchiveID)
+	assert.Equal(t, "member", createdBody.Enrollment.Member)
+	assert.Equal(t, "laptop", createdBody.Enrollment.SpokeName)
+	_, err = svc.Authenticate(t.Context(), createdBody.Credential, "padded")
+	require.NoError(t, err)
 	for _, tc := range []struct{ path, body, message string }{
 		{"/api/v1/federation/enrollments", `{"spoke_archive_id":" ","member":"member-a"}`, "spoke archive ID is required"},
 		{"/api/v1/federation/enrollments", `{"spoke_archive_id":"` + strings.Repeat("a", 129) + `","member":"member-a"}`, "spoke archive ID is too long"},
+		{"/api/v1/federation/enrollments", `{"spoke_archive_id":"a","member":"` + strings.Repeat("m", 129) + `"}`, "member is too long"},
+		{"/api/v1/federation/enrollments", `{"spoke_archive_id":"a","member":"m","spoke_name":"` + strings.Repeat("n", 257) + `"}`, "spoke name is too long"},
 		{"/api/v1/federation/enrollments/missing/revoke", `{}`, "enrollment not found"},
+		{"/api/v1/federation/enrollments", `{"spoke_archive_id":" spoke-a ","member":" member-a "}`, "an active enrollment already exists for this spoke archive and member; revoke it first"},
 	} {
 		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, hub.URL+tc.path, strings.NewReader(tc.body))
 		require.NoError(t, err)
@@ -232,7 +261,19 @@ func TestFederationControlInputMessages(t *testing.T) {
 		require.NoError(t, resp.Body.Close())
 		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 		assert.Contains(t, string(data), tc.message)
+		assert.NotContains(t, string(data), secret)
 	}
+	// Route registration is role-specific; change the synthetic service role after
+	// registration to exercise its defensive role refusal through the real server.
+	wrongRole := New(config.Config{Host: "127.0.0.1", Port: 8080}, database, nil, WithFederation(svc))
+	wrongRole.federation = federation.NewService("spoke", "spoke-a", config.FederationHubConfig{}, database)
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/v1/federation/enrollments", strings.NewReader(`{"spoke_archive_id":"a","member":"m"}`))
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	wrongRole.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "hub role required")
 }
 
 func TestFederationJoinControlMessages(t *testing.T) {
@@ -255,11 +296,21 @@ func TestFederationJoinControlMessages(t *testing.T) {
 	require.NoError(t, os.WriteFile(file, []byte(credential), 0600))
 	badFile := filepath.Join(testutil.PrivateTempDir(t), "bad")
 	require.NoError(t, os.WriteFile(badFile, []byte("bad"), 0600))
+	realDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "real-hub.db"))
+	realHub := federation.NewService("hub", "hub-a", policy, realDB)
+	enrollment, revoked, err := realHub.Enroll(t.Context(), "spoke-a", "member-a", "")
+	require.NoError(t, err)
+	require.NoError(t, realHub.Revoke(t.Context(), enrollment.UID))
+	realServer := New(config.Config{Host: "127.0.0.1", Port: 8080}, realDB, nil, WithFederation(realHub))
+	realHTTP := httptest.NewServer(realServer.Handler())
+	t.Cleanup(realHTTP.Close)
+	revokedFile := filepath.Join(testutil.PrivateTempDir(t), "revoked")
+	require.NoError(t, os.WriteFile(revokedFile, []byte(revoked), 0600))
 	svc := federation.NewService("spoke", "spoke-a", policy, database)
 	srv := New(config.Config{Host: "127.0.0.1", Port: 8080}, database, nil, WithFederation(svc))
 	daemon := httptest.NewServer(srv.Handler())
 	t.Cleanup(daemon.Close)
-	for _, tc := range []struct {
+	cases := []struct {
 		name, origin, hubID, path, message string
 		version, status                    int
 		digest                             string
@@ -272,7 +323,19 @@ func TestFederationJoinControlMessages(t *testing.T) {
 		{"protocol", hub.URL, "hub-a", file, "unsupported federation protocol", 2, 200, digest},
 		{"digest", hub.URL, "hub-a", file, "invalid federation policy digest", 1, 200, "wrong"},
 		{"refused", hub.URL, "hub-a", file, "hub refused this credential (revoked, unknown, or wrong archive)", 1, 401, digest},
-	} {
+		{"revoked", realHTTP.URL, "hub-a", revokedFile, "hub refused this credential (revoked, unknown, or wrong archive)", 1, 200, digest},
+	}
+	if runtime.GOOS != "windows" {
+		permissive := filepath.Join(testutil.PrivateTempDir(t), "permissive")
+		require.NoError(t, os.WriteFile(permissive, []byte(credential), 0600))
+		require.NoError(t, os.Chmod(permissive, 0644))
+		cases = append(cases, struct {
+			name, origin, hubID, path, message string
+			version, status                    int
+			digest                             string
+		}{"mode", hub.URL, "hub-a", permissive, "credential file must be a regular file readable only by its owner (mode 0600)", 1, 200, digest})
+	}
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			response.ProtocolVersions, response.PolicyDigest, code = []int{tc.version}, tc.digest, tc.status
 			body, err := json.Marshal(map[string]string{"hub": tc.origin, "hub_archive": tc.hubID, "credential_file": tc.path})
@@ -289,6 +352,7 @@ func TestFederationJoinControlMessages(t *testing.T) {
 			assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 			assert.Contains(t, string(data), tc.message)
 			assert.NotContains(t, string(data), credential)
+			assert.NotContains(t, string(data), revoked)
 			assert.NotContains(t, string(data), tc.path)
 		})
 	}

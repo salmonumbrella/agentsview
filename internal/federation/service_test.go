@@ -138,6 +138,11 @@ func TestEnrollmentNormalizesAndRejectsInvalidFields(t *testing.T) {
 	for _, tc := range []struct{ archive, member, name, message string }{
 		{" ", "m", "", "spoke archive ID is required"}, {"a", " ", "", "member is required"},
 		{"a\x00", "m", "", "spoke archive ID has invalid characters"},
+		{"a\xff", "m", "", "spoke archive ID has invalid characters"},
+		{"a", "m\x00", "", "member has invalid characters"},
+		{"a", "m\xff", "", "member has invalid characters"},
+		{"a", "m", "n\x00", "spoke name has invalid characters"},
+		{"a", "m", "n\xff", "spoke name has invalid characters"},
 		{strings.Repeat("a", 129), "m", "", "spoke archive ID is too long"},
 		{"a", strings.Repeat("m", 129), "", "member is too long"},
 		{"a", "m", strings.Repeat("n", 257), "spoke name is too long"},
