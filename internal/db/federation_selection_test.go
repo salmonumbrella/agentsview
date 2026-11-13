@@ -60,6 +60,7 @@ func TestFederationSelectionRequiresOwnSnapshotAndLocalProof(t *testing.T) {
 			`INSERT INTO messages (id,session_id,ordinal,role,content) VALUES (100,'selected',0,'assistant','CANARY-content')`,
 			`INSERT INTO tool_calls (message_id,session_id,tool_name,category,input_json) VALUES (100,'selected','fixture','CANARY-category','CANARY-input')`,
 			`UPDATE sessions SET parent_session_id='selected',relationship_type='subagent' WHERE id='child'`,
+			`UPDATE sessions SET project='personal', cwd='/fixture/private/work' WHERE id='renamed'`,
 		} {
 			if _, err := tx.ExecContext(ctx, q); err != nil {
 				return err
@@ -67,6 +68,11 @@ func TestFederationSelectionRequiresOwnSnapshotAndLocalProof(t *testing.T) {
 		}
 		return nil
 	}))
+	_, err := database.CreateWorktreeProjectMapping(ctx, WorktreeProjectMapping{Machine: "install-a", PathPrefix: "/fixture/private", Project: "fixture", Enabled: true})
+	require.NoError(t, err)
+	mapping, err := database.ApplyWorktreeProjectMappings(ctx, "install-a")
+	require.NoError(t, err)
+	assert.Equal(t, 1, mapping.MatchedSessions)
 	seedSessionExportPricing(t, database)
 	insertMessages(t, database, Message{SessionID: "selected", Ordinal: 1, Role: "assistant", Model: "model-computed", TokenUsage: jsontext.Value(`{"input_tokens":1000,"output_tokens":500}`), HasContextTokens: true, HasOutputTokens: true})
 	require.NoError(t, database.PutFederationExclusion(ctx, "excluded", "share-a", "private"))
