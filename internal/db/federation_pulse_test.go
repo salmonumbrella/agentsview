@@ -102,15 +102,15 @@ func TestFederationPulseSnapshotScopesAndVisitsDays(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"2026-07-28", "2026-07-29"}, dates)
+	assert.Equal(t, []string{"2026-07-28"}, dates)
 	assert.Equal(t, Ptr("2026-07-28"), rng.EarliestDate)
 	assert.Equal(t, "2026-07-29T12:00:00Z", rng.ClosedThrough)
 	for _, tc := range []struct {
 		since string
 		want  []string
 	}{
-		{"0001-01-01", []string{"2026-07-28", "2026-07-29"}},
-		{"2026-07-29", []string{"2026-07-29"}},
+		{"0001-01-01", []string{"2026-07-28"}},
+		{"2026-07-29", nil},
 	} {
 		var visited []string
 		_, err := d.readFederationPulseSnapshot(ctx, tc.since, time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC), nil, func(_ *sql.Tx, date, _ time.Time, _ map[string]federationPulseOwner, _ reportingDaySource) error {
@@ -134,6 +134,8 @@ func TestFederationPulseSnapshotScopesAndVisitsDays(t *testing.T) {
 			`INSERT INTO federation_hub_shares(share_uid,enrollment_uid,normalized_remote,project_key,level,attribution,audience,policy_digest,epoch,state) VALUES('h','e','example/a','project','summary','pooled','operators','policy',1,'active')`,
 			`INSERT INTO sessions(id,project,machine,agent,started_at) VALUES('future','example/a','federated','codex','2026-07-30T00:30:00Z')`,
 			`INSERT INTO federation_records(share_uid,record_uid,session_id,hash) VALUES('h','future','future','hash')`,
+			`INSERT INTO sessions(id,project,machine,agent,started_at) VALUES('cutoff','example/a','federated','codex','2026-07-30T00:00:00Z')`,
+			`INSERT INTO federation_records(share_uid,record_uid,session_id,hash) VALUES('h','cutoff','cutoff','hash')`,
 		} {
 			if _, err := tx.ExecContext(ctx, statement); err != nil {
 				return err
