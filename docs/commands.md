@@ -2940,7 +2940,9 @@ replace its consent and `resume` to activate it. Resume works without the hub;
 add and push need a live hub policy. Removing a share stops future delivery
 and requests cleanup. A member-controlled hub purges its records; an
 organization-retained hub keeps them and reports retention. An offline hub
-leaves cleanup pending for retry.
+leaves cleanup pending for retry. If a retained share's source archive is
+replaced, deletion narrowing waits for fresh consent rather than treating
+missing records in the replacement as deletions.
 `federation exclude <session-id> [--reason text]` works before or after joining
 and keeps a session out of all shares in this archive, including after removal
 or rejoining. `federation push --dry-run` prints selected summaries locally. Run

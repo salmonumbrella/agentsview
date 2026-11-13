@@ -56,8 +56,8 @@ func TestPushAfterArchiveRebuildRemovesMissingSessions(t *testing.T) {
 		{name: "unfiltered", want: []string{"foreign", "legacy", "new"}},
 		{name: "empty archive", empty: true, want: []string{"foreign", "legacy"}},
 		{name: "resumed push", interrupt: true, want: []string{"foreign", "legacy", "new"}},
-		{name: "included projects", projects: []string{"proj"}, want: []string{"foreign", "legacy", "new", "outside"}},
-		{name: "excluded projects", excludeProjects: []string{"outside"}, want: []string{"foreign", "legacy", "new", "outside"}},
+		{name: "included projects", projects: []string{"proj"}, want: []string{"foreign", "legacy", "new"}},
+		{name: "excluded projects", excludeProjects: []string{"outside"}, want: []string{"foreign", "legacy", "new"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newResumeFixture(t, "agentsview_push_generation_test")
@@ -201,4 +201,64 @@ func TestFailedFullPushProgressSaveEnds(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded,
 		"the progress save gives up instead of waiting forever")
 	require.NoError(t, f.local.ReopenWriter())
+}
+
+func TestIncrementalDeletionReconcilesFilteredResidentsAndPreservesOtherOwner(t *testing.T) {
+	f := newResumeFixture(t, "agentsview_deletion_filter_test")
+	_, err := f.sync().Push(t.Context(), false, nil)
+	require.NoError(t, err)
+	_, err = f.pg.ExecContext(t.Context(), `UPDATE sessions SET owner_marker='other-owner' WHERE id='mid'`)
+	require.NoError(t, err)
+	require.NoError(t, f.local.DeleteSession(t.Context(), "old"))
+	require.NoError(t, f.local.DeleteSession(t.Context(), "mid"))
+	filtered := f.sync()
+	filtered.projects = []string{"another-project"}
+	filtered.syncState = newScopedSyncStateStore(handoffSyncState{f.local}, pushSyncStateScope("", filtered.projects, nil, nil), false)
+	result, err := filtered.Push(t.Context(), false, nil)
+	require.NoError(t, err)
+	assert.Zero(t, result.Errors)
+	assert.Equal(t, []string{"mid", "new"}, f.sessionIDs(t))
+	var count int
+	require.NoError(t, f.pg.QueryRowContext(t.Context(), `SELECT count(*) FROM messages WHERE session_id='old'`).Scan(&count))
+	assert.Zero(t, count)
+}
+
+type failDeletionProgress struct {
+	handoffSyncState
+	fail bool
+}
+
+func (s *failDeletionProgress) SetSyncStatesForDatabase(ctx context.Context, generation string, values map[string]string) error {
+	if s.fail {
+		return errors.New("injected progress failure")
+	}
+	return s.handoffSyncState.SetSyncStatesForDatabase(ctx, generation, values)
+}
+
+func TestDeletionProgressFailureRetriesCleanup(t *testing.T) {
+	f := newResumeFixture(t, "agentsview_deletion_retry_test")
+	s := f.sync()
+	_, err := s.Push(t.Context(), false, nil)
+	require.NoError(t, err)
+	var owner string
+	require.NoError(t, f.pg.QueryRowContext(t.Context(), `SELECT owner_marker FROM sessions WHERE id='old'`).Scan(&owner))
+	require.NoError(t, f.local.DeleteSession(t.Context(), "old"))
+	through, err := f.local.SessionDeletionPublicationRevision(t.Context())
+	require.NoError(t, err)
+	state := &failDeletionProgress{handoffSyncState: handoffSyncState{f.local}, fail: true}
+	key := "session_deletion_revision_v1:" + s.targetFingerprint + ":" + s.databaseGeneration
+	before, err := state.GetSyncState(t.Context(), key)
+	require.NoError(t, err)
+	err = s.reconcilePGDeletionJournal(t.Context(), state, owner, nil, through)
+	require.ErrorContains(t, err, "injected progress failure")
+	after, err := state.GetSyncState(t.Context(), key)
+	require.NoError(t, err)
+	assert.Equal(t, before, after)
+	assert.NotContains(t, f.sessionIDs(t), "old")
+	state.fail = false
+	require.NoError(t, s.reconcilePGDeletionJournal(t.Context(), state, owner, nil, through))
+	after, err = state.GetSyncState(t.Context(), key)
+	require.NoError(t, err)
+	assert.NotEqual(t, before, after)
+	assert.NotContains(t, f.sessionIDs(t), "old")
 }

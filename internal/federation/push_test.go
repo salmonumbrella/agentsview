@@ -305,3 +305,62 @@ func TestFederationInventoryResponseRejectsUntrustedRanges(t *testing.T) {
 	assert.NoError(t, validateFederationInventoryResponse(page, db.FederationInventoryResult{Boundary: "a", Covered: "z", Missing: []string{"b"}}))
 	assert.NoError(t, validateFederationInventoryResponse(page, db.FederationInventoryResult{Boundary: "z", Covered: "z"}))
 }
+
+func TestRetainedNarrowingDoesNotInferDeletionAfterArchiveReplacement(t *testing.T) {
+	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, archive.Close()) })
+	service := NewService("spoke", "spoke", config.FederationHubConfig{}, archive)
+	share := db.FederationShare{UID: "share", State: "paused", StopReceipt: "retained", SourceGeneration: "replaced-generation"}
+	_, err = archive.GetDatabaseID(t.Context())
+	require.NoError(t, err)
+	err = service.processRetainedNarrowing(t.Context(), db.FederationLink{TokenFile: "/missing"}, []db.FederationShare{share}, &PushResult{})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "retained share archive generation changed")
+}
+
+func TestRetainedPendingTombstoneIsNotReplayedAfterRestore(t *testing.T) {
+	ctx := t.Context()
+	archive, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "archive.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, archive.Close()) })
+	generation, err := archive.GetDatabaseID(ctx)
+	require.NoError(t, err)
+	remote := "github.com/example/api"
+	key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
+	require.NoError(t, archive.Update(ctx, func(tx *sql.Tx) error {
+		for _, q := range []string{
+			`INSERT INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install')`,
+			`INSERT INTO sessions(id,project,machine,agent,file_path) VALUES('restored','p','install','claude','fixture')`,
+			`INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES('restored','install','claude','fixture')`,
+		} {
+			if _, e := tx.ExecContext(ctx, q); e != nil {
+				return e
+			}
+		}
+		_, e := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES('restored','p','install','2026-01-01T00:00:00Z','resolved',1,?,'git_remote',?)`, remote, key)
+		return e
+	}))
+	policy := config.FederationHubConfig{Retention: "org-retained", AllowedLevels: []string{"summary"}, MinGroupSize: 3, SuggestedProjects: []string{}, Processing: "none"}
+	digest, err := export.DigestCanonical(policy)
+	require.NoError(t, err)
+	batches := 0
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			batches++
+			http.Error(w, "unexpected delivery", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub", ProtocolVersions: []int{ProtocolVersion}, EnrollmentUID: "enr", Member: "member", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
+	}))
+	t.Cleanup(hub.Close)
+	file := filepath.Join(testutil.PrivateTempDir(t), "credential")
+	require.NoError(t, os.WriteFile(file, []byte("avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), 0600))
+	batch, err := json.Marshal(Batch{Protocol: ProtocolVersion, SpokeInstance: "spoke", ShareUID: "share", Epoch: 1, Sequence: 1, Records: []BatchRecord{{RecordUID: "restored", Kind: "tombstone"}}})
+	require.NoError(t, err)
+	share := db.FederationShare{UID: "share", State: "paused", NormalizedRemote: remote, StopReceipt: "retained", SourceGeneration: generation, Epoch: 1, PendingBatch: string(batch)}
+	svc := NewService("spoke", "spoke", policy, archive)
+	err = svc.processRetainedNarrowing(ctx, db.FederationLink{HubOrigin: hub.URL, HubArchiveID: "hub", TokenFile: file}, []db.FederationShare{share}, &PushResult{})
+	require.ErrorContains(t, err, "unresolved deletion after restore")
+	assert.Zero(t, batches)
+}

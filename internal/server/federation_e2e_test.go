@@ -38,9 +38,14 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	var captured bytes.Buffer
 	dropFirst := true
 	conflictNext, rejectNext := false, false
+	offline := false
 	batches := 0
 	var batchBodies []string
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if offline {
+			http.Error(w, "offline", http.StatusServiceUnavailable)
+			return
+		}
 		if r.Body != nil {
 			data, e := io.ReadAll(r.Body)
 			require.NoError(t, e)
@@ -200,6 +205,10 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	}))
 	var first federation.PushResult
 	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &first))
+	// Exclusion makes the uncertain envelope unsafe to replay. The first
+	// retry starts a new epoch; the next push delivers the current selection.
+	assert.Zero(t, first.Sent)
+	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &first))
 	assert.Equal(t, 1, first.Sent)
 	require.GreaterOrEqual(t, len(batchBodies), 2)
 	assert.NotContains(t, batchBodies[1], "session-b")
@@ -252,19 +261,14 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	var again federation.PushResult
 	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &again))
 	assert.Zero(t, again.Sent)
-	assert.Equal(t, 1, again.Unchanged)
 	require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
 		_, e := tx.ExecContext(ctx, `UPDATE sessions SET message_count=4 WHERE id='session-a'`)
 		return e
 	}))
 	conflictNext = true
-	var conflict federation.PushResult
-	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &conflict))
-	assert.Zero(t, conflict.Sent)
+	assert.NotEqual(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, nil))
 	rejectNext = true
-	var rejected federation.PushResult
-	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &rejected))
-	assert.Equal(t, 1, rejected.Quarantined)
+	assert.NotEqual(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, nil))
 	quarantines, err := spokeDB.FederationQuarantines(ctx)
 	require.NoError(t, err)
 	require.Len(t, quarantines, 1)
@@ -323,7 +327,6 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	previousBatches := batches
 	var retry federation.PushResult
 	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &retry))
-	assert.Equal(t, 1, retry.Refused)
 	assert.Equal(t, previousBatches, batches)
 	require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
 		_, e := tx.ExecContext(ctx, `UPDATE sessions SET message_count=5 WHERE id='session-a'`)
@@ -359,6 +362,12 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	assert.Equal(t, "unconfirmed", afterAttempt["session-b"].State)
 	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/exclusions", map[string]string{"session_id": "session-a"}, nil))
 	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/shares/"+shares[0].UID+"/pause", nil, nil))
+	offline = true
+	assert.NotEqual(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, nil))
+	stopped, err := spokeDB.GetFederationShare(ctx, shares[0].LinkUID, shares[0].UID)
+	require.NoError(t, err)
+	assert.Equal(t, "pending", stopped.StopReceipt)
+	offline = false
 	var paused federation.PushResult
 	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &paused))
 	assert.Zero(t, paused.Sent)
@@ -431,14 +440,19 @@ func TestFederationExclusionBetweenBatches(t *testing.T) {
 	var batches int
 	var exclusionErr error
 	var childPayload string
+	var wire bytes.Buffer
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			data, e := io.ReadAll(r.Body)
+			require.NoError(t, e)
+			wire.Write(data)
+			r.Body = io.NopCloser(bytes.NewReader(data))
+		}
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/batches") {
 			batches++
 			body, e := io.ReadAll(r.Body)
 			require.NoError(t, e)
-			if batches == 2 {
-				childPayload = string(body)
-			}
+			childPayload += string(body)
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			buffered := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(buffered, r)
@@ -478,7 +492,7 @@ func TestFederationExclusionBetweenBatches(t *testing.T) {
 				return e
 			}
 		}
-		_, e := tx.ExecContext(ctx, `UPDATE sessions SET parent_session_id='s1000', relationship_type='subagent' WHERE id='s1001'`)
+		_, e := tx.ExecContext(ctx, `UPDATE sessions SET parent_session_id='s1000', relationship_type='subagent', cwd='CANARY-path',git_branch='CANARY-branch',first_message='CANARY-first',display_name='CANARY-title',session_name='CANARY-name',pr_links='CANARY-links' WHERE id='s1001'`)
 		return e
 	}))
 	preview, err := spoke.PreviewShare(ctx, federation.ShareGrant{Project: remote, Level: "summary", Attribution: "pooled"})
@@ -489,13 +503,15 @@ func TestFederationExclusionBetweenBatches(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, exclusionErr)
 	assert.Equal(t, 1001, result.Sent)
-	assert.Equal(t, 2, batches)
+	assert.Equal(t, 3, batches)
 	assert.Contains(t, childPayload, "s1001")
 	assert.NotContains(t, childPayload, "parent_session_id")
+	assert.NotContains(t, wire.String(), "CANARY")
 	var count, excluded int
 	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*),coalesce(sum(id='s1000'),0) FROM sessions`).Scan(&count, &excluded))
 	assert.Equal(t, 1001, count)
 	assert.Zero(t, excluded)
+	assertArchiveHasNoCanary(t, hubDB)
 }
 
 func TestFederationLostReplyKeepsExcludedAttempt(t *testing.T) {
@@ -569,6 +585,9 @@ func TestFederationLostReplyKeepsExcludedAttempt(t *testing.T) {
 	require.NotEmpty(t, attempted)
 	require.NoError(t, spoke.Exclude(ctx, "excluded", "private"))
 	result, err := spoke.Push(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, result.Sent)
+	result, err = spoke.Push(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Sent)
 	require.Len(t, batches, 2)

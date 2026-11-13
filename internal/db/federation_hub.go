@@ -31,6 +31,7 @@ type FederationBatchResult struct {
 
 func (db *DB) PutFederationHubShare(ctx context.Context, spoke string, share FederationHubShare) (FederationHubShare, error) {
 	var purged []string
+	var pending recallEvidenceRevocationEvents
 	err := db.Update(ctx, func(tx *sql.Tx) error {
 		var active bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM federation_enrollments WHERE enrollment_uid=? AND spoke_archive_id=? AND revoked_at='')`, share.EnrollmentUID, spoke).Scan(&active); err != nil {
@@ -88,7 +89,7 @@ func (db *DB) PutFederationHubShare(ctx context.Context, spoke string, share Fed
 					if err = rows.Close(); err != nil {
 						return err
 					}
-					purged, err = purgeFederationRecordsTx(ctx, tx, share.UID, ids)
+					purged, err = purgeFederationRecordsTx(ctx, tx, share.UID, ids, &pending)
 					if err != nil {
 						return err
 					}
@@ -114,6 +115,7 @@ func (db *DB) PutFederationHubShare(ctx context.Context, spoke string, share Fed
 	})
 	if err == nil {
 		db.notifyUsageSessions(purged)
+		pending.flush()
 	}
 	return share, err
 }
@@ -161,9 +163,10 @@ func (db *DB) CommitFederationBatch(ctx context.Context, enrollment, spoke, shar
 	}
 	var writes []SessionBatchWrite
 	var purged []string
+	var pending recallEvidenceRevocationEvents
 	for _, record := range records {
 		if record.Tombstone {
-			ids, e := purgeFederationRecordsTx(ctx, tx, share, []string{record.UID})
+			ids, e := purgeFederationRecordsTx(ctx, tx, share, []string{record.UID}, &pending)
 			if e != nil {
 				return result, e
 			}
@@ -238,6 +241,7 @@ func (db *DB) CommitFederationBatch(ctx context.Context, enrollment, spoke, shar
 	}
 	db.notifyUsageSessions(append(ids, purged...))
 	revocations.flush()
+	pending.flush()
 	result.Committed = sequence
 	return result, nil
 }
@@ -257,7 +261,7 @@ func (db *DB) FederationSessionOrigins(ctx context.Context) (FederationOrigins, 
 // purgeFederationRecordsTx deletes only rows this share owns. Unknown and
 // foreign IDs are indistinguishable no-ops. The caller notifies caches after
 // the surrounding transaction commits.
-func purgeFederationRecordsTx(ctx context.Context, tx *sql.Tx, share string, ids []string) ([]string, error) {
+func purgeFederationRecordsTx(ctx context.Context, tx *sql.Tx, share string, ids []string, pending *recallEvidenceRevocationEvents) ([]string, error) {
 	var deleted []string
 	for _, id := range ids {
 		var owned bool
@@ -266,6 +270,33 @@ func purgeFederationRecordsTx(ctx context.Context, tx *sql.Tx, share string, ids
 		}
 		if !owned {
 			continue
+		}
+		// Surviving entries may cite evidence from this session. Revoke their
+		// provenance before the evidence cascades away with the session.
+		rows, err := tx.QueryContext(ctx, `SELECT DISTINCT entry_id FROM recall_evidence WHERE session_id=?`, id)
+		if err != nil {
+			return nil, err
+		}
+		var entries []string
+		for rows.Next() {
+			var entry string
+			if err = rows.Scan(&entry); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			entries = append(entries, entry)
+		}
+		if err = rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if err = rows.Close(); err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			if err = revokeRecallEvidenceEntryTx(ctx, tx, entry, id, recallEvidenceRevocationFederationWithdrawal, pending); err != nil {
+				return nil, err
+			}
 		}
 		// Only relationships within this share are federation-owned.
 		if _, err := tx.ExecContext(ctx, `UPDATE sessions SET parent_session_id=NULL,relationship_type='' WHERE parent_session_id=? AND id IN (SELECT session_id FROM federation_records WHERE share_uid=?)`, id, share); err != nil {
@@ -318,6 +349,7 @@ func (db *DB) ReconcileFederationPage(ctx context.Context, enrollment, spoke, sh
 		previous = item.UID
 	}
 	var purged []string
+	var pending recallEvidenceRevocationEvents
 	err := db.Update(ctx, func(tx *sql.Tx) error {
 		var round, boundary string
 		var epoch, sequence, completed int64
@@ -422,7 +454,7 @@ func (db *DB) ReconcileFederationPage(ctx context.Context, enrollment, spoke, sh
 			if err = rows.Close(); err != nil {
 				return err
 			}
-			purged, err = purgeFederationRecordsTx(ctx, tx, share, old)
+			purged, err = purgeFederationRecordsTx(ctx, tx, share, old, &pending)
 			if err != nil {
 				return err
 			}
@@ -439,6 +471,7 @@ func (db *DB) ReconcileFederationPage(ctx context.Context, enrollment, spoke, sh
 	})
 	if err == nil {
 		db.notifyUsageSessions(purged)
+		pending.flush()
 	}
 	return result, err
 }

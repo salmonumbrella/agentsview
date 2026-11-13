@@ -53,6 +53,7 @@ const (
 	recallEvidenceRevocationMissingDigest               recallEvidenceRevocationReason = "missing_digest"
 	recallEvidenceRevocationContentDigestMismatch       recallEvidenceRevocationReason = "content_digest_mismatch"
 	recallEvidenceRevocationEvidenceDroppedDuringResync recallEvidenceRevocationReason = "evidence_dropped_during_resync"
+	recallEvidenceRevocationFederationWithdrawal        recallEvidenceRevocationReason = "federation_withdrawal"
 )
 
 type recallEvidenceRevocationEvent struct {

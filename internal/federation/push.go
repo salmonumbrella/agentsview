@@ -656,6 +656,13 @@ func (s *Service) processRetainedNarrowing(ctx context.Context, link db.Federati
 		if share.State == "active" || share.StopReceipt != "retained" {
 			continue
 		}
+		generation, err := s.db.GetDatabaseID(ctx)
+		if err != nil {
+			return err
+		}
+		if share.SourceGeneration == "" || share.SourceGeneration != generation {
+			return inputError("retained share archive generation changed; fresh consent is required before further delivery")
+		}
 		token, err := readCredential(ctx, link.TokenFile)
 		if err != nil {
 			return err

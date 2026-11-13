@@ -236,7 +236,7 @@ func TestFederationPurgeOnlyOwnedRecords(t *testing.T) {
 				return err
 			}
 		}
-		_, err := purgeFederationRecordsTx(ctx, tx, "share", []string{"owned", "other", "local", "unknown"})
+		_, err := purgeFederationRecordsTx(ctx, tx, "share", []string{"owned", "other", "local", "unknown"}, &recallEvidenceRevocationEvents{})
 		return err
 	}))
 	var owned, other, local, messages, deleted int
@@ -261,8 +261,15 @@ func TestFederationStopPurgesOnlyOwnedAndCannotBeReactivatedByStaleManifest(t *t
 	_, err := d.PutFederationHubShare(ctx, "spoke", share)
 	require.NoError(t, err)
 	record := FederationHubRecord{UID: "owned", Hash: "hash", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: SessionBatchWrite{Session: Session{ID: "owned", Project: share.Remote, Machine: "federated", Agent: "claude"}}}
+	started := "2026-01-02T00:00:00Z"
+	record.Write.Session.StartedAt = &started
+	record.Write.UsageEvents = []UsageEvent{{SessionID: "owned", Source: "federation", Model: "model", InputTokens: 42, OccurredAt: started, DedupKey: "model"}}
 	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 1, "batch", []FederationHubRecord{record})
 	require.NoError(t, err)
+	filter := UsageFilter{From: "2026-01-02", To: "2026-01-02", Timezone: "UTC"}
+	warm, err := d.GetDailyUsage(ctx, filter)
+	require.NoError(t, err)
+	assert.Equal(t, 42, warm.Totals.InputTokens)
 	share.State = "stopped"
 	stopped, err := d.PutFederationHubShare(ctx, "spoke", share)
 	require.NoError(t, err)
@@ -271,6 +278,9 @@ func TestFederationStopPurgesOnlyOwnedAndCannotBeReactivatedByStaleManifest(t *t
 	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='owned'), (SELECT count(*) FROM federation_records WHERE share_uid='share')`).Scan(&sessions, &records))
 	assert.Zero(t, sessions)
 	assert.Zero(t, records)
+	after, err := d.GetDailyUsage(ctx, filter)
+	require.NoError(t, err)
+	assert.Zero(t, after.Totals.InputTokens)
 	share.State = "active"
 	stale, err := d.PutFederationHubShare(ctx, "spoke", share)
 	require.NoError(t, err)
@@ -386,4 +396,78 @@ func TestFederationRebuildKeepsOldRowsUntilAllRangesRepaired(t *testing.T) {
 	assert.Equal(t, 1, same)
 	assert.Equal(t, 1, repaired)
 	assert.Zero(t, old)
+}
+
+func TestFederationPurgeRevokesSurvivingRecallEvidence(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		for _, q := range []string{
+			`INSERT INTO sessions(id,project,machine,agent) VALUES('shared','p','federated','claude'),('local','p','host','claude')`,
+			`INSERT INTO federation_records(share_uid,record_uid,session_id,hash) VALUES('share','shared','shared','hash')`,
+			`INSERT INTO recall_entries(id,type,scope,title,body,source_session_id,provenance_ok) VALUES('fact','fact','project','title','body','local',1)`,
+			`INSERT INTO recall_evidence(entry_id,session_id,message_start_ordinal,message_end_ordinal) VALUES('fact','shared',0,0)`,
+		} {
+			if _, err := tx.ExecContext(ctx, q); err != nil {
+				return err
+			}
+		}
+		_, err := purgeFederationRecordsTx(ctx, tx, "share", []string{"shared"}, &recallEvidenceRevocationEvents{})
+		return err
+	}))
+	var trusted, evidence int
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT provenance_ok,(SELECT count(*) FROM recall_evidence WHERE entry_id='fact') FROM recall_entries WHERE id='fact'`).Scan(&trusted, &evidence))
+	assert.Zero(t, trusted)
+	assert.Zero(t, evidence)
+}
+
+func TestFederationInventoryRejectsOversizedAndCompletesEmpty(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr", SpokeArchiveID: "spoke", Member: "member", CredentialSHA256: "digest"}))
+	_, err := d.PutFederationHubShare(ctx, "spoke", FederationHubShare{UID: "share", EnrollmentUID: "enr", Remote: "example.org/repo", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+	require.NoError(t, err)
+	page := FederationInventoryPage{Round: "round", Epoch: 1, Final: true, Items: make([]FederationInventoryItem, 1001)}
+	_, err = d.ReconcileFederationPage(ctx, "enr", "spoke", "share", page)
+	require.ErrorIs(t, err, ErrFederationInvalidBatch)
+	page.Items = nil
+	result, err := d.ReconcileFederationPage(ctx, "enr", "spoke", "share", page)
+	require.NoError(t, err)
+	assert.True(t, result.Complete)
+	assert.Empty(t, result.Missing)
+	assert.Empty(t, result.Extra)
+}
+
+func TestFederationPurgeInvalidatesWarmSearchAndExtraction(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.UpsertSession(ctx, Session{ID: "shared", Project: "p", Machine: "federated", Agent: "claude"}))
+	require.NoError(t, d.InsertMessages(ctx, []Message{{SessionID: "shared", Ordinal: 0, Role: "user", Content: "uniquewithdrawalterm"}}))
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		for _, q := range []string{
+			`INSERT INTO federation_records(share_uid,record_uid,session_id,hash) VALUES('share','shared','shared','hash')`,
+			`INSERT INTO recall_entries(id,type,scope,title,body,source_session_id,provenance_ok) VALUES('fact','fact','project','title','body','shared',1)`,
+			`INSERT INTO recall_extract_generations(fingerprint,model,segmenter) VALUES('generation','model','segmenter')`,
+			`INSERT INTO recall_extract_progress(session_id,generation_fingerprint) VALUES('shared','generation')`,
+		} {
+			if _, err := tx.ExecContext(ctx, q); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	warm, err := d.Search(ctx, SearchFilter{Query: "uniquewithdrawalterm"})
+	require.NoError(t, err)
+	require.Len(t, warm.Results, 1)
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		_, err := purgeFederationRecordsTx(ctx, tx, "share", []string{"shared"}, &recallEvidenceRevocationEvents{})
+		return err
+	}))
+	cold, err := d.Search(ctx, SearchFilter{Query: "uniquewithdrawalterm"})
+	require.NoError(t, err)
+	assert.Empty(t, cold.Results)
+	var progress, vectorDeletion int
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT (SELECT count(*) FROM recall_extract_progress WHERE session_id='shared'),(SELECT count(*) FROM recall_embedding_deletions WHERE entry_id='fact')`).Scan(&progress, &vectorDeletion))
+	assert.Zero(t, progress)
+	assert.Equal(t, 1, vectorDeletion)
 }

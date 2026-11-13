@@ -74,6 +74,7 @@ func (db *DB) ListFederationEnrollments(ctx context.Context) ([]FederationEnroll
 
 func (db *DB) RevokeFederationEnrollment(ctx context.Context, uid string) error {
 	var purged []string
+	var pending recallEvidenceRevocationEvents
 	err := db.Update(ctx, func(tx *sql.Tx) error {
 		result, err := tx.ExecContext(ctx, `UPDATE federation_enrollments SET revoked_at = CASE WHEN revoked_at = '' THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE revoked_at END WHERE enrollment_uid = ?`, uid)
 		if err != nil {
@@ -129,7 +130,7 @@ func (db *DB) RevokeFederationEnrollment(ctx context.Context, uid string) error 
 				if err = rows.Close(); err != nil {
 					return err
 				}
-				removed, err := purgeFederationRecordsTx(ctx, tx, share.uid, ids)
+				removed, err := purgeFederationRecordsTx(ctx, tx, share.uid, ids, &pending)
 				if err != nil {
 					return err
 				}
@@ -143,6 +144,7 @@ func (db *DB) RevokeFederationEnrollment(ctx context.Context, uid string) error 
 	})
 	if err == nil {
 		db.notifyUsageSessions(purged)
+		pending.flush()
 	}
 	return err
 }
