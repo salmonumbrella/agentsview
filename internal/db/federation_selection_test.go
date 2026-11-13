@@ -142,6 +142,13 @@ func TestFederationSelectionAttachesUsageAcrossChunks(t *testing.T) {
 		assert.Equal(t, 1000, row.ModelUsage.InputTokens)
 		assert.Equal(t, 500, row.ModelUsage.OutputTokens)
 	}
+	candidates, err := d.SelectFederationCandidates(ctx, "github.com/example/api", "", []string{"session-0000", "session-0999", "absent"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"session-0000", "session-0999"}, candidates.IDs)
+	require.Len(t, candidates.Rows, 2)
+	assert.Equal(t, "session-0000", candidates.Rows[0].ID)
+	assert.Equal(t, "session-0999", candidates.Rows[1].ID)
+	assert.Equal(t, 1000, candidates.Rows[0].ModelUsage.InputTokens)
 }
 
 func TestFederationChangedCandidatesIncludeDeletionAndExcludeUnrelatedHistory(t *testing.T) {
