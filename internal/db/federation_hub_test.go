@@ -411,11 +411,34 @@ func TestFederationRevokeUsesShareRetention(t *testing.T) {
 		_, err = d.CommitFederationBatch(ctx, "enr", "spoke", tc.uid, "policy", 1, 1, "batch", []FederationHubRecord{record})
 		require.NoError(t, err)
 	}
+	require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "foreign-enr", SpokeArchiveID: "foreign-spoke", Member: "other", CredentialSHA256: "foreign-digest"}))
+	foreign := FederationHubShare{UID: "foreign-share", EnrollmentUID: "foreign-enr", Remote: "example.org/foreign", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active", Retention: "member-controlled"}
+	_, err := d.PutFederationHubShare(ctx, "foreign-spoke", foreign)
+	require.NoError(t, err)
+	foreignRecord := FederationHubRecord{UID: "foreign", Hash: "hash", Remote: foreign.Remote, ProjectKey: foreign.ProjectKey, Write: SessionBatchWrite{Session: Session{ID: "foreign", Project: "p", Machine: "federated", Agent: "claude"}}}
+	_, err = d.CommitFederationBatch(ctx, "foreign-enr", "foreign-spoke", "foreign-share", "policy", 1, 1, "batch", []FederationHubRecord{foreignRecord})
+	require.NoError(t, err)
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		if _, e := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent) VALUES('collision','local','host','claude')`); e != nil {
+			return e
+		}
+		_, e := tx.ExecContext(ctx, `INSERT INTO messages(session_id,ordinal,role,content) VALUES('collision',0,'user','local message')`)
+		return e
+	}))
+	collision := FederationHubRecord{UID: "collision", Hash: "hash", Remote: "example.org/purge", ProjectKey: "key", Write: SessionBatchWrite{Session: Session{ID: "collision", Project: "p", Machine: "federated", Agent: "claude"}}}
+	result, err := d.CommitFederationBatch(ctx, "enr", "spoke", "purge", "policy", 1, 2, "collision", []FederationHubRecord{collision})
+	require.NoError(t, err)
+	assert.Equal(t, FederationCollision, result.Refused["collision"])
 	require.NoError(t, d.RevokeFederationEnrollment(ctx, "enr"))
 	var purged, retained int
 	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='purge'),(SELECT count(*) FROM sessions WHERE id='retain')`).Scan(&purged, &retained))
 	assert.Zero(t, purged)
 	assert.Equal(t, 1, retained)
+	var foreignCount, collisionCount, messages int
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT (SELECT count(*) FROM federation_records WHERE share_uid='foreign-share' AND session_id='foreign'),(SELECT count(*) FROM sessions WHERE id='collision' AND machine='host'),(SELECT count(*) FROM messages WHERE session_id='collision' AND content='local message')`).Scan(&foreignCount, &collisionCount, &messages))
+	assert.Equal(t, 1, foreignCount)
+	assert.Equal(t, 1, collisionCount)
+	assert.Equal(t, 1, messages)
 }
 
 func TestRetainedStoppedShareAllowsOnlyTombstoneNarrowing(t *testing.T) {
