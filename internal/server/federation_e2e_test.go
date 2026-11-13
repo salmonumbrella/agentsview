@@ -1567,7 +1567,7 @@ func TestFederationRestoreReconcilesAndContinuesDeletion(t *testing.T) {
 }
 
 func TestRetainedSnapshotRecoversHubSequenceWithoutSendingContent(t *testing.T) {
-	for _, mode := range []string{"same-generation snapshot", "regressed cursors", "replacement after hub progress", "replacement with proven deletion", "lost acknowledgment", "conflicting pending snapshot"} {
+	for _, mode := range []string{"same-generation snapshot", "regressed cursors", "replacement after hub progress", "replacement with proven deletion", "lost acknowledgment", "pending 503", "malformed receipt", "missing pending credential", "pending canceled", "wrong pending hub", "revoked pending credential", "conflicting pending snapshot"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := t.Context()
 			hubDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "hub.db"))
@@ -1583,12 +1583,23 @@ func TestRetainedSnapshotRecoversHubSequenceWithoutSendingContent(t *testing.T) 
 			var sent []federation.BatchRecord
 			var bodies []string
 			var dropNext atomic.Bool
+			var stopFault atomic.Int32
 			captured := func() ([]federation.BatchRecord, []string) {
 				captureMu.Lock()
 				defer captureMu.Unlock()
 				return append([]federation.BatchRecord(nil), sent...), append([]string(nil), bodies...)
 			}
 			peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPut {
+					switch stopFault.Load() {
+					case 1:
+						http.Error(w, "unavailable", http.StatusServiceUnavailable)
+						return
+					case 2:
+						_, _ = io.WriteString(w, `{"state":"stopped","epoch":1,"committed":-1,"retention":"org-retained"}`)
+						return
+					}
+				}
 				if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/batches") {
 					data, err := io.ReadAll(r.Body)
 					if !assert.NoError(t, err) {
@@ -1704,11 +1715,69 @@ func TestRetainedSnapshotRecoversHubSequenceWithoutSendingContent(t *testing.T) 
 				}
 				return
 			}
-			if mode == "lost acknowledgment" {
+			if mode == "lost acknowledgment" || mode == "pending 503" || mode == "malformed receipt" || mode == "missing pending credential" || mode == "pending canceled" || mode == "wrong pending hub" || mode == "revoked pending credential" {
 				dropNext.Store(true)
 				require.NoError(t, spoke.Exclude(ctx, "a", "private"))
 				_, err = spoke.Push(ctx)
 				require.Error(t, err)
+				link, err := spokeDB.GetFederationLink(ctx)
+				require.NoError(t, err)
+				pending, err := spokeDB.GetFederationShare(ctx, link.UID, uid)
+				require.NoError(t, err)
+				require.NotEmpty(t, pending.PendingBatch)
+				switch mode {
+				case "pending 503":
+					stopFault.Store(1)
+				case "malformed receipt":
+					stopFault.Store(2)
+				case "missing pending credential":
+					require.NoError(t, os.Remove(file))
+				case "wrong pending hub":
+					require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
+						_, err := tx.ExecContext(ctx, `UPDATE federation_links SET hub_archive_id='other-hub' WHERE link_uid=?`, link.UID)
+						return err
+					}))
+				case "revoked pending credential":
+					_, err = hub.Revoke(ctx, link.EnrollmentUID)
+					require.NoError(t, err)
+				}
+				if mode != "lost acknowledgment" {
+					pushCtx := ctx
+					if mode == "pending canceled" {
+						var cancel context.CancelFunc
+						pushCtx, cancel = context.WithCancel(ctx)
+						cancel()
+					}
+					_, err = spoke.Push(pushCtx)
+					require.Error(t, err)
+					if mode == "pending canceled" {
+						assert.ErrorIs(t, err, context.Canceled)
+					}
+					stillPending, err := spokeDB.GetFederationShare(ctx, link.UID, uid)
+					require.NoError(t, err)
+					assert.Equal(t, pending.PendingBatch, stillPending.PendingBatch)
+					assert.Equal(t, pending.Sequence, stillPending.Sequence)
+				}
+				stopFault.Store(0)
+				if mode == "missing pending credential" {
+					require.NoError(t, os.WriteFile(file, []byte(token), 0600))
+				}
+				if mode == "wrong pending hub" {
+					require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
+						_, err := tx.ExecContext(ctx, `UPDATE federation_links SET hub_archive_id='hub-a' WHERE link_uid=?`, link.UID)
+						return err
+					}))
+				}
+				if mode == "revoked pending credential" {
+					sent, bodies := captured()
+					require.Len(t, bodies, 1)
+					require.Len(t, sent, 1)
+					assert.Equal(t, "tombstone", sent[0].Kind)
+					var untouched int
+					require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id IN ('b','c')`).Scan(&untouched))
+					assert.Equal(t, 2, untouched)
+					return
+				}
 				_, err = spoke.Push(ctx)
 				require.NoError(t, err)
 				sent, bodies := captured()
