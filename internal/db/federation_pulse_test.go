@@ -346,23 +346,26 @@ func TestFederationPulseSurvivorUsesAttributedSessionForModelCoverage(t *testing
 	ctx := t.Context()
 	scope := map[string]struct{}{}
 	for _, id := range []string{"a", "b", "c"} {
-		enrollment, spoke, share := "enr-"+id, "spoke-"+id, "share-"+id
+		enrollment, spoke := "enr-"+id, "spoke-"+id
 		require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: id, CredentialSHA256: "digest-" + id}))
-		_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
-		require.NoError(t, err)
 		started, parent, child := "2026-07-28T09:00:00Z", "parent-"+id, "child-"+id
 		scope[parent], scope[child] = struct{}{}, struct{}{}
 		messageID := "snapshot-" + id
-		makeRecord := func(sessionID, timestamp, model, usage string) FederationHubRecord {
-			return FederationHubRecord{UID: sessionID, Hash: "hash", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{
-				Session: Session{ID: sessionID, Project: "example/repo", Agent: "claude", StartedAt: &started, MessageCount: 1}, Signals: SessionSignalUpdate{Outcome: "unknown"},
+		makeRecord := func(sessionID, remote, timestamp, model, usage string) FederationHubRecord {
+			return FederationHubRecord{UID: sessionID, Hash: "hash", Remote: remote, ProjectKey: "project", Write: SessionBatchWrite{
+				Session: Session{ID: sessionID, Project: remote, Agent: "claude", StartedAt: &started, MessageCount: 1}, Signals: SessionSignalUpdate{Outcome: "unknown"},
 				Messages: []Message{{SessionID: sessionID, Ordinal: 0, Role: "assistant", Timestamp: timestamp, Model: model, TokenUsage: jsontext.Value(usage), ClaudeMessageID: messageID, ClaudeRequestID: "request"}}, ReplaceMessages: true,
 			}}
 		}
-		first := makeRecord(parent, "2026-07-28T09:05:00Z", "partial-model", `{"input_tokens":10,"output_tokens":5}`)
-		winner := makeRecord(child, "2026-07-28T09:06:00Z", "complete-model", `{"input_tokens":1000,"output_tokens":631}`)
-		_, err = d.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", []FederationHubRecord{first, winner})
-		require.NoError(t, err)
+		first := makeRecord(parent, "example/repo", "2026-07-28T09:05:00Z", "partial-model", `{"input_tokens":10,"output_tokens":5}`)
+		winner := makeRecord(child, "example/repo", "2026-07-28T09:06:00Z", "complete-model", `{"input_tokens":1000,"output_tokens":631}`)
+		for _, record := range []FederationHubRecord{first, winner} {
+			share := "share-" + record.UID
+			_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: record.Remote, ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+			require.NoError(t, err)
+			_, err = d.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", []FederationHubRecord{record})
+			require.NoError(t, err)
+		}
 	}
 	date := time.Date(2026, 7, 28, 0, 0, 0, 0, time.UTC)
 	tx, err := d.getReader().BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
