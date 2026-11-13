@@ -70,6 +70,73 @@ type reportingJointContribution struct {
 	unpriced     bool
 }
 
+// walkReportingHourUsage normalizes each retained hourly row once for both
+// public joint cells and private contributor support.
+func walkReportingHourUsage(start time.Time, bucket time.Duration, usage []activity.UsageRow,
+	sessions map[string]activity.SessionMeta, projects map[string]export.ProjectMapEntry,
+	visit func(activity.UsageRow, activity.SessionMeta, bool, time.Time, reportingCellKey, reportingJointContributor) error,
+) error {
+	end := start.Add(time.Hour)
+	for _, row := range usage {
+		at, err := parseTimestamp(row.Timestamp)
+		if err != nil || at.Before(start) || !at.Before(end) {
+			continue
+		}
+		session, known := sessions[row.SessionID]
+		agent, automation, projectKey := row.Agent, "unknown", ""
+		if known {
+			projectKey = export.ProjectKeyForEntry(projects[session.Project])
+			automation = session.ActivityCategory()
+			if agent == "" {
+				agent = session.Agent
+			}
+		}
+		if agent == "" {
+			agent = "unknown"
+		}
+		model := row.Model
+		if model == "" {
+			model = "unknown"
+		}
+		at = at.UTC().Truncate(bucket)
+		key := reportingCellKey{at.Format(time.RFC3339), projectKey, agent, model, automation}
+		identity := reportingJointContributor{source: row.SourceSessionID, attributed: row.SessionID}
+		if identity.source == "" {
+			identity.source = row.SessionID
+		}
+		if err := visit(row, session, known, at, key, identity); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func addReportingJointSupport(support reportingJointSupport, key reportingCellKey, identity reportingJointContributor, row activity.UsageRow) error {
+	if support[key] == nil {
+		support[key] = map[reportingJointContributor]*reportingJointContribution{}
+	}
+	if support[key][identity] == nil {
+		support[key][identity] = &reportingJointContribution{}
+	}
+	contribution := support[key][identity]
+	if err := contribution.usage.add(row); err != nil {
+		return fmt.Errorf("sum joint contributor usage: %w", err)
+	}
+	contribution.costObserved = contribution.costObserved || row.Priced || row.Cost.Microdollars != 0
+	contribution.unpriced = contribution.unpriced || !row.Priced
+	return nil
+}
+
+func reportingHourSupport(start time.Time, bucket time.Duration, usage []activity.UsageRow,
+	sessions map[string]activity.SessionMeta, projects map[string]export.ProjectMapEntry,
+) (reportingJointSupport, error) {
+	support := reportingJointSupport{}
+	err := walkReportingHourUsage(start, bucket, usage, sessions, projects, func(row activity.UsageRow, _ activity.SessionMeta, _ bool, _ time.Time, key reportingCellKey, identity reportingJointContributor) error {
+		return addReportingJointSupport(support, key, identity, row)
+	})
+	return support, err
+}
+
 func jointReportingHour(
 	start time.Time, bucket time.Duration, activityCells []activity.JointActivityCell, activitySessions []activity.SessionRow, usage []activity.UsageRow,
 	sessions map[string]activity.SessionMeta, projects map[string]export.ProjectMapEntry,
@@ -112,58 +179,23 @@ func jointReportingHour(
 		state.cell.AgentMinutes += cell.AgentMinutes
 		state.cell.MaxAgents = cell.MaxAgents
 	}
-	end := start.Add(time.Hour)
-	for _, row := range usage {
-		at, err := parseTimestamp(row.Timestamp)
-		if err != nil || at.Before(start) || !at.Before(end) {
-			continue
-		}
-		session, known := sessions[row.SessionID]
-		agent, automation := row.Agent, "unknown"
-		projectKey := ""
+	err := walkReportingHourUsage(start, bucket, usage, sessions, projects, func(row activity.UsageRow, session activity.SessionMeta, known bool, at time.Time, key reportingCellKey, identity reportingJointContributor) error {
 		if known {
 			contributors[row.SessionID] = true
-			projectKey = export.ProjectKeyForEntry(projects[session.Project])
-			automation = session.ActivityCategory()
-			if agent == "" {
-				agent = session.Agent
-			}
 		}
-		state := cellFor(at.UTC().Truncate(bucket), session.Project, projectKey, agent, row.Model, automation)
+		state := cellFor(at, session.Project, key.projectKey, key.agent, key.model, key.automation)
 		if err := state.usage.add(row); err != nil {
-			return nil, fmt.Errorf("sum joint cell usage: %w", err)
+			return fmt.Errorf("sum joint cell usage: %w", err)
 		}
 		if len(support) > 0 && support[0] != nil {
-			key := reportingCellKey{at.UTC().Truncate(bucket).Format(time.RFC3339), projectKey, agent, row.Model, automation}
-			if key.agent == "" {
-				key.agent = "unknown"
+			if err := addReportingJointSupport(*support[0], key, identity, row); err != nil {
+				return err
 			}
-			if key.model == "" {
-				key.model = "unknown"
-			}
-			contributor := reportingJointContributor{source: row.SourceSessionID, attributed: row.SessionID}
-			if contributor.source == "" {
-				contributor.source = row.SessionID
-			}
-			cells := *support[0]
-			if cells[key] == nil {
-				cells[key] = map[reportingJointContributor]*reportingJointContribution{}
-			}
-			if cells[key][contributor] == nil {
-				cells[key][contributor] = &reportingJointContribution{}
-			}
-			contribution := cells[key][contributor]
-			if err := contribution.usage.add(row); err != nil {
-				return nil, fmt.Errorf("sum joint contributor usage: %w", err)
-			}
-			contribution.costObserved = contribution.costObserved || row.Priced || row.Cost.Microdollars != 0
-			contribution.unpriced = contribution.unpriced || !row.Priced
 		}
 		if !row.Priced {
 			state.cell.Pricing.UnpricedRows++
 		}
-		// Token pricing may be unknown while a service fee is still known.
-		// Keep that fee in the cost partition as well as the usage total.
+		// An unpriced token row can still carry a known service fee.
 		cost := &state.cell.Pricing.ComputedCost
 		switch {
 		case row.CostAllocated:
@@ -171,11 +203,17 @@ func jointReportingHour(
 		case row.CostSource == export.CostSourceReported:
 			cost = &state.cell.Pricing.ReportedCost
 		}
+		var err error
 		*cost, err = money.Add(*cost, row.Cost)
 		if err != nil {
-			return nil, fmt.Errorf("sum joint cell pricing: %w", err)
+			return fmt.Errorf("sum joint cell pricing: %w", err)
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
+
 	keys := slices.Clone(projectKeys)
 	slices.Sort(keys)
 	joint := &export.ReportingJoint{ProjectKeys: slices.Compact(keys), Cells: make([]export.ReportingCell, 0, len(states))}

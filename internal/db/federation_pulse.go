@@ -513,8 +513,7 @@ func (db *DB) readFederationPulse(ctx context.Context, since string, minimum int
 		// The joint owner selects the same hourly rows and accumulates the same
 		// allocated usage as export, alongside private per-source evidence.
 		for hour := start; hour.Before(end); hour = hour.Add(time.Hour) {
-			support := reportingJointSupport{}
-			_, err := jointReportingHour(hour, time.Hour, nil, nil, usage, byID, source.projects, source.references, nil, &support)
+			support, err := reportingHourSupport(hour, time.Hour, usage, byID, source.projects)
 			if err != nil {
 				return err
 			}
