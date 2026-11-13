@@ -310,3 +310,16 @@ func TestFederationPulseTextQualifiesPartialCost(t *testing.T) {
 	require.NoError(t, printFederationPulse(&out, db.FederationPulse{Totals: map[string]db.FederationPulseMetric{"cost_microdollars": {Value: new(int64(600)), State: "partial"}}}))
 	assert.Contains(t, out.String(), "cost_microdollars: 600 (partial)")
 }
+
+func TestFederationPulseSurfacesDateInputError(t *testing.T) {
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "2026-02-30", r.URL.Query().Get("since"))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"detail":"since must be a non-future date in YYYY-MM-DD format"}`)
+	}))
+	t.Cleanup(daemon.Close)
+	var pulse db.FederationPulse
+	err := fetchFederationPulse(t.Context(), daemon.URL, "", "2026-02-30", &pulse)
+	assert.ErrorContains(t, err, "since must be a non-future date in YYYY-MM-DD format")
+}

@@ -40,6 +40,10 @@ func TestPulseRejectsInvalidDateAndWrongRole(t *testing.T) {
 		_, err = hub.Pulse(t.Context(), date)
 		require.NoError(t, err)
 	}
+	invalidPolicy := NewService("hub", "hub", config.FederationHubConfig{MinGroupSize: 0}, archive)
+	_, err = invalidPolicy.Pulse(t.Context(), "")
+	require.ErrorAs(t, err, &input)
+	assert.EqualError(t, err, "pulse requires a positive minimum group size")
 	spoke := NewService("spoke", "spoke", config.FederationHubConfig{MinGroupSize: 3}, archive)
 	_, err = spoke.Pulse(t.Context(), "")
 	assert.ErrorAs(t, err, &input)
@@ -56,6 +60,8 @@ func TestPulseReturnsArchiveReadFailure(t *testing.T) {
 	require.NoError(t, archive.Close())
 	_, err = hub.Pulse(t.Context(), "")
 	assert.Error(t, err)
+	var input *InputError
+	assert.NotErrorAs(t, err, &input)
 }
 
 func TestStatusKeepsLocalSharesWhenPeerReturnsHTTPError(t *testing.T) {

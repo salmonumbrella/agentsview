@@ -68,10 +68,16 @@ func federationResponse(ctx context.Context, base, token, method, path string, b
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		var response struct {
-			Error string `json:"error"`
+			Error  string `json:"error"`
+			Detail string `json:"detail"`
 		}
-		if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&response) == nil && response.Error != "" {
-			return nil, fmt.Errorf("federation: %s", response.Error)
+		if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&response) == nil {
+			if response.Error != "" {
+				return nil, fmt.Errorf("federation: %s", response.Error)
+			}
+			if resp.StatusCode == http.StatusBadRequest && response.Detail != "" {
+				return nil, fmt.Errorf("federation: %s", response.Detail)
+			}
 		}
 		return nil, fmt.Errorf("federation daemon request returned HTTP %d", resp.StatusCode)
 	}

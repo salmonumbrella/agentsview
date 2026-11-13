@@ -310,6 +310,13 @@ func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T)
 	assert.Equal(t, Ptr(int64(3)), got.Totals["sessions"].Value)
 	assert.Equal(t, Ptr(int64(60)), got.Totals["tokens"].Value)
 	assert.Equal(t, "unavailable", got.Totals["health_observed_sessions"].State)
+	ancient, err := d.readFederationPulse(ctx, "0001-01-01", 3, time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	assert.Equal(t, Ptr("0001-01-01"), ancient.Since)
+	assert.Equal(t, Ptr(int64(3)), ancient.Totals["sessions"].Value)
+	assert.Equal(t, Ptr(int64(60)), ancient.Totals["tokens"].Value)
+	assert.Equal(t, got.Totals["sessions"], ancient.Totals["sessions"])
+	assert.Equal(t, got.Totals["tokens"], ancient.Totals["tokens"])
 	require.Len(t, got.Projects, 1)
 	assert.Equal(t, "project-key", got.Projects[0].Key)
 	assert.Equal(t, Ptr(int64(60)), got.Projects[0].Totals["tokens"].Value)
@@ -844,7 +851,7 @@ func TestFederationPulsePartialCostRespectsCompletenessSupport(t *testing.T) {
 				_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
 				require.NoError(t, err)
 				cost := money.Money{Microdollars: int64((i + 1) * 100)}
-				rows := []UsageEvent{{Source: "fixture", Model: "known", InputTokens: 10, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: start, DedupKey: name + "-known"}}
+				rows := []UsageEvent{{Source: "fixture", Model: "synthetic-unpriced-model", InputTokens: 10, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: start, DedupKey: name + "-known"}}
 				if i < tc.unpriced {
 					rows = append(rows, UsageEvent{Source: "fixture", Model: "synthetic-unpriced-model", InputTokens: 20, OccurredAt: start, DedupKey: name + "-unknown"})
 				}
@@ -869,13 +876,13 @@ func TestFederationPulsePartialCostRespectsCompletenessSupport(t *testing.T) {
 			if !tc.suppressed {
 				require.Len(t, pulse.Projects, 1)
 				assert.Equal(t, tc.wantState, pulse.Projects[0].Totals["cost_microdollars"].State)
-				if tc.unpriced == 3 {
-					for _, model := range pulse.Models {
-						if model.Key == "synthetic-unpriced-model" {
-							assert.Equal(t, "unavailable", model.Metrics["cost_microdollars"].State)
-						}
-					}
-				}
+				require.Len(t, pulse.Agents, 1)
+				require.Len(t, pulse.Models, 1)
+				assert.Equal(t, "synthetic-unpriced-model", pulse.Models[0].Key)
+				assert.Equal(t, tc.wantState, pulse.Agents[0].Metrics["cost_microdollars"].State)
+				assert.Equal(t, tc.wantValue, pulse.Agents[0].Metrics["cost_microdollars"].Value)
+				assert.Equal(t, tc.wantState, pulse.Models[0].Metrics["cost_microdollars"].State)
+				assert.Equal(t, tc.wantValue, pulse.Models[0].Metrics["cost_microdollars"].Value)
 			}
 		})
 	}
