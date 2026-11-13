@@ -180,7 +180,7 @@ func TestFederationSelectionAttachesUsageAcrossChunks(t *testing.T) {
 	assert.Equal(t, 1000, candidates.Rows[0].ModelUsage.InputTokens)
 }
 
-func TestFederationChangedCandidatesIncludeDeletionAndExcludeUnrelatedHistory(t *testing.T) {
+func TestFederationChangedCandidatesPageSessionsAndDeletions(t *testing.T) {
 	d := testDB(t)
 	ctx := t.Context()
 	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {

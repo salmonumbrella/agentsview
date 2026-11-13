@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -586,6 +587,9 @@ func TestFederationInventoryRejectsOversizedAndCompletesEmpty(t *testing.T) {
 	_, err := d.PutFederationHubShare(ctx, "spoke", FederationHubShare{UID: "share", EnrollmentUID: "enr", Remote: "example.org/repo", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
 	require.NoError(t, err)
 	page := FederationInventoryPage{Round: "round", Epoch: 1, Final: true, Items: make([]FederationInventoryItem, 1001)}
+	for i := range page.Items {
+		page.Items[i] = FederationInventoryItem{UID: fmt.Sprintf("item-%04d", i), Hash: "hash"}
+	}
 	_, err = d.ReconcileFederationPage(ctx, "enr", "spoke", "share", "policy", page)
 	require.ErrorIs(t, err, ErrFederationInvalidBatch)
 	page.Items = nil

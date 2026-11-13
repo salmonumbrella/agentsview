@@ -115,29 +115,20 @@ func TestPushPreservesLegacyOffsetTimestamps(t *testing.T) {
 func TestFullPushReconcilesRowsAfterSameGenerationRestore(t *testing.T) {
 	for _, keep := range []bool{false, true} {
 		t.Run(fmt.Sprintf("keep-local-%t", keep), func(t *testing.T) {
-			ctx := t.Context()
 			pgURL := testPGURL(t)
 			schema := fmt.Sprintf("agentsview_restore_full_%t", keep)
-			cleanNamedPGSchema(t, pgURL, schema)
 			t.Cleanup(func() { cleanNamedPGSchema(t, pgURL, schema) })
-			pg, err := Open(ctx, pgURL, schema, true)
-			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, pg.Close()) })
-			require.NoError(t, EnsureSchema(ctx, pg, schema))
+			syncer, local, pg, ctx := newSessionProvenancePushSync(t, schema)
+			syncer.machine = "machine"
 			unavailable, err := ensureVectorBaseSchemaPG(ctx, pg)
 			require.NoError(t, err)
 			if unavailable != "" {
 				t.Skip(unavailable)
 			}
-			local, err := db.Open(ctx, filepath.Join(t.TempDir(), "local.db"))
-			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, local.Close()) })
-			dbtest.SeedPricingMeta(t, local)
 			if keep {
 				require.NoError(t, local.UpsertSession(ctx, db.Session{ID: "kept", Project: "project", Machine: "machine", Agent: "claude", MessageCount: 1}))
 				require.NoError(t, local.UpsertSession(ctx, db.Session{ID: "out-of-scope", Project: "other", Machine: "machine", Agent: "claude", MessageCount: 1}))
 			}
-			syncer := &Sync{pg: pg, local: local, machine: "machine", schema: schema, schemaDone: true}
 			_, err = syncer.PushWithOptions(ctx, storage.PushOptions{Full: true}, nil)
 			require.NoError(t, err)
 			filtered := &Sync{pg: pg, local: local, machine: "machine", schema: schema, schemaDone: true, projects: []string{"project"}}

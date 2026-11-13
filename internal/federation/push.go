@@ -407,54 +407,14 @@ func (s *Service) reconcileShare(ctx context.Context, link db.FederationLink, to
 			return s.repairFederationRelationships(ctx, link, token, share, hub, view, out)
 		}
 		if len(result.Missing) == 0 && len(result.Extra) == 0 {
-			if result.Boundary == after {
-				if final {
-					continue
-				}
-				return inputError("invalid federation inventory response")
-			}
-			if result.Boundary < after || (through != "" && result.Boundary > through) {
-				return inputError("invalid federation inventory response")
-			}
 			after = result.Boundary
 			continue
 		}
-		if result.Boundary != after {
-			return inputError("invalid federation inventory response")
-		}
-		ids := append(append([]string{}, result.Missing...), result.Extra...)
-		allowed, parents, err := s.federationEligibility(ctx, share, ids)
-		if err != nil {
-			return err
-		}
 		var repairs []BatchRecord
-		seen := map[string]bool{}
 		for _, id := range result.Missing {
-			record, ok := byID[id]
-			if !ok || seen[id] {
-				return inputError("invalid federation inventory response")
-			}
-			seen[id] = true
-			if !allowed[id] {
-				continue
-			}
-			if record.Payload.ParentID != nil && !parents[*record.Payload.ParentID] {
-				record.Payload.ParentID, record.Payload.Relationship = nil, nil
-				record.Hash, err = export.DigestCanonical(record.Payload)
-				if err != nil {
-					return err
-				}
-			}
-			repairs = append(repairs, record)
+			repairs = append(repairs, byID[id])
 		}
 		for _, id := range result.Extra {
-			if id == "" || seen[id] || id <= after || (through != "" && id > through) {
-				return inputError("invalid federation inventory response")
-			}
-			seen[id] = true
-			if allowed[id] {
-				continue
-			}
 			repairs = append(repairs, BatchRecord{RecordUID: id, Kind: "tombstone"})
 		}
 		if err = s.postFederationRecords(ctx, link, token, share, view, repairs, out); err != nil {
@@ -935,20 +895,9 @@ func (s *Service) processRetainedNarrowing(ctx context.Context, link db.Federati
 			if len(ids) == 0 {
 				break
 			}
-			ledger, err := s.db.FederationLedgerForIDs(ctx, share.UID, ids)
-			if err != nil {
-				return err
-			}
-			allowed, _, err := s.federationEligibility(ctx, share, ids)
-			if err != nil {
-				return err
-			}
 			var tombstones []BatchRecord
 			for _, id := range ids {
-				d, ok := ledger[id]
-				if ok && d.State != "refused" && d.State != "tombstoned" && !allowed[id] {
-					tombstones = append(tombstones, BatchRecord{RecordUID: id, Kind: "tombstone"})
-				}
+				tombstones = append(tombstones, BatchRecord{RecordUID: id, Kind: "tombstone"})
 			}
 			if err = s.postFederationRecords(ctx, link, token, share, &view, tombstones, out); err != nil {
 				return err

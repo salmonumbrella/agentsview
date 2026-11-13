@@ -563,7 +563,7 @@ func TestFederationInventoryResponseRejectsUntrustedRanges(t *testing.T) {
 		{"unknown missing", db.FederationInventoryResult{Boundary: "a", Covered: "z", Missing: []string{"c"}}},
 		{"duplicate extra", db.FederationInventoryResult{Boundary: "a", Covered: "z", Extra: []string{"c", "c"}}},
 		{"extra outside coverage", db.FederationInventoryResult{Boundary: "a", Covered: "c", Extra: []string{"d"}}},
-		{"premature complete", db.FederationInventoryResult{Complete: true}},
+		{"premature complete", db.FederationInventoryResult{Boundary: "z", Covered: "z", Complete: true}},
 		{"advance while repairing", db.FederationInventoryResult{Boundary: "z", Covered: "z", Missing: []string{"b"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -574,17 +574,29 @@ func TestFederationInventoryResponseRejectsUntrustedRanges(t *testing.T) {
 	assert.NoError(t, validateFederationInventoryResponse(page, db.FederationInventoryResult{Boundary: "z", Covered: "z"}))
 }
 
-func TestRetainedNarrowingDoesNotInferDeletionAfterArchiveReplacement(t *testing.T) {
-	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
+func TestRetainedNarrowingWithoutOutstandingDeliveryNeedsNoCredential(t *testing.T) {
+	ctx := t.Context()
+	archive, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "archive.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, archive.Close()) })
-	service := NewService("spoke", "spoke", config.FederationHubConfig{}, archive)
-	generation, err := archive.GetDatabaseID(t.Context())
+	link := db.FederationLink{UID: "link", HubOrigin: "https://hub.example", HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: "/missing", ProtocolVersion: ProtocolVersion, State: "active"}
+	require.NoError(t, archive.PutFederationLink(ctx, link))
+	require.NoError(t, archive.PutFederationShare(ctx, db.FederationShare{UID: "share", LinkUID: link.UID, NormalizedRemote: "example.org/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: "{}", PolicyDigest: "policy"}))
+	generation, err := archive.GetDatabaseID(ctx)
 	require.NoError(t, err)
+	_, err = archive.SetFederationGeneration(ctx, link.UID, "share", generation)
+	require.NoError(t, err)
+	require.NoError(t, archive.StopFederationShare(ctx, link.UID, "share", "remove"))
+	require.NoError(t, archive.ReceiptFederationStop(ctx, link.UID, "share", "retained", 1, 0))
+	service := NewService("spoke", "spoke", config.FederationHubConfig{}, archive)
 	for _, source := range []string{"replaced-generation", generation} {
-		share := db.FederationShare{UID: "share", State: "paused", StopReceipt: "retained", SourceGeneration: source}
-		err = service.processRetainedNarrowing(t.Context(), db.FederationLink{TokenFile: "/missing"}, []db.FederationShare{share}, &PushResult{})
-		require.NoError(t, err) // No delivered rows need cleanup or a credential.
+		require.NoError(t, archive.Update(ctx, func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `UPDATE federation_shares SET source_generation=? WHERE share_uid='share'`, source)
+			return err
+		}))
+		share, err := archive.GetFederationShare(ctx, link.UID, "share")
+		require.NoError(t, err)
+		require.NoError(t, service.processRetainedNarrowing(ctx, link, []db.FederationShare{share}, &PushResult{}))
 	}
 }
 
@@ -718,15 +730,14 @@ func TestRetainedPendingTombstoneIsNotReplayedAfterRestore(t *testing.T) {
 	saveSummaryFixture(t, archive, link.UID, "content-share", "claude", []string{"restored"}, true)
 	require.NoError(t, archive.StopFederationShare(ctx, link.UID, "content-share", "remove"))
 	require.NoError(t, archive.ReceiptFederationStop(ctx, link.UID, "content-share", "retained", 1, 1))
-	content, err := json.Marshal(Batch{Protocol: ProtocolVersion, SpokeInstance: "spoke", ShareUID: "content-share", Epoch: 1, Sequence: 2, Records: []BatchRecord{{RecordUID: "restored", Kind: "session_summary", Hash: "hash", Payload: &SummaryRecord{SessionID: "restored"}}}})
-	require.NoError(t, err)
-	require.NoError(t, archive.SaveFederationPending(ctx, "content-share", 2, string(content), nil))
+	saveSummaryFixture(t, archive, link.UID, "content-share", "claude", []string{"restored"}, false)
 	contentShare, err := archive.GetFederationShare(ctx, link.UID, "content-share")
 	require.NoError(t, err)
+	content := contentShare.PendingBatch
 	err = svc.processRetainedNarrowing(ctx, link, []db.FederationShare{contentShare}, &PushResult{})
 	require.ErrorContains(t, err, "unresolved delivery")
 	assert.Zero(t, batches)
 	stillPending, err = archive.GetFederationShare(ctx, link.UID, "content-share")
 	require.NoError(t, err)
-	assert.Equal(t, string(content), stillPending.PendingBatch)
+	assert.Equal(t, content, stillPending.PendingBatch)
 }

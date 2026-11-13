@@ -29,6 +29,25 @@ import (
 	"go.kenn.io/agentsview/internal/testutil"
 )
 
+func seedFederationLocalSession(t *testing.T, archive *db.DB, remote, id, path string) {
+	t.Helper()
+	ctx := t.Context()
+	key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
+	require.NoError(t, archive.Update(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install')`); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES(?,'fixture','install','claude',?,'2026-01-02T00:00:00Z',1)`, id, path); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES(?,'install','claude',?)`, id, path); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES(?,'fixture','install','2026-01-01','resolved',1,?,'git_remote',?)`, id, remote, key)
+		return err
+	}))
+}
+
 func TestFederationRevokePublishesCommittedPartialCleanup(t *testing.T) {
 	ctx := t.Context()
 	database := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "hub.db"))
@@ -317,20 +336,7 @@ func TestFederationInventoryResumesAfterFreshPolicyConsent(t *testing.T) {
 	spoke := federation.NewService("spoke", "spoke-a", oldPolicy, spokeDB)
 	require.NoError(t, spoke.Join(ctx, peer.URL, "hub-a", file))
 	remote := "github.com/example/repo"
-	key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
-	require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
-		for _, query := range []string{
-			`INSERT INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install')`,
-			`INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES('a','fixture','install','claude','fixture','2026-01-02T00:00:00Z',1)`,
-			`INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES('a','install','claude','fixture')`,
-		} {
-			if _, err := tx.ExecContext(ctx, query); err != nil {
-				return err
-			}
-		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES('a','fixture','install','2026-01-01','resolved',1,?,'git_remote',?)`, remote, key)
-		return err
-	}))
+	seedFederationLocalSession(t, spokeDB, remote, "a", "fixture")
 	grant := federation.ShareGrant{Project: remote, Level: "summary", Attribution: "pooled"}
 	preview, err := spoke.PreviewShare(ctx, grant)
 	require.NoError(t, err)
@@ -1403,26 +1409,10 @@ func TestFederationIndividualWithdrawalKeepsOtherSession(t *testing.T) {
 			}
 			require.NoError(t, spoke.Join(ctx, hubServer.URL, "hub-a", file))
 			remote := "github.com/example/repo"
-			key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
 			sourceDir := t.TempDir()
-			require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
-				if _, e := tx.ExecContext(ctx, `INSERT INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install')`); e != nil {
-					return e
-				}
-				for _, id := range []string{"a", "b"} {
-					path := filepath.Join(sourceDir, id)
-					if _, e := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES(?,'fixture','install','claude',?,'2026-01-02T00:00:00Z',1)`, id, path); e != nil {
-						return e
-					}
-					if _, e := tx.ExecContext(ctx, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES(?,'install','claude',?)`, id, path); e != nil {
-						return e
-					}
-					if _, e := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES(?,'fixture','install','2026-01-01','resolved',1,?,'git_remote',?)`, id, remote, key); e != nil {
-						return e
-					}
-				}
-				return nil
-			}))
+			for _, id := range []string{"a", "b"} {
+				seedFederationLocalSession(t, spokeDB, remote, id, filepath.Join(sourceDir, id))
+			}
 			for _, id := range []string{"a", "b"} {
 				require.NoError(t, spokeDB.ReplaceSessionUsageEvents(ctx, id, []db.UsageEvent{{SessionID: id, Source: "fixture", Model: "model", InputTokens: 42, OccurredAt: "2026-01-02T00:00:00Z", DedupKey: id}}))
 			}
@@ -1508,34 +1498,13 @@ func TestFederationRestoreReconcilesAndContinuesDeletion(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, old.Close()) })
 			remote := "github.com/example/repo"
-			key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
-			seed := func(archive *db.DB, ids ...string) {
-				t.Helper()
-				require.NoError(t, archive.Update(ctx, func(tx *sql.Tx) error {
-					if _, e := tx.ExecContext(ctx, `INSERT OR IGNORE INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install')`); e != nil {
-						return e
-					}
-					for _, id := range ids {
-						if _, e := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES(?,'fixture','install','claude',?,'2026-01-02T00:00:00Z',1)`, id, id); e != nil {
-							return e
-						}
-						if _, e := tx.ExecContext(ctx, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES(?,'install','claude',?)`, id, id); e != nil {
-							return e
-						}
-						if _, e := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES(?,'fixture','install','2026-01-01','resolved',1,?,'git_remote',?)`, id, remote, key); e != nil {
-							return e
-						}
-					}
-					return nil
-				}))
-			}
-			seed(old, "a")
+			seedFederationLocalSession(t, old, remote, "a", "a")
 			require.NoError(t, old.ReplaceSessionUsageEvents(ctx, "a", []db.UsageEvent{{SessionID: "a", Source: "fixture", Model: "model", InputTokens: 42, OccurredAt: "2026-01-02T00:00:00Z", DedupKey: "a-usage"}}))
 			// Preserve an earlier same-identity archive before federation state is
 			// copied back from the newer archive after its journals advance.
 			snapshot := filepath.Join(t.TempDir(), "snapshot.db")
 			require.NoError(t, old.SnapshotTo(ctx, snapshot))
-			seed(old, "c")
+			seedFederationLocalSession(t, old, remote, "c", "c")
 			spoke := federation.NewService("spoke", "spoke-a", cfg.Federation.Hub, old)
 			require.NoError(t, spoke.Join(ctx, peer.URL, "hub-a", file))
 			preview, err := spoke.PreviewShare(ctx, federation.ShareGrant{Project: remote, Level: "summary", Attribution: "pooled"})
@@ -1543,7 +1512,7 @@ func TestFederationRestoreReconcilesAndContinuesDeletion(t *testing.T) {
 			require.NoError(t, spoke.AddShare(ctx, preview))
 			_, err = spoke.Push(ctx)
 			require.NoError(t, err)
-			seed(old, "b")
+			seedFederationLocalSession(t, old, remote, "b", "b")
 			_, err = spoke.Push(ctx)
 			require.NoError(t, err)
 			require.NoError(t, old.DeleteSession(ctx, "c"))
@@ -1557,7 +1526,7 @@ func TestFederationRestoreReconcilesAndContinuesDeletion(t *testing.T) {
 			if mode == "copied generation" {
 				restored, err = db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "replacement.db"))
 				require.NoError(t, err)
-				seed(restored, "a")
+				seedFederationLocalSession(t, restored, remote, "a", "a")
 				require.NoError(t, restored.CopyFederationStateFrom(ctx, old.Path()))
 			} else {
 				restored, err = db.OpenIsolated(ctx, snapshot)
@@ -1657,24 +1626,9 @@ func TestRetainedSnapshotRecoversHubSequenceWithoutSendingContent(t *testing.T) 
 			spoke := federation.NewService("spoke", "spoke-a", cfg.Federation.Hub, spokeDB)
 			require.NoError(t, spoke.Join(ctx, peer.URL, "hub-a", file))
 			remote := "github.com/example/repo"
-			key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
-			require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
-				if _, err := tx.ExecContext(ctx, `INSERT INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install')`); err != nil {
-					return err
-				}
-				for _, id := range []string{"a", "b", "c"} {
-					if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES(?,'fixture','install','claude',?,'2026-01-02T00:00:00Z',1)`, id, id); err != nil {
-						return err
-					}
-					if _, err := tx.ExecContext(ctx, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES(?,'install','claude',?)`, id, id); err != nil {
-						return err
-					}
-					if _, err := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES(?,'fixture','install','2026-01-01','resolved',1,?,'git_remote',?)`, id, remote, key); err != nil {
-						return err
-					}
-				}
-				return nil
-			}))
+			for _, id := range []string{"a", "b", "c"} {
+				seedFederationLocalSession(t, spokeDB, remote, id, id)
+			}
 			for _, id := range []string{"b", "c"} {
 				require.NoError(t, spokeDB.ReplaceSessionUsageEvents(ctx, id, []db.UsageEvent{{SessionID: id, Source: "fixture", Model: "model", InputTokens: 42, OccurredAt: "2026-01-02T00:00:00Z", DedupKey: id}}))
 			}
@@ -1977,24 +1931,7 @@ func TestFederationOfflineStopBeforeNewEpochRegistration(t *testing.T) {
 			spoke := federation.NewService("spoke", "spoke-a", cfg.Federation.Hub, spokeDB)
 			require.NoError(t, spoke.Join(ctx, peer.URL, "hub-a", file))
 			remote := "github.com/example/repo"
-			key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
-			seed := func(id string) {
-				t.Helper()
-				require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
-					if _, e := tx.ExecContext(ctx, `INSERT OR IGNORE INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install')`); e != nil {
-						return e
-					}
-					if _, e := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES(?,'fixture','install','claude',?,'2026-01-02T00:00:00Z',1)`, id, id); e != nil {
-						return e
-					}
-					if _, e := tx.ExecContext(ctx, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES(?,'install','claude',?)`, id, id); e != nil {
-						return e
-					}
-					_, e := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES(?,'fixture','install','2026-01-01','resolved',1,?,'git_remote',?)`, id, remote, key)
-					return e
-				}))
-			}
-			seed("a")
+			seedFederationLocalSession(t, spokeDB, remote, "a", "a")
 			require.NoError(t, spokeDB.ReplaceSessionUsageEvents(ctx, "a", []db.UsageEvent{{SessionID: "a", Source: "fixture", Model: "model", InputTokens: 42, OccurredAt: "2026-01-02T00:00:00Z", DedupKey: "a-usage"}}))
 			grant := federation.ShareGrant{Project: remote, Level: "summary", Attribution: "pooled"}
 			preview, err := spoke.PreviewShare(ctx, grant)
@@ -2066,7 +2003,7 @@ func TestFederationOfflineStopBeforeNewEpochRegistration(t *testing.T) {
 					_, e := tx.ExecContext(ctx, `UPDATE sessions SET message_count=9 WHERE id='a'`)
 					return e
 				}))
-				seed("b")
+				seedFederationLocalSession(t, spokeDB, remote, "b", "b")
 				_, err = spoke.Push(ctx)
 				require.NoError(t, err)
 				var count, b int
