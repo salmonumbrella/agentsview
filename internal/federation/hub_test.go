@@ -101,7 +101,7 @@ func TestStopManifestUsesConsentedRetentionAndStaleRegisterStaysStopped(t *testi
 // A change to any published membership or availability dimension must not
 // become a second view of a single member while another project stays useful.
 func TestHubPulseProtectsWholeSummaryAfterOneMemberChanges(t *testing.T) {
-	for _, dimension := range []string{"agent", "model", "outcome", "health", "automation", "cost-availability", "zero-to-unknown"} {
+	for _, dimension := range []string{"agent", "model", "outcome", "health", "automation", "cost-availability", "zero-to-unknown", "partial-to-known"} {
 		t.Run(dimension, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			ctx := t.Context()
@@ -130,6 +130,8 @@ func TestHubPulseProtectsWholeSummaryAfterOneMemberChanges(t *testing.T) {
 				m.payload = SummaryRecord{SessionID: name, Remote: remote, ProjectKey: key, Agent: "codex", StartedAt: &started, Outcome: "unknown", ByModel: map[string]db.SessionModelUsageBreakdown{"model": {InputTokens: (i + 1) * 10, HasCost: true, Cost: money.Money{Microdollars: int64((i + 1) * 100)}}}}
 				if dimension == "zero-to-unknown" {
 					m.payload.ByModel = map[string]db.SessionModelUsageBreakdown{"model": {InputTokens: (i + 1) * 10, HasCost: true, Cost: money.Money{}}}
+				} else if dimension == "partial-to-known" {
+					m.payload.ByModel["unpriced"] = db.SessionModelUsageBreakdown{InputTokens: 1}
 				}
 				enrollment, _, err := hub.Enroll(ctx, m.spoke, name, "")
 				require.NoError(t, err)
@@ -154,13 +156,20 @@ func TestHubPulseProtectsWholeSummaryAfterOneMemberChanges(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, first.Projects, 2)
 			require.NotNil(t, first.Totals["tokens"].Value)
-			assert.EqualValues(t, 210, *first.Totals["tokens"].Value)
+			if dimension == "partial-to-known" {
+				assert.EqualValues(t, 216, *first.Totals["tokens"].Value)
+			} else {
+				assert.EqualValues(t, 210, *first.Totals["tokens"].Value)
+			}
 			require.NotNil(t, first.Totals["cost_microdollars"].Value)
 			if dimension == "zero-to-unknown" {
 				assert.EqualValues(t, 0, *first.Totals["cost_microdollars"].Value)
 				assert.Equal(t, "available", first.Totals["cost_microdollars"].State)
 			} else {
 				assert.EqualValues(t, 2100, *first.Totals["cost_microdollars"].Value)
+				if dimension == "partial-to-known" {
+					assert.Equal(t, "partial", first.Totals["cost_microdollars"].State)
+				}
 			}
 			p := &members[0].payload
 			switch dimension {
@@ -177,6 +186,8 @@ func TestHubPulseProtectsWholeSummaryAfterOneMemberChanges(t *testing.T) {
 				p.Automated = true
 			case "cost-availability", "zero-to-unknown":
 				p.ByModel = map[string]db.SessionModelUsageBreakdown{"model": {InputTokens: 10}}
+			case "partial-to-known":
+				p.ByModel["unpriced"] = db.SessionModelUsageBreakdown{InputTokens: 1, HasCost: true, Cost: money.Money{Microdollars: 1}}
 			}
 			apply(members[0], 2)
 			later, err := hub.Pulse(ctx, "2020-07-29")
@@ -200,13 +211,20 @@ func TestHubPulseProtectsWholeSummaryAfterOneMemberChanges(t *testing.T) {
 			require.NotNil(t, later.Projects[0].Totals["sessions"].Value)
 			assert.EqualValues(t, 3, *later.Projects[0].Totals["sessions"].Value)
 			require.NotNil(t, later.Projects[0].Totals["tokens"].Value)
-			assert.EqualValues(t, 150, *later.Projects[0].Totals["tokens"].Value)
+			if dimension == "partial-to-known" {
+				assert.EqualValues(t, 153, *later.Projects[0].Totals["tokens"].Value)
+			} else {
+				assert.EqualValues(t, 150, *later.Projects[0].Totals["tokens"].Value)
+			}
 			require.NotNil(t, later.Projects[0].Totals["cost_microdollars"].Value)
 			if dimension == "zero-to-unknown" {
 				assert.EqualValues(t, 0, *later.Projects[0].Totals["cost_microdollars"].Value)
 				assert.Equal(t, "available", later.Projects[0].Totals["cost_microdollars"].State)
 			} else {
 				assert.EqualValues(t, 1500, *later.Projects[0].Totals["cost_microdollars"].Value)
+				if dimension == "partial-to-known" {
+					assert.Equal(t, "partial", later.Projects[0].Totals["cost_microdollars"].State)
+				}
 			}
 		})
 	}
