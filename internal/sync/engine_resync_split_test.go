@@ -176,6 +176,15 @@ func TestCanceledResyncDoesNotRecordSourceFailure(t *testing.T) {
 // A staged replacement cannot publish, and the installed replacement must
 // preserve history while the retired physical archive can no longer publish.
 func TestResyncPulseKeepsHistoryAndRetiresOldReader(t *testing.T) {
+	for _, interrupted := range []bool{false, true} {
+		t.Run(strconv.FormatBool(interrupted), func(t *testing.T) {
+			testResyncPulseKeepsHistory(t, interrupted)
+		})
+	}
+}
+
+func testResyncPulseKeepsHistory(t *testing.T, interrupted bool) {
+	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	ctx := t.Context()
 	e, database, _ := newResyncSplitEngine(t)
@@ -218,8 +227,23 @@ func TestResyncPulseKeepsHistoryAndRetiresOldReader(t *testing.T) {
 	assert.Empty(t, pending.Projects)
 	assert.Nil(t, pending.Totals)
 	require.NoError(t, staged.Close())
-	installed, err := e.SwapResyncDatabase(ctx, tempPath)
-	require.NoError(t, err)
+	var installed bool
+	if interrupted {
+		ops := productionRebuildOperations
+		ops.reopen = func(*db.DB) error { return errors.New("synthetic reopen failure") }
+		var stats SyncStats
+		installed, err = e.swapResyncDatabaseLocked(ctx, nil, tempPath, ops, &stats)
+		require.Error(t, err)
+		require.True(t, stats.Aborted)
+		pending, pendingErr := database.FederationPulse(ctx, day.Format(time.DateOnly), 3)
+		require.Error(t, pendingErr)
+		assert.Empty(t, pending.Projects)
+		assert.Nil(t, pending.Totals)
+		require.NoError(t, database.Reopen())
+	} else {
+		installed, err = e.SwapResyncDatabase(ctx, tempPath)
+		require.NoError(t, err)
+	}
 	require.True(t, installed)
 	require.NoError(t, e.ResetCachesAfterSwap(ctx))
 	old, err := retired.FederationPulse(ctx, day.AddDate(0, 0, -1).Format(time.DateOnly), 3)
