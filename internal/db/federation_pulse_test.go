@@ -122,3 +122,24 @@ func TestFederationPulseSuppressionProtectsSupportAtoms(t *testing.T) {
 	assert.Empty(t, clear)
 	assert.False(t, global)
 }
+
+func TestFederationPulseReadsStoredSignalsForSelectedSessions(t *testing.T) {
+	d := testDB(t)
+	insertSession(t, d, "selected", "fixture", func(s *Session) {})
+	insertSession(t, d, "missing", "fixture", func(s *Session) {})
+	insertSession(t, d, "other", "fixture", func(s *Session) {})
+	updateSignals(t, d, "missing", SessionSignalUpdate{Outcome: ""})
+	updateSignals(t, d, "selected", SessionSignalUpdate{Outcome: "unknown", HealthGrade: Ptr("D")})
+	updateSignals(t, d, "other", SessionSignalUpdate{Outcome: "completed", HealthGrade: Ptr("A")})
+	tx, err := d.getReader().BeginTx(t.Context(), &sql.TxOptions{ReadOnly: true})
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	got, err := federationPulseSignals(t.Context(), tx, []string{"selected", "missing"})
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	assert.Equal(t, "unknown", got["selected"].Outcome)
+	assert.Equal(t, Ptr("D"), got["selected"].HealthGrade)
+	assert.Empty(t, got["missing"].Outcome)
+	assert.Nil(t, got["missing"].HealthGrade)
+	assert.NotContains(t, got, "other")
+}

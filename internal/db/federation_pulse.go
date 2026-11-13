@@ -181,3 +181,28 @@ func federationPulseSuppression(
 	}
 	return hidden, len(hidden) > 0
 }
+
+func federationPulseSignals(ctx context.Context, tx *sql.Tx, ids []string) (map[string]SignalRow, error) {
+	out := make(map[string]SignalRow, len(ids))
+	err := queryChunked(ids, func(chunk []string) error {
+		ph, args := InPlaceholders(chunk)
+		rows, err := tx.QueryContext(ctx, `SELECT id, outcome, health_grade FROM sessions WHERE id IN `+ph, args...)
+		if err != nil {
+			return fmt.Errorf("query pulse signals: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var row SignalRow
+			var grade sql.NullString
+			if err := rows.Scan(&row.ID, &row.Outcome, &grade); err != nil {
+				return fmt.Errorf("scan pulse signals: %w", err)
+			}
+			if grade.Valid {
+				row.HealthGrade = &grade.String
+			}
+			out[row.ID] = row
+		}
+		return rows.Err()
+	})
+	return out, err
+}
