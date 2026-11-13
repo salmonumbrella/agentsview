@@ -346,3 +346,61 @@ func TestHubPulseProtectsJointSevenMemberHistory(t *testing.T) {
 	}
 	assert.True(t, firstThreeWithheld, "28 plus 6, 10 and 14 exposes the first member")
 }
+
+// Computed cost shares the same token observations, including per-row rounding.
+func TestHubPulseProtectsComputedSummaryCost(t *testing.T) {
+	ctx := t.Context()
+	archive, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "hub.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, archive.Close()) })
+	require.NoError(t, archive.UpsertModelPricingContext(ctx, []db.ModelPricing{{ModelPattern: "synthetic-half", InputPerMTok: money.Money{Microdollars: 500000}}}))
+	cfg, err := config.Default()
+	require.NoError(t, err)
+	cfg.Federation.Hub.SuggestedProjects = []string{}
+	hub := NewService("hub", "hub", cfg.Federation.Hub, archive)
+	digest, err := export.DigestCanonical(cfg.Federation.Hub)
+	require.NoError(t, err)
+	remote := "github.com/example/computed"
+	key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
+	started := "2020-07-29T09:00:00Z"
+	enrollments := make([]string, 3)
+	apply := func(i, tokens int, sequence int64) {
+		t.Helper()
+		name := []string{"a", "b", "c"}[i]
+		spoke, share := "spoke-"+name, "share-"+name
+		payload := SummaryRecord{SessionID: name, Remote: remote, ProjectKey: key, Agent: "codex", StartedAt: &started, Outcome: "unknown", ByModel: map[string]db.SessionModelUsageBreakdown{"synthetic-half": {InputTokens: tokens}}}
+		hash, err := export.DigestCanonical(payload)
+		require.NoError(t, err)
+		ack, err := hub.ApplyBatch(ctx, enrollments[i], spoke, share, Batch{Protocol: ProtocolVersion, SpokeInstance: spoke, ShareUID: share, Epoch: 1, Sequence: sequence, Records: []BatchRecord{{RecordUID: name, Kind: "session_summary", Hash: hash, Payload: &payload}}})
+		require.NoError(t, err)
+		assert.Empty(t, ack.Refused)
+	}
+	for i, name := range []string{"a", "b", "c"} {
+		spoke, share := "spoke-"+name, "share-"+name
+		enrollment, _, err := hub.Enroll(ctx, spoke, name, "")
+		require.NoError(t, err)
+		enrollments[i] = enrollment.UID
+		_, err = hub.RegisterShare(ctx, enrollment.UID, spoke, share, ShareManifest{Protocol: ProtocolVersion, SpokeInstance: spoke, ShareUID: share, Epoch: 1, Remote: remote, ProjectKey: key, Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: digest})
+		require.NoError(t, err)
+		apply(i, []int{3, 5, 7}[i], 1)
+	}
+	first, err := hub.Pulse(ctx, "2020-07-29")
+	require.NoError(t, err)
+	require.NotNil(t, first.Totals["sessions"].Value)
+	assert.EqualValues(t, 3, *first.Totals["sessions"].Value)
+	require.NotNil(t, first.Totals["tokens"].Value)
+	assert.EqualValues(t, 15, *first.Totals["tokens"].Value)
+	require.NotNil(t, first.Totals["cost_microdollars"].Value)
+	assert.EqualValues(t, 9, *first.Totals["cost_microdollars"].Value)
+	apply(0, 5, 2)
+	day, err := archive.ExportReportingDay(ctx, db.ReportingExportOptions{Date: time.Date(2020, 7, 29, 0, 0, 0, 0, time.UTC), Now: time.Date(2020, 7, 30, 0, 0, 0, 0, time.UTC), SchemaVersion: export.ReportingJointSchemaVersion})
+	require.NoError(t, err)
+	assert.EqualValues(t, 17, day.Hours[9].Usage.Totals.InputTokens)
+	assert.EqualValues(t, 10, day.Hours[9].Usage.Totals.Cost.Microdollars)
+	later, err := hub.Pulse(ctx, "2020-07-29")
+	require.NoError(t, err)
+	assert.True(t, later.Suppressed)
+	assert.Empty(t, later.Projects)
+	assert.Nil(t, later.Totals["tokens"].Value)
+	assert.Nil(t, later.Totals["cost_microdollars"].Value)
+}
