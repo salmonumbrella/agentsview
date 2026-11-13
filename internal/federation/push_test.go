@@ -67,9 +67,10 @@ func TestStopRetriesAfterHubEpochAhead(t *testing.T) {
 }
 
 func TestRetiredCleanupFailureDoesNotBlockCurrentShare(t *testing.T) {
-	for _, fault := range []string{"missing credential", "offline", "revoked", "identity mismatch", "retained generation", "current error"} {
+	for _, fault := range []string{"missing credential", "offline", "revoked", "identity mismatch", "retained generation", "current error", "canceled"} {
 		t.Run(fault, func(t *testing.T) {
-			ctx := t.Context()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
 			archive, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "archive.db"))
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, archive.Close()) })
@@ -117,6 +118,10 @@ func TestRetiredCleanupFailureDoesNotBlockCurrentShare(t *testing.T) {
 					return
 				}
 				assert.Equal(t, http.MethodGet, r.Method)
+				if fault == "canceled" {
+					cancel()
+					return
+				}
 				state, hubID := "enrolled", "hub-a"
 				if fault == "revoked" {
 					state = "revoked"
@@ -161,7 +166,11 @@ func TestRetiredCleanupFailureDoesNotBlockCurrentShare(t *testing.T) {
 			svc := NewService("spoke", "spoke", policy, archive)
 			result, pushErr := svc.Push(ctx)
 			require.Error(t, pushErr)
-			if fault == "current error" {
+			if fault == "canceled" {
+				assert.ErrorIs(t, pushErr, context.Canceled)
+				assert.Zero(t, result.Sent)
+				assert.Empty(t, delivered)
+			} else if fault == "current error" {
 				assert.Zero(t, result.Sent)
 				assert.Empty(t, delivered)
 				assert.ErrorContains(t, pushErr, "HTTP 503")
@@ -169,7 +178,7 @@ func TestRetiredCleanupFailureDoesNotBlockCurrentShare(t *testing.T) {
 				assert.Equal(t, 1, result.Sent)
 				assert.Equal(t, []string{"selected"}, delivered)
 			}
-			pending, err := archive.GetFederationShare(ctx, old.UID, "old-share")
+			pending, err := archive.GetFederationShare(t.Context(), old.UID, "old-share")
 			require.NoError(t, err)
 			if fault == "current error" {
 				assert.Equal(t, "purged", pending.StopReceipt)
