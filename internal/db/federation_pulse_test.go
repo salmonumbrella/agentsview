@@ -377,7 +377,7 @@ func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T)
 // These regressions describe the accepted cross-release privacy requirement.
 // The publication policy is still open; no admission bypass is used here.
 func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
-	for _, scenario := range []string{"window", "reverse-window", "update", "copy-before-publication", "cancel-before-admission", "concurrent", "purge-regrant", "untraced-write", "reopen", "second-handle", "closed-writer", "untraced-session", "untraced-record"} {
+	for _, scenario := range []string{"window", "reverse-window", "update", "copy-before-publication", "copy-after-publication", "cancel-before-admission", "concurrent", "purge-regrant", "untraced-write", "reopen", "second-handle", "closed-writer", "untraced-session", "untraced-record"} {
 		t.Run(scenario, func(t *testing.T) {
 			d := testDB(t)
 			ctx := t.Context()
@@ -393,7 +393,7 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 				require.NoError(t, err)
 			}
 			now := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
-			if scenario == "window" || scenario == "reverse-window" || scenario == "copy-before-publication" || scenario == "cancel-before-admission" || scenario == "concurrent" || scenario == "purge-regrant" || scenario == "reopen" || scenario == "second-handle" || scenario == "closed-writer" {
+			if scenario == "window" || scenario == "reverse-window" || scenario == "copy-before-publication" || scenario == "copy-after-publication" || scenario == "cancel-before-admission" || scenario == "concurrent" || scenario == "purge-regrant" || scenario == "reopen" || scenario == "second-handle" || scenario == "closed-writer" {
 				older := "2026-07-28T09:00:00Z"
 				cost := money.Money{Microdollars: 70}
 				record := FederationHubRecord{UID: "a-older", Hash: "initial", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: "a-older", Project: "example/repo", Agent: "codex", StartedAt: &older}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: 7, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: older, DedupKey: "a-older"}}}}
@@ -477,6 +477,14 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 				assert.Equal(t, Ptr(int64(60)), first.Totals["tokens"].Value)
 				assert.Equal(t, Ptr(int64(600)), first.Totals["cost_microdollars"].Value)
 			}
+			if scenario == "copy-after-publication" {
+				copied = testDB(t)
+				require.NoError(t, copied.CopyArchiveIdentityFrom(ctx, d.Path()))
+				require.NoError(t, copied.CopyFederationStateFrom(ctx, d.Path()))
+				count, err := copied.CopyOrphanedDataFrom(ctx, d.Path())
+				require.NoError(t, err)
+				assert.Equal(t, 4, count)
+			}
 			if scenario == "purge-regrant" {
 				share := FederationHubShare{UID: "h-a", EnrollmentUID: "e-a", Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 2, State: "stopped", Retention: "member-controlled"}
 				_, err = d.PutFederationHubShare(ctx, "s-a", share)
@@ -523,7 +531,7 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 				assert.Equal(t, Ptr(int64(770)), fresh.Totals["cost_microdollars"].Value)
 				return
 			}
-			if scenario == "copy-before-publication" {
+			if scenario == "copy-before-publication" || scenario == "copy-after-publication" {
 				later, err := copied.readFederationPulse(ctx, "2026-07-28", 3, now)
 				if err != nil {
 					assert.Empty(t, later.Projects)
