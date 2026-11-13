@@ -7,6 +7,8 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -378,9 +380,10 @@ func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T)
 // These regressions describe the accepted cross-release privacy requirement.
 // The publication policy is still open; no admission bypass is used here.
 func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
-	for _, scenario := range []string{"window", "reverse-window", "update", "rolled-back-update", "copy-before-publication", "copy-after-publication", "cancel-before-admission", "concurrent", "purge-regrant", "untraced-write", "reopen", "second-handle", "closed-writer", "untraced-session", "untraced-record", "untraced-message", "untraced-tool-result", "untraced-exclusion"} {
+	for _, scenario := range []string{"window", "reverse-window", "update", "rolled-back-update", "missing-authority", "copy-before-publication", "copy-after-publication", "cancel-before-admission", "concurrent", "purge-regrant", "untraced-write", "reopen", "second-handle", "closed-writer", "untraced-session", "untraced-record", "untraced-message", "untraced-tool-result", "untraced-exclusion"} {
 		t.Run(scenario, func(t *testing.T) {
-			t.Setenv("HOME", t.TempDir())
+			home := t.TempDir()
+			t.Setenv("HOME", home)
 			d := testDB(t)
 			ctx := t.Context()
 			start := "2026-07-29T09:00:00Z"
@@ -478,6 +481,17 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 				assert.Equal(t, Ptr(int64(3)), first.Totals["sessions"].Value)
 				assert.Equal(t, Ptr(int64(60)), first.Totals["tokens"].Value)
 				assert.Equal(t, Ptr(int64(600)), first.Totals["cost_microdollars"].Value)
+			}
+			if scenario == "missing-authority" {
+				// Move the entire synthetic home, without assuming the registry's
+				// private on-disk filename or fabricating its internal state.
+				require.NoError(t, os.Rename(home, filepath.Join(t.TempDir(), "held-home")))
+				require.NoError(t, os.Mkdir(home, 0o700))
+				later, err := d.readFederationPulse(ctx, "2026-07-29", 3, now)
+				require.Error(t, err)
+				assert.Empty(t, later.Projects)
+				assert.Nil(t, later.Totals)
+				return
 			}
 			if scenario == "copy-after-publication" {
 				copied = testDB(t)
