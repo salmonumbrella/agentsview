@@ -101,7 +101,7 @@ func TestStopManifestUsesConsentedRetentionAndStaleRegisterStaysStopped(t *testi
 // A change to any published membership or availability dimension must not
 // become a second view of a single member while another project stays useful.
 func TestHubPulseProtectsWholeSummaryAfterOneMemberChanges(t *testing.T) {
-	for _, dimension := range []string{"agent", "model", "outcome", "health", "automation", "cost-availability", "zero-to-unknown", "partial-to-known"} {
+	for _, dimension := range []string{"agent", "model", "outcome", "outcome-unknown", "health", "health-absent", "automation", "usage-absent", "cost-availability", "zero-to-unknown", "partial-to-known"} {
 		t.Run(dimension, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			ctx := t.Context()
@@ -128,6 +128,13 @@ func TestHubPulseProtectsWholeSummaryAfterOneMemberChanges(t *testing.T) {
 				key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
 				m := member{name: name, spoke: "spoke-" + name, share: "share-" + name}
 				m.payload = SummaryRecord{SessionID: name, Remote: remote, ProjectKey: key, Agent: "codex", StartedAt: &started, Outcome: "unknown", ByModel: map[string]db.SessionModelUsageBreakdown{"model": {InputTokens: (i + 1) * 10, HasCost: true, Cost: money.Money{Microdollars: int64((i + 1) * 100)}}}}
+				if dimension == "outcome-unknown" {
+					m.payload.Outcome = "completed"
+				}
+				if dimension == "health-absent" {
+					grade := "A"
+					m.payload.Health = &grade
+				}
 				if dimension == "zero-to-unknown" {
 					m.payload.ByModel = map[string]db.SessionModelUsageBreakdown{"model": {InputTokens: (i + 1) * 10, HasCost: true, Cost: money.Money{}}}
 				} else if dimension == "partial-to-known" {
@@ -179,11 +186,17 @@ func TestHubPulseProtectsWholeSummaryAfterOneMemberChanges(t *testing.T) {
 				p.ByModel = map[string]db.SessionModelUsageBreakdown{"other": p.ByModel["model"]}
 			case "outcome":
 				p.Outcome = "completed"
+			case "outcome-unknown":
+				p.Outcome = "unknown"
 			case "health":
 				grade := "A"
 				p.Health = &grade
+			case "health-absent":
+				p.Health = nil
 			case "automation":
 				p.Automated = true
+			case "usage-absent":
+				p.ByModel = map[string]db.SessionModelUsageBreakdown{}
 			case "cost-availability", "zero-to-unknown":
 				p.ByModel = map[string]db.SessionModelUsageBreakdown{"model": {InputTokens: 10}}
 			case "partial-to-known":
@@ -208,6 +221,12 @@ func TestHubPulseProtectsWholeSummaryAfterOneMemberChanges(t *testing.T) {
 			assert.Empty(t, later.Categories)
 			require.Len(t, later.Projects, 1)
 			assert.Equal(t, members[3].payload.ProjectKey, later.Projects[0].Key)
+			require.NotNil(t, later.Projects[0].Ratios["usage_coverage"].Value)
+			assert.Equal(t, float64(1), *later.Projects[0].Ratios["usage_coverage"].Value)
+			if dimension == "health-absent" {
+				require.NotNil(t, later.Projects[0].Ratios["health_coverage"].Value)
+				assert.Equal(t, float64(1), *later.Projects[0].Ratios["health_coverage"].Value)
+			}
 			require.NotNil(t, later.Projects[0].Totals["sessions"].Value)
 			assert.EqualValues(t, 3, *later.Projects[0].Totals["sessions"].Value)
 			require.NotNil(t, later.Projects[0].Totals["tokens"].Value)
