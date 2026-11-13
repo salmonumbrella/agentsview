@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -78,4 +80,45 @@ func TestFederationRequestReturnsDaemonMessage(t *testing.T) {
 	t.Cleanup(daemon.Close)
 	err := federationRequest(t.Context(), daemon.URL, "", http.MethodGet, "/", nil, nil)
 	assert.EqualError(t, err, "federation: x")
+}
+
+func TestShareConfirmationPostsOnlyOnYes(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		posts int
+	}{{"n\n", 0}, {"", 0}, {"y\n", 1}} {
+		t.Run(tc.input, func(t *testing.T) {
+			posts := 0
+			daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v1/federation/shares/preview" {
+					_ = json.NewEncoder(w).Encode(federation.SharePreview{PolicyDigest: "shown"})
+					return
+				}
+				posts++
+				var p federation.SharePreview
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&p))
+				assert.Equal(t, "shown", p.PolicyDigest)
+				_, _ = io.WriteString(w, `{}`)
+			}))
+			t.Cleanup(daemon.Close)
+			var out bytes.Buffer
+			require.NoError(t, addFederationShare(t.Context(), daemon.URL, "", federation.ShareGrant{}, strings.NewReader(tc.input), &out))
+			assert.Equal(t, tc.posts, posts)
+		})
+	}
+}
+func TestFederationDryRunStreamsLargeResponse(t *testing.T) {
+	body := strings.Repeat("x", (1<<20)+1024)
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, body) }))
+	t.Cleanup(daemon.Close)
+	var out bytes.Buffer
+	require.NoError(t, streamFederationDryRun(t.Context(), daemon.URL, "", &out))
+	assert.Equal(t, body, out.String())
+}
+
+func TestFederationPushRequiresDryRun(t *testing.T) {
+	cmd := newFederationPushCommand()
+	cmd.SetArgs(nil)
+	err := cmd.ExecuteContext(t.Context())
+	assert.ErrorContains(t, err, "--dry-run is required")
 }

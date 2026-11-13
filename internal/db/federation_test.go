@@ -174,3 +174,99 @@ func TestDecodeFederationUserVersion(t *testing.T) {
 		assert.Equal(t, tc.archiveOnly, archiveOnly)
 	}
 }
+
+func TestFederationShareStateSurvivesCopyAndLeave(t *testing.T) {
+	ctx := t.Context()
+	source, target := testDB(t), testDB(t)
+	link := FederationLink{UID: "link-a", HubOrigin: "https://hub.example", HubArchiveID: "hub-a", EnrollmentUID: "enr-a", Member: "member-a", TokenFile: "/fixture/token", ProtocolVersion: 1, State: "active"}
+	require.NoError(t, source.PutFederationLink(ctx, link))
+	share := FederationShare{UID: "share-a", LinkUID: "link-a", NormalizedRemote: "github.com/example/api", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: `{"selected":1}`, PolicyDigest: "digest-a"}
+	require.NoError(t, source.PutFederationShare(ctx, share))
+	require.NoError(t, source.PutFederationExclusion(ctx, "session-a", "share-a", "private"))
+	require.NoError(t, target.CopyFederationStateFrom(ctx, source.Path()))
+	shares, err := target.ListFederationShares(ctx, "link-a")
+	require.NoError(t, err)
+	require.Len(t, shares, 1)
+	assert.Equal(t, `{"selected":1}`, shares[0].ConsentJSON)
+	require.NoError(t, target.PauseFederationSharesForPolicy(ctx, "link-a", "digest-b"))
+	shares, err = target.ListFederationShares(ctx, "link-a")
+	require.NoError(t, err)
+	require.Len(t, shares, 1)
+	assert.Equal(t, "policy_paused", shares[0].State)
+	assert.Equal(t, `{"selected":1}`, shares[0].ConsentJSON)
+	require.NoError(t, target.DeleteFederationLink(ctx))
+	shares, err = target.ListFederationShares(ctx, "link-a")
+	require.NoError(t, err)
+	assert.Empty(t, shares)
+	var reason string
+	require.NoError(t, target.Reader().QueryRow(ctx, `SELECT reason FROM federation_exclusions WHERE session_id = 'session-a'`).Scan(&reason))
+	assert.Equal(t, "private", reason)
+	require.NoError(t, target.PutFederationLink(ctx, link))
+	require.NoError(t, target.PutFederationShare(ctx, share))
+	require.NoError(t, target.Reader().QueryRow(ctx, `SELECT reason FROM federation_exclusions WHERE session_id = 'session-a'`).Scan(&reason))
+	assert.Equal(t, "private", reason)
+	var version int
+	require.NoError(t, target.Reader().QueryRow(ctx, `PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, federationVersionBase+CurrentDataVersion(), version)
+}
+
+func TestFederationShareDuplicateAndReconsent(t *testing.T) {
+	database := testDB(t)
+	ctx := t.Context()
+	first := FederationShare{UID: "share-a", LinkUID: "link-a", NormalizedRemote: "github.com/example/api", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: `{"shown":1}`, PolicyDigest: "old"}
+	require.NoError(t, database.PutFederationShare(ctx, first))
+	var version int
+	require.NoError(t, database.Reader().QueryRow(ctx, `PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, federationVersionBase+CurrentDataVersion(), version)
+	next := first
+	next.UID = "share-b"
+	next.ConsentJSON = `{"shown":2}`
+	next.PolicyDigest = "new"
+	require.ErrorIs(t, database.PutFederationShare(ctx, next), ErrFederationShareExists)
+	require.NoError(t, database.PauseFederationSharesForPolicy(ctx, "link-a", "new"))
+	require.NoError(t, database.PutFederationShare(ctx, next))
+	shares, err := database.ListFederationShares(ctx, "link-a")
+	require.NoError(t, err)
+	require.Len(t, shares, 1)
+	assert.Equal(t, "share-a", shares[0].UID)
+	assert.Equal(t, "active", shares[0].State)
+	assert.Equal(t, `{"shown":2}`, shares[0].ConsentJSON)
+	require.NoError(t, database.PutFederationExclusion(ctx, "session-a", "share-a", "private"))
+	require.NoError(t, database.DeleteFederationShare(ctx, "link-a", "share-a"))
+	require.NoError(t, database.PutFederationShare(ctx, next))
+	var reason string
+	require.NoError(t, database.Reader().QueryRow(ctx, `SELECT reason FROM federation_exclusions WHERE session_id='session-a'`).Scan(&reason))
+	assert.Equal(t, "private", reason)
+
+}
+
+func TestFederationShareDeliveryLedgerStartsEmpty(t *testing.T) {
+	database := testDB(t)
+	count, err := database.FederationDeliveryCount(t.Context(), "share-a")
+	require.NoError(t, err)
+	assert.Zero(t, count)
+}
+
+func TestFederationTablesUpgradePreservesSessions(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "archive.db")
+	archive, err := OpenIsolated(ctx, path)
+	require.NoError(t, err)
+	require.NoError(t, archive.Update(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO sessions (id,project,first_message) VALUES ('saved','fixture','preserve')`)
+		return err
+	}))
+	require.NoError(t, archive.Close())
+	old, err := sql.Open("sqlite3", path)
+	require.NoError(t, err)
+	_, err = old.ExecContext(ctx, `DROP TABLE federation_shares; DROP TABLE federation_exclusions; DROP TABLE federation_deliveries`)
+	require.NoError(t, err)
+	require.NoError(t, old.Close())
+	archive, err = OpenIsolated(ctx, path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, archive.Close()) })
+	var message string
+	require.NoError(t, archive.Reader().QueryRow(ctx, `SELECT first_message FROM sessions WHERE id='saved'`).Scan(&message))
+	assert.Equal(t, "preserve", message)
+	require.NoError(t, archive.PutFederationExclusion(ctx, "saved", "", "private"))
+}

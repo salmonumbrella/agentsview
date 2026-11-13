@@ -1501,3 +1501,13 @@ extraction advances the session's `sync_marker`, so the next incremental push
 sends it without changing the transcript revision. Global keyword search and
 substring and regex `tool_result` searches match this text in every backend,
 anchored to the message holding the tool call.
+
+## Federation share state
+
+Federation shares retain the preview and policy digest accepted by the member.
+Exclusions are keyed by session across the archive and survive share removal,
+leaving a hub, and resync. The federation version bit covers shares, exclusions,
+and delivery ledger rows, and resync copies them with the link state. Summary
+selection requires the exact local installation ID, a matching local source
+baseline, and no attached-archive or imported-artifact provenance. It uses each
+session's own repository snapshot in the same read transaction as its summary.

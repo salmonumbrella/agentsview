@@ -40,6 +40,7 @@ func TestFederationCredentialIsolation(t *testing.T) {
 				srv := New(config.Config{Host: "127.0.0.1", Port: 8080, AuthToken: "personal", RequireAuth: requireAuth}, database, nil, options...)
 				type operation struct{ method, path string }
 				ops := []operation{{http.MethodGet, "/"}, {http.MethodGet, "/api/ping"}, {http.MethodGet, "/debug/pprof/"}, {http.MethodGet, "/api/v1/federation/enrollments"}, {http.MethodPost, "/api/v1/federation/enrollments"}, {http.MethodPost, "/api/v1/federation/enrollments/enr-a/revoke"}}
+				ops = append(ops, operation{http.MethodPost, "/api/v1/federation/shares/preview"}, operation{http.MethodPost, "/api/v1/federation/shares"}, operation{http.MethodGet, "/api/v1/federation/shares"}, operation{http.MethodGet, "/api/v1/federation/shares/x"}, operation{http.MethodPost, "/api/v1/federation/shares/x/pause"}, operation{http.MethodPost, "/api/v1/federation/shares/x/resume"}, operation{http.MethodDelete, "/api/v1/federation/shares/x"}, operation{http.MethodPost, "/api/v1/federation/exclusions"}, operation{http.MethodGet, "/api/v1/federation/dry-run"})
 				for path, item := range srv.api.OpenAPI().Paths {
 					if path == federationHandshakePath {
 						continue
@@ -218,6 +219,30 @@ func TestFederationHandshakeRegistrationByRole(t *testing.T) {
 			} else {
 				assert.Equal(t, http.StatusNotFound, rec.Code, "%s %s", role, route.path)
 			}
+		}
+	}
+	for _, role := range []string{"off", "spoke", "hub"} {
+		var options []Option
+		if role != "off" {
+			options = append(options, WithFederation(federation.NewService(role, "archive-a", config.FederationHubConfig{}, database)))
+		}
+		srv := New(config.Config{Host: "127.0.0.1", Port: 8080}, database, nil, options...)
+		for _, route := range []struct{ method, path string }{
+			{http.MethodPost, "/api/v1/federation/shares/preview"}, {http.MethodPost, "/api/v1/federation/shares"}, {http.MethodGet, "/api/v1/federation/shares"}, {http.MethodGet, "/api/v1/federation/shares/x"}, {http.MethodPost, "/api/v1/federation/shares/x/pause"}, {http.MethodPost, "/api/v1/federation/shares/x/resume"}, {http.MethodDelete, "/api/v1/federation/shares/x"}, {http.MethodPost, "/api/v1/federation/exclusions"}, {http.MethodGet, "/api/v1/federation/dry-run"},
+		} {
+			req := httptest.NewRequest(route.method, "http://127.0.0.1:8080"+route.path, strings.NewReader("{"))
+			req.RemoteAddr = "192.0.2.1:1234"
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Origin", "http://127.0.0.1:8080")
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+			if role == "spoke" {
+				assert.Equal(t, http.StatusForbidden, rec.Code, route.path)
+			} else {
+				assert.Equal(t, http.StatusNotFound, rec.Code, route.path)
+			}
+			_, exposed := srv.api.OpenAPI().Paths[route.path]
+			assert.False(t, exposed)
 		}
 	}
 	_, found := OpenAPISpec(VersionInfo{}).Paths[federationHandshakePath]

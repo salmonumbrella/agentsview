@@ -2918,3 +2918,24 @@ and the other mirrors return the same matches. Removing the last retained copy o
 Disabling image text and restarting clears extracted text and removes mirror
 matches on the next push. Session and artifact exports carry image references or
 placeholders rather than extracted text.
+
+### Federation shares
+
+A spoke member can preview a repository share with `agentsview federation share
+add --project github.com/example/api --level summary`. The command shows the
+policy and selected summaries, then asks for confirmation. Add `--since
+YYYY-MM-DD` to limit the start date or `--attribution member` to request member
+attribution in a later release. The default is pooled attribution. The audience
+is operators, and anyone holding the hub bearer token can read stored records.
+
+Use `federation share list`, `show`, `pause`, `resume`, or `remove` to manage
+shares. A changed hub policy pauses affected shares; run `share add` again to
+review and accept it. `federation exclude <session-id> [--reason text]` keeps a
+session out of all shares in this archive, including after removal or rejoining.
+`federation push --dry-run` prints the selected summaries locally. This release
+records consent only and sends no session records.
+
+Selection requires the session's own unambiguous repository identity and proof
+that it came from this installation. Imported and uncertain sessions are withheld.
+A copied file in a local root without a machine setting cannot be distinguished
+from a native local file; a session waits for its first sync baseline.

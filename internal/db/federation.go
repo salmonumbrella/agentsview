@@ -144,6 +144,9 @@ func (db *DB) BlockFederationLink(ctx context.Context, uid string) error {
 }
 func (db *DB) DeleteFederationLink(ctx context.Context) error {
 	return db.Update(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM federation_shares WHERE link_uid IN (SELECT link_uid FROM federation_links)`); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM federation_links`); err != nil {
 			return err
 		}
@@ -176,7 +179,7 @@ func (db *DB) CopyFederationStateFrom(ctx context.Context, sourcePath string) er
 		return err
 	}
 	defer tx.Rollback()
-	for table, columns := range map[string]string{"federation_enrollments": "enrollment_uid,spoke_archive_id,member,spoke_name,credential_sha256,created_at,last_handshake_at,revoked_at", "federation_links": "link_uid,hub_origin,hub_archive_id,enrollment_uid,member,token_file,protocol_version,state,created_at"} {
+	for table, columns := range map[string]string{"federation_enrollments": "enrollment_uid,spoke_archive_id,member,spoke_name,credential_sha256,created_at,last_handshake_at,revoked_at", "federation_links": "link_uid,hub_origin,hub_archive_id,enrollment_uid,member,token_file,protocol_version,state,created_at", "federation_shares": "share_uid,link_uid,normalized_remote,level,attribution,since,audience,state,consent_json,policy_digest,created_at", "federation_exclusions": "session_id,share_uid,reason,created_at", "federation_deliveries": "share_uid,session_id,record_uid,transcript_revision,hash,state"} {
 		var present int
 		if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM federation_old.sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&present); err != nil {
 			return err
@@ -192,4 +195,116 @@ func (db *DB) CopyFederationStateFrom(ctx context.Context, sourcePath string) er
 		return err
 	}
 	return tx.Commit()
+}
+
+// FederationShare records the grant and the exact preview accepted by the member.
+type FederationShare struct {
+	UID              string `json:"share_uid"`
+	LinkUID          string `json:"link_uid"`
+	NormalizedRemote string `json:"normalized_remote"`
+	Level            string `json:"level"`
+	Attribution      string `json:"attribution"`
+	Since            string `json:"since"`
+	Audience         string `json:"audience"`
+	State            string `json:"state"`
+	ConsentJSON      string `json:"consent_json"`
+	PolicyDigest     string `json:"policy_digest"`
+	CreatedAt        string `json:"created_at"`
+}
+
+func (db *DB) PutFederationShare(ctx context.Context, s FederationShare) error {
+	return db.Update(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `INSERT INTO federation_shares (share_uid,link_uid,normalized_remote,level,attribution,since,audience,state,consent_json,policy_digest) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(link_uid,normalized_remote) DO UPDATE SET level=excluded.level,attribution=excluded.attribution,since=excluded.since,audience=excluded.audience,state=excluded.state,consent_json=excluded.consent_json,policy_digest=excluded.policy_digest WHERE federation_shares.state='policy_paused'`, s.UID, s.LinkUID, s.NormalizedRemote, s.Level, s.Attribution, s.Since, s.Audience, s.State, s.ConsentJSON, s.PolicyDigest)
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			return ErrFederationShareExists
+		}
+		return stampFederationVersion(ctx, tx)
+	})
+}
+
+var ErrFederationShareExists = errors.New("federation share exists")
+
+func (db *DB) ListFederationShares(ctx context.Context, linkUID string) ([]FederationShare, error) {
+	rows, err := db.getReader().QueryContext(ctx, `SELECT share_uid,link_uid,normalized_remote,level,attribution,since,audience,state,consent_json,policy_digest,created_at FROM federation_shares WHERE link_uid=? ORDER BY normalized_remote`, linkUID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []FederationShare{}
+	for rows.Next() {
+		var s FederationShare
+		if err := rows.Scan(&s.UID, &s.LinkUID, &s.NormalizedRemote, &s.Level, &s.Attribution, &s.Since, &s.Audience, &s.State, &s.ConsentJSON, &s.PolicyDigest, &s.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+func (db *DB) PauseFederationSharesForPolicy(ctx context.Context, linkUID, digest string) error {
+	return db.Update(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE federation_shares SET state='policy_paused' WHERE link_uid=? AND state<>'policy_paused' AND policy_digest<>?`, linkUID, digest); err != nil {
+			return err
+		}
+		return stampFederationVersion(ctx, tx)
+	})
+}
+func (db *DB) PutFederationExclusion(ctx context.Context, sessionID, shareUID, reason string) error {
+	return db.Update(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO federation_exclusions (session_id,share_uid,reason) VALUES (?,?,?) ON CONFLICT(session_id) DO NOTHING`, sessionID, shareUID, reason); err != nil {
+			return err
+		}
+		return stampFederationVersion(ctx, tx)
+	})
+}
+
+func (db *DB) GetFederationShare(ctx context.Context, linkUID, uid string) (FederationShare, error) {
+	var s FederationShare
+	err := db.getReader().QueryRowContext(ctx, `SELECT share_uid,link_uid,normalized_remote,level,attribution,since,audience,state,consent_json,policy_digest,created_at FROM federation_shares WHERE link_uid=? AND share_uid=?`, linkUID, uid).Scan(&s.UID, &s.LinkUID, &s.NormalizedRemote, &s.Level, &s.Attribution, &s.Since, &s.Audience, &s.State, &s.ConsentJSON, &s.PolicyDigest, &s.CreatedAt)
+	return s, err
+}
+
+func (db *DB) SetFederationShareState(ctx context.Context, linkUID, uid, from, to string) error {
+	return db.Update(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE federation_shares SET state=? WHERE link_uid=? AND share_uid=? AND state=?`, to, linkUID, uid, from)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return sql.ErrNoRows
+		}
+		return stampFederationVersion(ctx, tx)
+	})
+}
+func (db *DB) DeleteFederationShare(ctx context.Context, linkUID, uid string) error {
+	return db.Update(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `DELETE FROM federation_shares WHERE link_uid=? AND share_uid=?`, linkUID, uid)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return sql.ErrNoRows
+		}
+		return stampFederationVersion(ctx, tx)
+	})
+}
+
+func (db *DB) FederationDeliveryCount(ctx context.Context, shareUID string) (int, error) {
+	var count int
+	err := db.getReader().QueryRowContext(ctx, `SELECT count(*) FROM federation_deliveries WHERE share_uid=? AND state='sent'`, shareUID).Scan(&count)
+	return count, err
 }

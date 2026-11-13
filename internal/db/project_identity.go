@@ -1937,10 +1937,14 @@ func newUUIDv4() (string, error) {
 
 // SessionIDsForProjectRemotes selects sessions by their own identity snapshot.
 func (db *DB) SessionIDsForProjectRemotes(ctx context.Context, remotes []string) ([]string, error) {
+	return sessionIDsForProjectRemotes(ctx, db.getReader(), remotes)
+}
+
+func sessionIDsForProjectRemotes(ctx context.Context, q sessionExportQuerier, remotes []string) ([]string, error) {
 	ids := make([]string, 0)
 	err := QueryChunkedSize(remotes, maxSQLVars, func(chunk []string) error {
 		placeholders, args := InPlaceholders(chunk)
-		rows, err := db.getReader().QueryContext(ctx, `SELECT session_id, remote_resolution, key_source, normalized_remote, remote_candidate_count
+		rows, err := q.QueryContext(ctx, `SELECT session_id, remote_resolution, key_source, normalized_remote, remote_candidate_count
 			FROM session_project_identity_snapshots WHERE normalized_remote IN `+placeholders, args...)
 		if err != nil {
 			return fmt.Errorf("listing session identity snapshots by remote: %w", err)

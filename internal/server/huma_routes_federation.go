@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -71,6 +73,16 @@ func (s *Server) registerFederationRoutes() {
 		registerRoute(group, http.MethodPost, "/link", "Join a hub", s.humaFederationJoin, hidden)
 		registerRoute(group, http.MethodGet, "/link", "Read federation status", s.humaFederationStatus, hidden)
 		registerRoute(group, http.MethodDelete, "/link", "Leave a hub", s.humaFederationLeave, hidden)
+		registerRoute(group, http.MethodPost, "/shares/preview", "Preview share", s.humaSharePreview, hidden)
+		registerRoute(group, http.MethodPost, "/shares", "Add share", s.humaShareAdd, hidden)
+		registerRoute(group, http.MethodGet, "/shares", "List shares", s.humaShares, hidden)
+		registerRoute(group, http.MethodGet, "/shares/{uid}", "Show share", s.humaShare, hidden)
+		registerRoute(group, http.MethodPost, "/shares/{uid}/pause", "Pause share", s.humaSharePause, hidden)
+		registerRoute(group, http.MethodPost, "/shares/{uid}/resume", "Resume share", s.humaShareResume, hidden)
+		registerRoute(group, http.MethodDelete, "/shares/{uid}", "Remove share", s.humaShareRemove, hidden)
+		registerRoute(group, http.MethodPost, "/exclusions", "Exclude session", s.humaExclude, hidden)
+		s.stream(group, http.MethodGet, "/dry-run", "Preview records", s.humaDryRun, hidden)
+
 	}
 }
 func (s *Server) humaFederationHandshake(ctx context.Context, _ *federationHandshakeInput) (*jsonOutput[federation.HandshakeResponse], error) {
@@ -83,6 +95,9 @@ func (s *Server) humaFederationHandshake(ctx context.Context, _ *federationHands
 func federationControlError(err error) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return huma.Error404NotFound("federation item not found")
 	}
 	if errors.Is(err, db.ErrWriterClosed) {
 		return huma.Error503ServiceUnavailable("archive temporarily unavailable")
@@ -132,4 +147,83 @@ func (s *Server) humaFederationLeave(ctx context.Context, _ *emptyInput) (*jsonO
 		return nil, err
 	}
 	return &jsonOutput[map[string]bool]{Body: map[string]bool{"left": true}}, nil
+}
+
+type shareGrantInput struct{ Body federation.ShareGrant }
+type sharePreviewInput struct{ Body federation.SharePreview }
+type shareUIDInput struct {
+	UID string `path:"uid"`
+}
+type excludeInput struct {
+	Body struct {
+		SessionID string `json:"session_id"`
+		Reason    string `json:"reason"`
+	}
+}
+
+func (s *Server) humaSharePreview(ctx context.Context, in *shareGrantInput) (*jsonOutput[federation.SharePreview], error) {
+	v, err := s.federation.PreviewShare(ctx, in.Body)
+	if err = federationControlError(err); err != nil {
+		return nil, err
+	}
+	return &jsonOutput[federation.SharePreview]{Body: v}, nil
+}
+func (s *Server) humaShareAdd(ctx context.Context, in *sharePreviewInput) (*jsonOutput[map[string]bool], error) {
+	if err := federationControlError(s.federation.AddShare(ctx, in.Body)); err != nil {
+		return nil, err
+	}
+	return &jsonOutput[map[string]bool]{Body: map[string]bool{"added": true}}, nil
+}
+func (s *Server) humaShares(ctx context.Context, _ *emptyInput) (*jsonOutput[federation.ShareList], error) {
+	v, err := s.federation.Shares(ctx)
+	if err = federationControlError(err); err != nil {
+		return nil, err
+	}
+	return &jsonOutput[federation.ShareList]{Body: v}, nil
+}
+func (s *Server) humaShare(ctx context.Context, in *shareUIDInput) (*jsonOutput[federation.ShareDetails], error) {
+	v, err := s.federation.Share(ctx, in.UID)
+	if err = federationControlError(err); err != nil {
+		return nil, err
+	}
+	return &jsonOutput[federation.ShareDetails]{Body: v}, nil
+}
+func (s *Server) humaSharePause(ctx context.Context, in *shareUIDInput) (*jsonOutput[map[string]bool], error) {
+	if err := federationControlError(s.federation.PauseShare(ctx, in.UID)); err != nil {
+		return nil, err
+	}
+	return &jsonOutput[map[string]bool]{Body: map[string]bool{"paused": true}}, nil
+}
+func (s *Server) humaShareResume(ctx context.Context, in *shareUIDInput) (*jsonOutput[map[string]bool], error) {
+	if err := federationControlError(s.federation.ResumeShare(ctx, in.UID)); err != nil {
+		return nil, err
+	}
+	return &jsonOutput[map[string]bool]{Body: map[string]bool{"resumed": true}}, nil
+}
+func (s *Server) humaShareRemove(ctx context.Context, in *shareUIDInput) (*jsonOutput[map[string]bool], error) {
+	if err := federationControlError(s.federation.RemoveShare(ctx, in.UID)); err != nil {
+		return nil, err
+	}
+	return &jsonOutput[map[string]bool]{Body: map[string]bool{"removed": true}}, nil
+}
+func (s *Server) humaExclude(ctx context.Context, in *excludeInput) (*jsonOutput[map[string]bool], error) {
+	if err := federationControlError(s.federation.Exclude(ctx, in.Body.SessionID, in.Body.Reason)); err != nil {
+		return nil, err
+	}
+	return &jsonOutput[map[string]bool]{Body: map[string]bool{"excluded": true}}, nil
+}
+func (s *Server) humaDryRun(ctx context.Context, _ *emptyInput) (*huma.StreamResponse, error) {
+	records, err := s.federation.DryRun(ctx)
+	if err = federationControlError(err); err != nil {
+		return nil, err
+	}
+	return &huma.StreamResponse{Body: func(hctx huma.Context) {
+		hctx.SetHeader("Content-Type", "application/x-ndjson")
+		enc := json.NewEncoder(hctx.BodyWriter())
+		for _, record := range records {
+			if err := enc.Encode(record); err != nil {
+				return
+			}
+		}
+	}}, nil
 }

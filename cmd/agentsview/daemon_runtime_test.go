@@ -1239,20 +1239,19 @@ func TestFindDaemonRuntime_LiveProcess(t *testing.T) {
 }
 
 func TestFindDaemonRuntime_IgnoresIncompatibleRuntime(t *testing.T) {
-	dir := runtimeTestDir(t)
-	writeLiveRuntime(t, dir, false,
-		withRuntimeVersion("old"),
-		withRuntimeAPIVersion(14), // API 14 cannot interpret idle catch-up readiness.
-	)
-
-	assert.Nil(t, FindDaemonRuntime(dir))
-	rt, compatErr := FindIncompatibleDaemonRuntime(dir)
-	require.NotNil(t, rt)
-	require.Error(t, compatErr)
-	assert.Contains(t, compatErr.Error(), "API version")
-	assert.Contains(t, compatErr.Error(), "restart the daemon")
-	assert.True(t, IsLocalDaemonActive(dir),
-		"incompatible writable daemon still owns the local archive")
+	for _, version := range []int{14, 18} {
+		t.Run(strconv.Itoa(version), func(t *testing.T) {
+			dir := runtimeTestDir(t)
+			writeLiveRuntime(t, dir, false, withRuntimeVersion("old"), withRuntimeAPIVersion(version))
+			assert.Nil(t, FindDaemonRuntime(dir))
+			rt, compatErr := FindIncompatibleDaemonRuntime(dir)
+			require.NotNil(t, rt)
+			require.Error(t, compatErr)
+			assert.Contains(t, compatErr.Error(), "API version")
+			assert.Contains(t, compatErr.Error(), "restart the daemon")
+			assert.True(t, IsLocalDaemonActive(dir), "incompatible writable daemon still owns the local archive")
+		})
+	}
 }
 
 func TestFindDaemonRuntime_ReadOnly(t *testing.T) {

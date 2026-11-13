@@ -2443,7 +2443,7 @@ func writeUserVersion(ctx context.Context, tx *sql.Tx, version int) error {
 			version += archiveOnlyVersionBase
 		}
 	}
-	for _, table := range []string{"federation_enrollments", "federation_links"} {
+	for _, table := range []string{"federation_enrollments", "federation_links", "federation_shares", "federation_exclusions", "federation_deliveries"} {
 		var exists bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)`, table).Scan(&exists); err != nil {
 			return err

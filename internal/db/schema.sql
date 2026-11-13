@@ -1865,3 +1865,33 @@ CREATE TABLE IF NOT EXISTS federation_links (
     state TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
+
+CREATE TABLE IF NOT EXISTS federation_shares (
+    share_uid TEXT PRIMARY KEY,
+    link_uid TEXT NOT NULL,
+    normalized_remote TEXT NOT NULL,
+    level TEXT NOT NULL,
+    attribution TEXT NOT NULL,
+    since TEXT NOT NULL DEFAULT '',
+    audience TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('active', 'paused', 'policy_paused')),
+    consent_json TEXT NOT NULL,
+    policy_digest TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (link_uid, normalized_remote)
+);
+CREATE TABLE IF NOT EXISTS federation_exclusions (
+    session_id TEXT PRIMARY KEY,
+    share_uid TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE TABLE IF NOT EXISTS federation_deliveries (
+    share_uid TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    record_uid TEXT NOT NULL,
+    transcript_revision TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    state TEXT NOT NULL,
+    PRIMARY KEY (share_uid, session_id)
+);

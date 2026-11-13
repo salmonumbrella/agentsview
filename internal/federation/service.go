@@ -229,6 +229,11 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 		return out, err
 	}
 	out.Link = &link
+	shares, err := s.db.ListFederationShares(ctx, link.UID)
+	if err != nil {
+		return out, err
+	}
+	out.Shares = len(shares)
 	out.Hub = &HubStatus{}
 	if link.State == LinkBlocked {
 		out.Hub.State = HubBlocked
@@ -267,6 +272,9 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	if h.EnrollmentUID != link.EnrollmentUID || h.Member != link.Member {
 		out.Hub.State, out.Hub.Message = HubError, "federation enrollment changed"
 		return out, nil
+	}
+	if err := s.db.PauseFederationSharesForPolicy(ctx, link.UID, h.PolicyDigest); err != nil {
+		return out, err
 	}
 	out.Hub.State, out.Hub.Policy, out.Hub.PolicyDigest = HubOK, &h.Policy, h.PolicyDigest
 	return out, nil

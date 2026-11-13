@@ -196,6 +196,144 @@ func newFederationCommand() *cobra.Command {
 		_, err = fmt.Fprintln(cmd.ErrOrStderr(), "Link removed. The hub keeps this enrollment until its operator revokes it; the credential file was left in place.")
 		return err
 	}}
-	root.AddCommand(enroll, enrollments, revoke, join, status, leave)
+	root.AddCommand(enroll, enrollments, revoke, join, status, leave, newFederationShareCommand(), newFederationExcludeCommand(), newFederationPushCommand())
 	return root
+}
+
+func addFederationShare(ctx context.Context, base, token string, grant federation.ShareGrant, in io.Reader, out io.Writer) error {
+	var preview federation.SharePreview
+	if err := federationRequest(ctx, base, token, http.MethodPost, "/api/v1/federation/shares/preview", grant, &preview); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(preview, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(out, string(data))
+	fmt.Fprintln(out, "Summary includes counts, usage, outcome and health; it omits content, paths, titles and tool categories. Anyone holding the hub bearer token can read everything stored. Member attribution is a request for a later release. This release records the share only; nothing is sent.")
+	if !confirm(in, out, "Create this share?") {
+		return nil
+	}
+	return federationRequest(ctx, base, token, http.MethodPost, "/api/v1/federation/shares", preview, nil)
+}
+func streamFederationDryRun(ctx context.Context, base, token string, out io.Writer) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(base, "/")+"/api/v1/federation/dry-run", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Origin", daemonOriginURL(base))
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	client, err := requestsign.ClientFromEnvironment(base, &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }})
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return errors.New("federation daemon request failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("federation daemon request returned HTTP %d", resp.StatusCode)
+	}
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
+func newFederationShareCommand() *cobra.Command {
+	root := &cobra.Command{Use: "share", Short: "Manage repository shares"}
+	var g federation.ShareGrant
+	add := &cobra.Command{Use: "add", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		tr, cfg, err := federationTransport(cmd, "spoke")
+		if err != nil {
+			return err
+		}
+		return addFederationShare(cmd.Context(), tr.URL, cfg.AuthToken, g, cmd.InOrStdin(), cmd.OutOrStdout())
+	}}
+	add.Flags().StringVar(&g.Project, "project", "", "Repository remote")
+	add.Flags().StringVar(&g.Level, "level", "", "Share level")
+	add.Flags().StringVar(&g.Since, "since", "", "Earliest date")
+	add.Flags().StringVar(&g.Attribution, "attribution", "pooled", "Attribution request")
+	_ = add.MarkFlagRequired("project")
+	_ = add.MarkFlagRequired("level")
+	root.AddCommand(add)
+	list := &cobra.Command{Use: "list", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		tr, cfg, err := federationTransport(cmd, "spoke")
+		if err != nil {
+			return err
+		}
+		var shares federation.ShareList
+		if err = federationRequest(cmd.Context(), tr.URL, cfg.AuthToken, http.MethodGet, "/api/v1/federation/shares", nil, &shares); err != nil {
+			return err
+		}
+		if err = json.NewEncoder(cmd.OutOrStdout()).Encode(shares.Shares); err != nil {
+			return err
+		}
+		for _, remote := range shares.Suggestions {
+			fmt.Fprintf(cmd.OutOrStdout(), "Suggested: federation share add --project %s --level summary\n", remote)
+		}
+		return nil
+	}}
+	root.AddCommand(list)
+	for _, action := range []string{"show", "pause", "resume", "remove"} {
+		action := action
+		root.AddCommand(&cobra.Command{Use: action + " <share-uid>", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+			tr, cfg, err := federationTransport(cmd, "spoke")
+			if err != nil {
+				return err
+			}
+			path := "/api/v1/federation/shares/" + url.PathEscape(args[0])
+			method := http.MethodPost
+			if action == "show" {
+				method = http.MethodGet
+			}
+			if action == "remove" {
+				method = http.MethodDelete
+			} else if action != "show" {
+				path += "/" + action
+			}
+			if action == "show" {
+				var share federation.ShareDetails
+				if err = federationRequest(cmd.Context(), tr.URL, cfg.AuthToken, method, path, nil, &share); err != nil {
+					return err
+				}
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(share)
+			}
+			if err = federationRequest(cmd.Context(), tr.URL, cfg.AuthToken, method, path, nil, nil); err != nil {
+				return err
+			}
+			if action == "remove" {
+				_, err = fmt.Fprintln(cmd.OutOrStdout(), "Share removed; no records were sent.")
+			}
+			return err
+		}})
+	}
+	return root
+}
+func newFederationExcludeCommand() *cobra.Command {
+	var reason string
+	cmd := &cobra.Command{Use: "exclude <session-id>", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		tr, cfg, err := federationTransport(cmd, "spoke")
+		if err != nil {
+			return err
+		}
+		return federationRequest(cmd.Context(), tr.URL, cfg.AuthToken, http.MethodPost, "/api/v1/federation/exclusions", map[string]string{"session_id": args[0], "reason": reason}, nil)
+	}}
+	cmd.Flags().StringVar(&reason, "reason", "", "Reason")
+	return cmd
+}
+func newFederationPushCommand() *cobra.Command {
+	var dry bool
+	cmd := &cobra.Command{Use: "push", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if !dry {
+			return errors.New("--dry-run is required; delivery is not available yet")
+		}
+		tr, cfg, err := federationTransport(cmd, "spoke")
+		if err != nil {
+			return err
+		}
+		return streamFederationDryRun(cmd.Context(), tr.URL, cfg.AuthToken, cmd.OutOrStdout())
+	}}
+	cmd.Flags().BoolVar(&dry, "dry-run", false, "Print records without sending")
+	return cmd
 }

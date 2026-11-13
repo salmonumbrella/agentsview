@@ -1,11 +1,13 @@
 package federation
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -203,4 +205,104 @@ func TestEnrollmentStateValidation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, HubError, status.Hub.State)
 	assert.Equal(t, "invalid federation policy digest", status.Hub.Message)
+}
+
+func TestShareConsentAndPolicyChange(t *testing.T) {
+	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, archive.Close()) })
+	policy := config.FederationHubConfig{Retention: "member-controlled", AllowedLevels: []string{"summary"}, MinGroupSize: 3, SuggestedProjects: []string{"github.com/example/*"}, Processing: "none"}
+	digest, err := export.DigestCanonical(policy)
+	require.NoError(t, err)
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "/api/v1/federation/handshake", r.URL.Path)
+		_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{1}, EnrollmentUID: "enr-a", Member: "member-a", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
+	}))
+	t.Cleanup(hub.Close)
+	file := filepath.Join(testutil.PrivateTempDir(t), "credential")
+	require.NoError(t, os.WriteFile(file, []byte("avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), 0600))
+	svc := NewService("spoke", "spoke-a", policy, archive)
+	require.NoError(t, svc.Join(t.Context(), hub.URL, "hub-a", file))
+
+	require.NoError(t, archive.Update(t.Context(), func(tx *sql.Tx) error {
+		for _, q := range []string{
+			`INSERT INTO pg_sync_state (key,value) VALUES ('artifact_local_installation_id','install-a')`,
+			`INSERT INTO sessions (id,project,machine,agent,file_path,cwd,git_branch,first_message,display_name) VALUES ('session-a','fixture','install-a','claude','fixture','CANARY-cwd','CANARY-branch','CANARY-first','CANARY-title')`,
+			`INSERT INTO local_session_source_baselines (session_id,machine,agent,file_path) VALUES ('session-a','install-a','claude','fixture')`,
+			`INSERT INTO session_project_identity_snapshots (session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES ('session-a','fixture','install-a','2026-01-01T00:00:00Z','resolved',1,'github.com/example/api','git_remote','key')`,
+			`INSERT INTO messages (id,session_id,ordinal,role,content) VALUES (100,'session-a',0,'assistant','CANARY-message')`,
+			`INSERT INTO tool_calls (message_id,session_id,tool_name,category,input_json,result_content) VALUES (100,'session-a','fixture','CANARY-category','CANARY-input','CANARY-result')`,
+		} {
+			if _, err := tx.ExecContext(t.Context(), q); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	listed, err := svc.Shares(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, listed.Shares)
+	assert.Equal(t, []string{"github.com/example/api"}, listed.Suggestions)
+	grant := ShareGrant{Project: "github.com/example/api", Level: "summary", Attribution: "pooled"}
+	preview, err := svc.PreviewShare(t.Context(), grant)
+	require.NoError(t, err)
+	link, err := archive.GetFederationLink(t.Context())
+	require.NoError(t, err)
+	shares, err := archive.ListFederationShares(t.Context(), link.UID)
+	require.NoError(t, err)
+	assert.Empty(t, shares)
+	require.NoError(t, svc.AddShare(t.Context(), preview))
+	records, err := svc.DryRun(t.Context())
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Equal(t, 1, records[0].ToolCount)
+	encoded, err := json.Marshal(records)
+	require.NoError(t, err)
+	assert.False(t, strings.Contains(string(encoded), "CANARY"))
+
+	shares, err = archive.ListFederationShares(t.Context(), link.UID)
+	require.NoError(t, err)
+	require.Len(t, shares, 1)
+	shown, err := json.Marshal(preview)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(shown), shares[0].ConsentJSON)
+	stored := shares[0].ConsentJSON
+	policy.Processing = "aggregated"
+	digest, err = export.DigestCanonical(policy)
+	require.NoError(t, err)
+	status, err := svc.Status(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, 1, status.Shares)
+	shares, err = archive.ListFederationShares(t.Context(), link.UID)
+	require.NoError(t, err)
+	require.Len(t, shares, 1)
+	assert.Equal(t, "policy_paused", shares[0].State)
+	assert.Equal(t, stored, shares[0].ConsentJSON)
+	assert.ErrorContains(t, svc.ResumeShare(t.Context(), shares[0].UID), "share add")
+	next, err := svc.PreviewShare(t.Context(), grant)
+	require.NoError(t, err)
+	require.NoError(t, svc.AddShare(t.Context(), next))
+	hub.Close()
+	records, err = svc.DryRun(t.Context())
+	assert.Error(t, err)
+	assert.Empty(t, records)
+
+}
+
+func TestShareRejectsUnshareableGrant(t *testing.T) {
+	policy := config.FederationHubConfig{AllowedLevels: []string{"summary"}}
+	hub := &HubStatus{Policy: &policy}
+	for _, tc := range []struct {
+		grant   ShareGrant
+		message string
+	}{
+		{ShareGrant{Project: "*", Level: "summary"}, "repository remote"},
+		{ShareGrant{Project: "local-label", Level: "summary"}, "no repository identity another machine can match"},
+		{ShareGrant{Project: "github.com/example/api", Level: "transcript"}, "not available yet"},
+		{ShareGrant{Project: "github.com/example/api", Level: "unknown"}, "not allowed"},
+	} {
+		_, err := validateGrant(tc.grant, hub)
+		assert.ErrorContains(t, err, tc.message)
+	}
 }
