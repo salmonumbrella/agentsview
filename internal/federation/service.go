@@ -65,8 +65,6 @@ func readCredential(ctx context.Context, path string) (string, error) {
 		switch {
 		case errors.Is(err, requestsign.ErrPrivateMode):
 			return "", inputError("credential file must be a regular file readable only by its owner (mode 0600)")
-		case errors.Is(err, requestsign.ErrPrivateTooLarge):
-			return "", inputError("credential file is too large")
 		default:
 			return "", inputError("cannot open credential file")
 		}
