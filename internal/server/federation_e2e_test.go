@@ -94,6 +94,12 @@ func TestFederationRevokePublishesCommittedPartialCleanup(t *testing.T) {
 	assert.Equal(t, 1, messages)
 	_, err = database.LookupFederationCredential(ctx, "digest", "spoke")
 	assert.ErrorIs(t, err, db.ErrFederationUnauthorized)
+	// Even a request that passed an earlier credential lookup cannot commit
+	// or enumerate records after the revocation transaction.
+	_, err = database.CommitFederationBatch(ctx, "enr", "spoke", "known", digest, 1, 3, "after-revoke", []db.FederationHubRecord{collision})
+	assert.ErrorIs(t, err, sql.ErrNoRows)
+	_, err = database.ReconcileFederationPage(ctx, "enr", "spoke", "known", digest, db.FederationInventoryPage{Round: "after-revoke", Epoch: 1, Final: true})
+	assert.ErrorIs(t, err, sql.ErrNoRows)
 	response = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(response, req.Clone(ctx))
 	assert.Empty(t, events)
@@ -112,6 +118,86 @@ func TestFederationRevokePublishesCommittedPartialCleanup(t *testing.T) {
 	srv.Handler().ServeHTTP(response, req.Clone(ctx))
 	assert.Empty(t, events)
 	assert.EqualValues(t, 2, callbacks.Load())
+}
+
+func TestFederationInventoryRejectsChangedPolicyOverHTTP(t *testing.T) {
+	ctx := t.Context()
+	database := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "hub.db"))
+	policy := config.FederationHubConfig{Retention: "org-retained", AllowedLevels: []string{"summary"}, MinGroupSize: 3, SuggestedProjects: []string{}, Processing: "none"}
+	digest, err := export.DigestCanonical(policy)
+	require.NoError(t, err)
+	hub := federation.NewService("hub", "hub", policy, database)
+	enrollment, token, err := hub.Enroll(ctx, "spoke", "member", "")
+	require.NoError(t, err)
+	share := db.FederationHubShare{UID: "share", EnrollmentUID: enrollment.UID, Remote: "example.org/repo", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: digest, Epoch: 1, State: "active", Retention: policy.Retention}
+	_, err = database.PutFederationHubShare(ctx, "spoke", share)
+	require.NoError(t, err)
+	var records []db.FederationHubRecord
+	for _, id := range []string{"a", "z"} {
+		records = append(records, db.FederationHubRecord{UID: id, Hash: id + "-hash", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: db.SessionBatchWrite{Session: db.Session{ID: id, Project: "fixture", Machine: "federated", Agent: "claude"}}})
+	}
+	_, err = database.CommitFederationBatch(ctx, enrollment.UID, "spoke", share.UID, digest, 1, 1, "initial", records)
+	require.NoError(t, err)
+	share.Epoch, share.Rebuild = 2, true
+	_, err = database.PutFederationHubShare(ctx, "spoke", share)
+	require.NoError(t, err)
+	var callbacks atomic.Int32
+	serverFor := func(p config.FederationHubConfig) (*Server, *httptest.Server) {
+		s := New(config.Config{Host: "127.0.0.1", Port: 8080}, database, nil, WithFederation(federation.NewService("hub", "hub", p, database)), WithSessionMutationNotifier(func() { callbacks.Add(1) }))
+		s.broadcaster = NewBroadcaster(0)
+		peer := httptest.NewServer(s.Handler())
+		t.Cleanup(peer.Close)
+		return s, peer
+	}
+	_, original := serverFor(policy)
+	request := federation.ReconcileRequest{Protocol: federation.ProtocolVersion, SpokeInstance: "spoke", ShareUID: "share", FederationInventoryPage: db.FederationInventoryPage{Round: "round", Epoch: 2, Through: "a", Items: []db.FederationInventoryItem{{UID: "a", Hash: "a-hash"}}}}
+	result, err := federation.PostReconcile(ctx, original.URL, token, "spoke", request)
+	require.NoError(t, err)
+	assert.Equal(t, "a", result.Boundary)
+	changed := policy
+	changed.Processing = "aggregated"
+	srv, replacement := serverFor(changed)
+	events, unsubscribe := srv.broadcaster.Subscribe()
+	defer unsubscribe()
+	for _, page := range []db.FederationInventoryPage{
+		{Round: "round", Epoch: 2, After: "a", Through: "z", Items: []db.FederationInventoryItem{{UID: "z", Hash: "z-hash"}}},
+		{Round: "round", Epoch: 2, After: "a", Final: true},
+	} {
+		request.FederationInventoryPage = page
+		// Neither a valid continuation nor an empty final page can reveal or
+		// clean up records after the accepted policy changes.
+		result, err = federation.PostReconcile(ctx, replacement.URL, token, "spoke", request)
+		require.Error(t, err)
+		assert.Empty(t, result.Missing)
+		assert.Empty(t, result.Extra)
+		assert.False(t, result.Complete)
+	}
+	var boundary string
+	var completed, retained int
+	require.NoError(t, database.Reader().QueryRow(ctx, `SELECT reconcile_boundary,completed_epoch,(SELECT count(*) FROM sessions WHERE id='z') FROM federation_hub_shares WHERE share_uid='share'`).Scan(&boundary, &completed, &retained))
+	assert.Equal(t, "a", boundary)
+	assert.Less(t, completed, 2)
+	assert.Equal(t, 1, retained)
+	assert.Empty(t, events)
+	assert.Zero(t, callbacks.Load())
+	// The same pending final page works with the policy that was accepted.
+	result, err = federation.PostReconcile(ctx, original.URL, token, "spoke", request)
+	require.NoError(t, err)
+	assert.True(t, result.Complete)
+	request.ShareUID = "unknown"
+	_, unknownErr := federation.PostReconcile(ctx, original.URL, token, "spoke", request)
+	require.Error(t, unknownErr)
+	_, foreignToken, err := hub.Enroll(ctx, "other-spoke", "other-member", "")
+	require.NoError(t, err)
+	request.ShareUID, request.SpokeInstance = "share", "other-spoke"
+	_, foreignErr := federation.PostReconcile(ctx, original.URL, foreignToken, "other-spoke", request)
+	require.Error(t, foreignErr)
+	assert.Equal(t, unknownErr.Error(), foreignErr.Error())
+	_, err = hub.Revoke(ctx, enrollment.UID)
+	require.NoError(t, err)
+	request.SpokeInstance = "spoke"
+	_, err = federation.PostReconcile(ctx, original.URL, token, "spoke", request)
+	assert.ErrorIs(t, err, federation.ErrHubRefused)
 }
 
 func TestFederationSummaryDelivery(t *testing.T) {
@@ -1316,77 +1402,196 @@ func TestFederationRestoreReconcilesAndContinuesDeletion(t *testing.T) {
 }
 
 func TestRetainedSnapshotRecoversHubSequenceWithoutSendingContent(t *testing.T) {
-	ctx := t.Context()
-	hubDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "hub.db"))
-	spokeDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "spoke.db"))
-	cfg, err := config.Default()
-	require.NoError(t, err)
-	cfg.Federation.Hub.Retention = "org-retained"
-	hub := federation.NewService("hub", "hub-a", cfg.Federation.Hub, hubDB)
-	_, token, err := hub.Enroll(ctx, "spoke-a", "member", "")
-	require.NoError(t, err)
-	peer := httptest.NewServer(New(config.Config{Host: "127.0.0.1", Port: 8080}, hubDB, nil, WithFederation(hub)).Handler())
-	t.Cleanup(peer.Close)
-	file := filepath.Join(testutil.PrivateTempDir(t), "credential")
-	require.NoError(t, os.WriteFile(file, []byte(token), 0600))
-	spoke := federation.NewService("spoke", "spoke-a", cfg.Federation.Hub, spokeDB)
-	require.NoError(t, spoke.Join(ctx, peer.URL, "hub-a", file))
-	remote := "github.com/example/repo"
-	key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
-	require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install')`); err != nil {
-			return err
-		}
-		for _, id := range []string{"a", "b", "c"} {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES(?,'fixture','install','claude',?,'2026-01-02T00:00:00Z',1)`, id, id); err != nil {
-				return err
+	for _, mode := range []string{"same-generation snapshot", "regressed cursors", "replacement after hub progress", "replacement with proven deletion", "lost acknowledgment", "conflicting pending snapshot"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			hubDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "hub.db"))
+			spokeDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "spoke.db"))
+			cfg, err := config.Default()
+			require.NoError(t, err)
+			cfg.Federation.Hub.Retention = "org-retained"
+			hub := federation.NewService("hub", "hub-a", cfg.Federation.Hub, hubDB)
+			_, token, err := hub.Enroll(ctx, "spoke-a", "member", "")
+			require.NoError(t, err)
+			handler := New(config.Config{Host: "127.0.0.1", Port: 8080}, hubDB, nil, WithFederation(hub)).Handler()
+			var sent []federation.BatchRecord
+			var bodies []string
+			dropNext := false
+			peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/batches") {
+					data, err := io.ReadAll(r.Body)
+					require.NoError(t, err)
+					var batch federation.Batch
+					require.NoError(t, json.Unmarshal(data, &batch))
+					sent = append(sent, batch.Records...)
+					bodies = append(bodies, string(data))
+					r.Body = io.NopCloser(bytes.NewReader(data))
+					if dropNext {
+						dropNext = false
+						committed := httptest.NewRecorder()
+						handler.ServeHTTP(committed, r)
+						require.Equal(t, http.StatusOK, committed.Code)
+						conn, _, err := w.(http.Hijacker).Hijack()
+						require.NoError(t, err)
+						require.NoError(t, conn.Close())
+						return
+					}
+				}
+				handler.ServeHTTP(w, r)
+			}))
+			t.Cleanup(peer.Close)
+			file := filepath.Join(testutil.PrivateTempDir(t), "credential")
+			require.NoError(t, os.WriteFile(file, []byte(token), 0600))
+			spoke := federation.NewService("spoke", "spoke-a", cfg.Federation.Hub, spokeDB)
+			require.NoError(t, spoke.Join(ctx, peer.URL, "hub-a", file))
+			remote := "github.com/example/repo"
+			key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
+			require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install')`); err != nil {
+					return err
+				}
+				for _, id := range []string{"a", "b", "c"} {
+					if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES(?,'fixture','install','claude',?,'2026-01-02T00:00:00Z',1)`, id, id); err != nil {
+						return err
+					}
+					if _, err := tx.ExecContext(ctx, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES(?,'install','claude',?)`, id, id); err != nil {
+						return err
+					}
+					if _, err := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES(?,'fixture','install','2026-01-01','resolved',1,?,'git_remote',?)`, id, remote, key); err != nil {
+						return err
+					}
+				}
+				return nil
+			}))
+			preview, err := spoke.PreviewShare(ctx, federation.ShareGrant{Project: remote, Level: "summary", Attribution: "pooled"})
+			require.NoError(t, err)
+			require.NoError(t, spoke.AddShare(ctx, preview))
+			_, err = spoke.Push(ctx)
+			require.NoError(t, err)
+			shares, err := spoke.Shares(ctx)
+			require.NoError(t, err)
+			require.Len(t, shares.Shares, 1)
+			uid := shares.Shares[0].UID
+			require.NoError(t, spoke.RemoveShare(ctx, uid))
+			_, err = spoke.Push(ctx)
+			require.NoError(t, err)
+			snapshot := filepath.Join(t.TempDir(), "snapshot.db")
+			require.NoError(t, spokeDB.SnapshotTo(ctx, snapshot))
+			sent = nil
+			bodies = nil
+			if mode == "replacement with proven deletion" {
+				replacement, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "replacement.db"))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, replacement.Close()) })
+				require.NoError(t, replacement.CopyFederationStateFrom(ctx, spokeDB.Path()))
+				for _, id := range []string{"b", "c"} {
+					require.NoError(t, replacement.UpsertSession(ctx, db.Session{ID: id, Project: "fixture", Machine: "install", Agent: "claude"}))
+				}
+				require.NoError(t, replacement.DeleteSession(ctx, "b"))
+				require.NoError(t, replacement.PutFederationExclusion(ctx, "c", "private"))
+				recovered := federation.NewService("spoke", "spoke-a", cfg.Federation.Hub, replacement)
+				_, err = recovered.Push(ctx)
+				require.ErrorContains(t, err, "unproven absence remains pending")
+				var a, b, c, ownedB, ownedC int
+				require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='a'),(SELECT count(*) FROM sessions WHERE id='b'),(SELECT count(*) FROM sessions WHERE id='c'),(SELECT count(*) FROM federation_records WHERE session_id='b'),(SELECT count(*) FROM federation_records WHERE session_id='c')`).Scan(&a, &b, &c, &ownedB, &ownedC))
+				assert.Equal(t, 1, a)
+				assert.Zero(t, b)
+				assert.Zero(t, c)
+				assert.Zero(t, ownedB)
+				assert.Zero(t, ownedC)
+				var localC int
+				require.NoError(t, replacement.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='c'`).Scan(&localC))
+				assert.Equal(t, 1, localC)
+				require.Len(t, sent, 2)
+				for _, record := range sent {
+					assert.Equal(t, "tombstone", record.Kind)
+					assert.Nil(t, record.Payload)
+				}
+				return
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES(?,'install','claude',?)`, id, id); err != nil {
-				return err
+			if mode == "lost acknowledgment" {
+				dropNext = true
+				require.NoError(t, spoke.Exclude(ctx, "a", "private"))
+				_, err = spoke.Push(ctx)
+				require.Error(t, err)
+				_, err = spoke.Push(ctx)
+				require.NoError(t, err)
+				require.Len(t, bodies, 2)
+				assert.Equal(t, bodies[0], bodies[1])
+				var a, c, tombstones int
+				require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='a'),(SELECT count(*) FROM sessions WHERE id='c'),(SELECT count(*) FROM session_deletion_changes WHERE session_id='a' AND deleted=1)`).Scan(&a, &c, &tombstones))
+				assert.Zero(t, a)
+				assert.Equal(t, 1, c)
+				assert.Equal(t, 1, tombstones)
+				ledger, err := spokeDB.FederationLedger(ctx, uid)
+				require.NoError(t, err)
+				assert.Equal(t, "tombstoned", ledger["a"].State)
+				assert.NotEmpty(t, ledger["a"].Hash)
+				for _, record := range sent {
+					assert.Equal(t, "tombstone", record.Kind)
+					assert.Nil(t, record.Payload)
+				}
+				return
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES(?,'fixture','install','2026-01-01','resolved',1,?,'git_remote',?)`, id, remote, key); err != nil {
-				return err
+			require.NoError(t, spoke.Exclude(ctx, "a", "private"))
+			_, err = spoke.Push(ctx)
+			require.NoError(t, err)
+			restored, err := db.OpenIsolated(ctx, snapshot)
+			require.NoError(t, err)
+			snapshotDB := restored
+			t.Cleanup(func() { require.NoError(t, snapshotDB.Close()) })
+			if mode == "replacement after hub progress" {
+				replacement, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "replacement.db"))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, replacement.Close()) })
+				require.NoError(t, replacement.CopyFederationStateFrom(ctx, restored.Path()))
+				for _, id := range []string{"a", "b", "c"} {
+					require.NoError(t, replacement.UpsertSession(ctx, db.Session{ID: id, Project: "fixture", Machine: "install", Agent: "claude"}))
+				}
+				restored = replacement
 			}
-		}
-		return nil
-	}))
-	preview, err := spoke.PreviewShare(ctx, federation.ShareGrant{Project: remote, Level: "summary", Attribution: "pooled"})
-	require.NoError(t, err)
-	require.NoError(t, spoke.AddShare(ctx, preview))
-	_, err = spoke.Push(ctx)
-	require.NoError(t, err)
-	shares, err := spoke.Shares(ctx)
-	require.NoError(t, err)
-	require.Len(t, shares.Shares, 1)
-	uid := shares.Shares[0].UID
-	require.NoError(t, spoke.RemoveShare(ctx, uid))
-	_, err = spoke.Push(ctx)
-	require.NoError(t, err)
-	snapshot := filepath.Join(t.TempDir(), "snapshot.db")
-	require.NoError(t, spokeDB.SnapshotTo(ctx, snapshot))
-	require.NoError(t, spoke.Exclude(ctx, "a", "private"))
-	_, err = spoke.Push(ctx)
-	require.NoError(t, err)
-	restored, err := db.OpenIsolated(ctx, snapshot)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, restored.Close()) })
-	recovered := federation.NewService("spoke", "spoke-a", cfg.Federation.Hub, restored)
-	require.NoError(t, recovered.Exclude(ctx, "b", "private"))
-	// A restored sequence must not loop on the hub's different sequence-two
-	// digest or reopen the stopped share to deliver content.
-	for i := 0; i < 3; i++ {
-		_, err = recovered.Push(ctx)
-		require.NoError(t, err)
+			if mode == "regressed cursors" {
+				// A same-identity snapshot can carry cursors beyond its journals.
+				require.NoError(t, restored.Update(ctx, func(tx *sql.Tx) error {
+					_, err := tx.ExecContext(ctx, `UPDATE federation_shares SET usage_cursor=1000000,deletion_cursor=1000000 WHERE share_uid=?`, uid)
+					return err
+				}))
+			}
+			recovered := federation.NewService("spoke", "spoke-a", cfg.Federation.Hub, restored)
+			require.NoError(t, recovered.Exclude(ctx, "b", "private"))
+			if mode == "conflicting pending snapshot" {
+				pending := federation.Batch{Protocol: federation.ProtocolVersion, SpokeInstance: "spoke-a", ShareUID: uid, Epoch: 1, Sequence: 2, Records: []federation.BatchRecord{{RecordUID: "b", Kind: "tombstone"}}}
+				encoded, err := json.Marshal(pending)
+				require.NoError(t, err)
+				require.NoError(t, restored.SaveFederationPending(ctx, uid, 2, string(encoded), nil))
+				_, err = recovered.Push(ctx)
+				require.ErrorContains(t, err, "cleanup pending")
+			}
+			// A restored sequence must not loop on the hub's different sequence-two
+			// digest or reopen the stopped share to deliver content.
+			for i := 0; i < 3; i++ {
+				_, err = recovered.Push(ctx)
+				require.NoError(t, err)
+			}
+			var a, b, c int
+			var state string
+			var sequence int64
+			require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='a'),(SELECT count(*) FROM sessions WHERE id='b'),(SELECT count(*) FROM sessions WHERE id='c'),state,sequence FROM federation_hub_shares WHERE share_uid=?`, uid).Scan(&a, &b, &c, &state, &sequence))
+			assert.Zero(t, a)
+			assert.Zero(t, b)
+			assert.Equal(t, 1, c)
+			assert.Equal(t, "stopped", state)
+			if mode == "conflicting pending snapshot" {
+				assert.EqualValues(t, 1, sequence)
+			} else {
+				assert.GreaterOrEqual(t, sequence, int64(3))
+			}
+			for _, record := range sent {
+				assert.Equal(t, "tombstone", record.Kind)
+				assert.Nil(t, record.Payload)
+			}
+		})
 	}
-	var a, b, c int
-	var state string
-	var sequence int64
-	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='a'),(SELECT count(*) FROM sessions WHERE id='b'),(SELECT count(*) FROM sessions WHERE id='c'),state,sequence FROM federation_hub_shares WHERE share_uid=?`, uid).Scan(&a, &b, &c, &state, &sequence))
-	assert.Zero(t, a)
-	assert.Zero(t, b)
-	assert.Equal(t, 1, c)
-	assert.Equal(t, "stopped", state)
-	assert.GreaterOrEqual(t, sequence, int64(3))
 }
 
 func TestFederationOfflineStopBeforeNewEpochRegistration(t *testing.T) {

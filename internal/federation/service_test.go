@@ -77,20 +77,45 @@ func TestReconcileRequiresCurrentHubPolicy(t *testing.T) {
 	digest, err := export.DigestCanonical(policy)
 	require.NoError(t, err)
 	require.NoError(t, archive.CreateFederationEnrollment(ctx, db.FederationEnrollment{UID: "enr", SpokeArchiveID: "spoke", Member: "member", CredentialSHA256: "digest"}))
-	_, err = archive.PutFederationHubShare(ctx, "spoke", db.FederationHubShare{UID: "share", EnrollmentUID: "enr", Remote: "example.org/repo", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: digest, Epoch: 1, State: "active", Retention: policy.Retention})
+	share := db.FederationHubShare{UID: "share", EnrollmentUID: "enr", Remote: "example.org/repo", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: digest, Epoch: 1, State: "active", Retention: policy.Retention}
+	_, err = archive.PutFederationHubShare(ctx, "spoke", share)
 	require.NoError(t, err)
-	request := ReconcileRequest{Protocol: ProtocolVersion, SpokeInstance: "spoke", ShareUID: "share", FederationInventoryPage: db.FederationInventoryPage{Round: "round", Epoch: 1, Final: true}}
+	var records []db.FederationHubRecord
+	for _, id := range []string{"a", "z"} {
+		records = append(records, db.FederationHubRecord{UID: id, Hash: id + "-hash", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: db.SessionBatchWrite{Session: db.Session{ID: id, Project: "fixture", Machine: "federated", Agent: "claude"}}})
+	}
+	_, err = archive.CommitFederationBatch(ctx, "enr", "spoke", "share", digest, 1, 1, "batch", records)
+	require.NoError(t, err)
+	share.Epoch, share.Rebuild = 2, true
+	_, err = archive.PutFederationHubShare(ctx, "spoke", share)
+	require.NoError(t, err)
+	request := ReconcileRequest{Protocol: ProtocolVersion, SpokeInstance: "spoke", ShareUID: "share", FederationInventoryPage: db.FederationInventoryPage{Round: "round", Epoch: 2, Through: "a", Items: []db.FederationInventoryItem{{UID: "a", Hash: "a-hash"}}}}
+	result, err := NewService("hub", "hub", policy, archive).Reconcile(ctx, "enr", "spoke", "share", request)
+	require.NoError(t, err)
+	assert.Equal(t, "a", result.Boundary)
 	changed := policy
 	changed.Processing = "aggregated"
-	// Stale consent must not reveal inventory or complete its epoch.
-	result, err := NewService("hub", "hub", changed, archive).Reconcile(ctx, "enr", "spoke", "share", request)
-	require.ErrorIs(t, err, sql.ErrNoRows)
-	assert.Empty(t, result.Missing)
-	assert.Empty(t, result.Extra)
-	assert.False(t, result.Complete)
+	request.After, request.Through = "a", "z"
+	request.Items = []db.FederationInventoryItem{{UID: "z", Hash: "z-hash"}}
+	for _, page := range []db.FederationInventoryPage{request.FederationInventoryPage, {Round: "round", Epoch: 2, After: "a", Final: true}} {
+		request.FederationInventoryPage = page
+		// Stale consent must not reveal inventory or complete its epoch.
+		result, err = NewService("hub", "hub", changed, archive).Reconcile(ctx, "enr", "spoke", "share", request)
+		require.ErrorIs(t, err, sql.ErrNoRows)
+		assert.Empty(t, result.Missing)
+		assert.Empty(t, result.Extra)
+		assert.False(t, result.Complete)
+	}
+	var boundary string
+	var retained int
+	require.NoError(t, archive.Reader().QueryRow(ctx, `SELECT reconcile_boundary,(SELECT count(*) FROM sessions WHERE id='z') FROM federation_hub_shares WHERE share_uid='share'`).Scan(&boundary, &retained))
+	assert.Equal(t, "a", boundary)
+	assert.Equal(t, 1, retained)
 	result, err = NewService("hub", "hub", policy, archive).Reconcile(ctx, "enr", "spoke", "share", request)
 	require.NoError(t, err)
 	assert.True(t, result.Complete)
+	require.NoError(t, archive.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='z'`).Scan(&retained))
+	assert.Zero(t, retained)
 }
 
 func TestJoinPinsHubAndBlocksChangedIdentity(t *testing.T) {

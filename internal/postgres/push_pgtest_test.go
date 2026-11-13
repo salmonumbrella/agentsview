@@ -3949,10 +3949,29 @@ func TestIncrementalPushPublishesFederatedRelationshipChanges(t *testing.T) {
 	parentID := "parent"
 	child := db.FederationHubRecord{UID: "child", Hash: "child-hash", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: db.SessionBatchWrite{Session: db.Session{ID: "child", Project: "fixture", Machine: "federated", Agent: "claude", ParentSessionID: &parentID, RelationshipType: "subagent", MessageCount: 1}}}
 	parent := db.FederationHubRecord{UID: parentID, Hash: "parent-hash", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: db.SessionBatchWrite{Session: db.Session{ID: parentID, Project: "fixture", Machine: "federated", Agent: "claude", MessageCount: 1}}}
+	child.Write.UsageEvents = []db.UsageEvent{{SessionID: "child", Source: "federation", Model: "fixture", InputTokens: 42, OccurredAt: "2026-01-01T00:00:00Z", DedupKey: "fixture"}}
+	parent.Write.UsageEvents = []db.UsageEvent{{SessionID: "parent", Source: "federation", Model: "fixture", InputTokens: 7, OccurredAt: "2026-01-01T00:00:00Z", DedupKey: "fixture"}}
+	require.NoError(t, local.CreateFederationEnrollment(ctx, db.FederationEnrollment{UID: "other-enr", SpokeArchiveID: "other-spoke", Member: "other", CredentialSHA256: "other-digest"}))
+	other := share
+	other.UID, other.EnrollmentUID = "other-share", "other-enr"
+	_, err = local.PutFederationHubShare(ctx, "other-spoke", other)
+	require.NoError(t, err)
+	otherRecord := db.FederationHubRecord{UID: "other", Hash: "other-hash", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: db.SessionBatchWrite{Session: db.Session{ID: "other", Project: "fixture", Machine: "federated", Agent: "claude"}, UsageEvents: []db.UsageEvent{{SessionID: "other", Source: "federation", Model: "fixture", InputTokens: 9, OccurredAt: "2026-01-01T00:00:00Z", DedupKey: "fixture"}}}}
+	_, err = local.CommitFederationBatch(ctx, "other-enr", "other-spoke", other.UID, "policy", 1, 1, "other", []db.FederationHubRecord{otherRecord})
+	require.NoError(t, err)
+	require.NoError(t, local.Update(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent) VALUES('collision','fixture','host','claude')`); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO messages(session_id,ordinal,role,content) VALUES('collision',0,'user','original')`)
+		return err
+	}))
+	collision := db.FederationHubRecord{UID: "collision", Hash: "collision-hash", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: db.SessionBatchWrite{Session: db.Session{ID: "collision", Project: "fixture", Machine: "federated", Agent: "claude"}}}
 	_, err = local.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 1, "child", []db.FederationHubRecord{child})
 	require.NoError(t, err)
-	_, err = local.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 2, "parent", []db.FederationHubRecord{parent})
+	refused, err := local.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 2, "parent", []db.FederationHubRecord{parent, collision})
 	require.NoError(t, err)
+	assert.Equal(t, db.FederationCollision, refused.Refused["collision"])
 	_, err = syncer.Push(ctx, true, nil)
 	require.NoError(t, err)
 	ageChild := func() {
@@ -3990,4 +4009,9 @@ func TestIncrementalPushPublishesFederatedRelationshipChanges(t *testing.T) {
 	require.NoError(t, pg.QueryRowContext(ctx, `SELECT parent_session_id,relationship_type FROM sessions WHERE id='child'`).Scan(&parentValue, &relationship))
 	assert.False(t, parentValue.Valid)
 	assert.Empty(t, relationship)
+	var childUsage, otherCount, originalMessages int
+	require.NoError(t, pg.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM usage_events WHERE session_id='child' AND input_tokens=42),(SELECT count(*) FROM sessions WHERE id='other'),(SELECT count(*) FROM messages WHERE session_id='collision' AND content='original')`).Scan(&childUsage, &otherCount, &originalMessages))
+	assert.Equal(t, 1, childUsage)
+	assert.Equal(t, 1, otherCount)
+	assert.Equal(t, 1, originalMessages)
 }

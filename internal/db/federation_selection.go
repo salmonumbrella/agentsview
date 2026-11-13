@@ -277,6 +277,14 @@ func (db *DB) FederationChangedCandidates(ctx context.Context, share, marker str
 // not prove deletion after replacement, and a reinserted row defeats a tombstone.
 const retainedDeletionEvidence = `(EXISTS(SELECT 1 FROM federation_exclusions e WHERE e.session_id=d.session_id) OR (NOT EXISTS(SELECT 1 FROM sessions s WHERE s.id=d.session_id) AND EXISTS(SELECT 1 FROM session_deletion_changes c WHERE c.session_id=d.session_id AND c.deleted=1)))`
 
+// FederationRetainedOutstanding reports whether any delivery can still need
+// narrowing, without loading the share's ledger into memory.
+func (db *DB) FederationRetainedOutstanding(ctx context.Context, share string) (bool, error) {
+	var outstanding bool
+	err := db.getReader().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM federation_deliveries WHERE share_uid=? AND state NOT IN ('refused','tombstoned'))`, share).Scan(&outstanding)
+	return outstanding, err
+}
+
 // FederationRetainedRemovals returns proven removals with outstanding
 // delivery evidence for a stopped share.
 func (db *DB) FederationRetainedRemovals(ctx context.Context, share, after string, limit int) ([]string, error) {

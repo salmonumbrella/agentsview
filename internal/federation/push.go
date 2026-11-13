@@ -747,6 +747,15 @@ func (s *Service) processRetainedNarrowing(ctx context.Context, link db.Federati
 		if share.State == "active" || share.StopReceipt != "retained" {
 			continue
 		}
+		if share.PendingBatch == "" {
+			outstanding, err := s.db.FederationRetainedOutstanding(ctx, share.UID)
+			if err != nil {
+				return err
+			}
+			if !outstanding {
+				continue
+			}
+		}
 		generation, err := s.db.GetDatabaseID(ctx)
 		if err != nil {
 			return err

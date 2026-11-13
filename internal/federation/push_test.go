@@ -579,11 +579,13 @@ func TestRetainedNarrowingDoesNotInferDeletionAfterArchiveReplacement(t *testing
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, archive.Close()) })
 	service := NewService("spoke", "spoke", config.FederationHubConfig{}, archive)
-	share := db.FederationShare{UID: "share", State: "paused", StopReceipt: "retained", SourceGeneration: "replaced-generation"}
-	_, err = archive.GetDatabaseID(t.Context())
+	generation, err := archive.GetDatabaseID(t.Context())
 	require.NoError(t, err)
-	err = service.processRetainedNarrowing(t.Context(), db.FederationLink{TokenFile: "/missing"}, []db.FederationShare{share}, &PushResult{})
-	require.NoError(t, err) // No delivered rows need cleanup or a credential.
+	for _, source := range []string{"replaced-generation", generation} {
+		share := db.FederationShare{UID: "share", State: "paused", StopReceipt: "retained", SourceGeneration: source}
+		err = service.processRetainedNarrowing(t.Context(), db.FederationLink{TokenFile: "/missing"}, []db.FederationShare{share}, &PushResult{})
+		require.NoError(t, err) // No delivered rows need cleanup or a credential.
+	}
 }
 
 func TestRetainedRestoreHonorsExplicitExclusionButNotMissingRows(t *testing.T) {
