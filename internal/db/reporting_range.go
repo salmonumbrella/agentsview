@@ -5,7 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
+
+	"go.kenn.io/agentsview/internal/activity"
 )
 
 // ReportingRange discovers dated evidence in closed UTC reporting hours.
@@ -24,6 +27,13 @@ func (db *DB) ExportReportingRange(ctx context.Context, now time.Time) (Reportin
 }
 
 func reportingRangeFrom(ctx context.Context, reader sessionExportQuerier, now time.Time, scope map[string]struct{}) (ReportingRange, error) {
+	result, _, err := reportingEvidenceDaysFrom(ctx, reader, now, scope, false)
+	return result, err
+}
+
+// reportingEvidenceDaysFrom shares the range timestamp selection with pulse's
+// private itinerary. Both reads use the caller's snapshot and ownership scope.
+func reportingEvidenceDaysFrom(ctx context.Context, reader sessionExportQuerier, now time.Time, scope map[string]struct{}, collect bool) (ReportingRange, []time.Time, error) {
 	if now.IsZero() {
 		now = time.Now()
 	}
@@ -44,7 +54,7 @@ func reportingRangeFrom(ctx context.Context, reader sessionExportQuerier, now ti
 		SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cursor_usage_events'
 	)`).Scan(&hasCursorUsage)
 	if err != nil {
-		return ReportingRange{}, fmt.Errorf("checking standalone reporting usage table: %w", err)
+		return ReportingRange{}, nil, fmt.Errorf("checking standalone reporting usage table: %w", err)
 	}
 	standaloneUsage := ""
 	if hasCursorUsage && scope == nil {
@@ -61,40 +71,117 @@ func reportingRangeFrom(ctx context.Context, reader sessionExportQuerier, now ti
 		}
 		encoded, err := json.Marshal(ids)
 		if err != nil {
-			return ReportingRange{}, fmt.Errorf("encode reporting scope: %w", err)
+			return ReportingRange{}, nil, fmt.Errorf("encode reporting scope: %w", err)
 		}
 		args = append(args, string(encoded))
 		scopeWhere = " AND s.id IN (SELECT value FROM json_each(?1))"
 	}
-	err = reader.QueryRowContext(ctx, `
+	timestamps := `
 		WITH timestamps(ts) AS (
 			SELECT COALESCE(agentsview_timestamp_unix_micro(COALESCE(s.started_at, '')),
 				agentsview_timestamp_unix_micro(s.created_at))
-			FROM sessions s WHERE (`+existenceWhere+`)`+scopeWhere+`
+			FROM sessions s WHERE (` + existenceWhere + `)` + scopeWhere + `
 			UNION ALL
 			SELECT agentsview_timestamp_unix_micro(COALESCE(
 				NULLIF(m.timestamp, ''), NULLIF(s.started_at, ''), s.created_at))
 			FROM messages m JOIN sessions s ON s.id = m.session_id
-			WHERE ((`+activityWhere+`) OR (`+usageMessageEligibility+`))`+scopeWhere+`
+			WHERE ((` + activityWhere + `) OR (` + usageMessageEligibility + `))` + scopeWhere + `
 			UNION ALL
 			SELECT agentsview_timestamp_unix_micro(COALESCE(
 				NULLIF(ue.occurred_at, ''), NULLIF(s.started_at, ''), s.created_at))
 			FROM usage_events ue JOIN sessions s ON s.id = ue.session_id
-			WHERE (`+usageEventEligibility+`)`+scopeWhere+`
+			WHERE (` + usageEventEligibility + `)` + scopeWhere + `
 			UNION ALL
 			SELECT agentsview_timestamp_unix_micro(COALESCE(
 				NULLIF(tre.timestamp, ''), NULLIF(s.started_at, ''), s.created_at))
 			FROM tool_result_events tre JOIN sessions s ON s.id = tre.session_id
-			WHERE `+activityWhere+` AND tre.source = 'tool_execution'
-				AND tre.status IN ('completed', 'errored')`+scopeWhere+`
-			`+standaloneUsage+`
-		)
-		SELECT MIN(ts) FROM timestamps`, args...).Scan(&earliest)
+			WHERE ` + activityWhere + ` AND tre.source = 'tool_execution'
+				AND tre.status IN ('completed', 'errored')` + scopeWhere + `
+			` + standaloneUsage + `
+		)`
+	err = reader.QueryRowContext(ctx, timestamps+` SELECT MIN(ts) FROM timestamps`, args...).Scan(&earliest)
 	if err != nil {
-		return ReportingRange{}, fmt.Errorf("query reporting range: %w", err)
+		return ReportingRange{}, nil, fmt.Errorf("query reporting range: %w", err)
 	}
 	if earliest.Valid && earliest.Int64 < cutoff.UnixMicro() {
 		result.EarliestDate = new(time.UnixMicro(earliest.Int64).UTC().Format(time.DateOnly))
 	}
-	return result, nil
+	if !collect {
+		return result, nil, nil
+	}
+	days := make(map[time.Time]struct{})
+	addDay := func(at time.Time) {
+		at = at.UTC()
+		if at.Before(cutoff) {
+			days[time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, time.UTC)] = struct{}{}
+		}
+	}
+	rows, err := reader.QueryContext(ctx, timestamps+` SELECT ts FROM timestamps WHERE ts IS NOT NULL`, args...)
+	if err != nil {
+		return ReportingRange{}, nil, fmt.Errorf("query reporting evidence dates: %w", err)
+	}
+	for rows.Next() {
+		var ts int64
+		if err := rows.Scan(&ts); err != nil {
+			_ = rows.Close()
+			return ReportingRange{}, nil, err
+		}
+		addDay(time.UnixMicro(ts))
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return ReportingRange{}, nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return ReportingRange{}, nil, err
+	}
+	// Preserve ordinal adjacency, including malformed timestamps, as the existing
+	// first-seen operation does. A later event can close an interval before cutoff.
+	if scope != nil {
+		rows, err := reader.QueryContext(ctx, `SELECT s.id, agentsview_timestamp_unix_micro(m.timestamp)
+   FROM messages m JOIN sessions s ON s.id=m.session_id
+   WHERE (`+activityWhere+`)`+scopeWhere+` AND m.timestamp IS NOT NULL AND m.timestamp != ''
+   ORDER BY s.id, m.ordinal`, args...)
+		if err != nil {
+			return ReportingRange{}, nil, fmt.Errorf("query reporting activity dates: %w", err)
+		}
+		query, err := activity.ResolveQuery(activity.QueryInput{Preset: "custom", From: cutoff.Add(-time.Hour).Format(time.RFC3339), To: cutoff.Format(time.RFC3339), Timezone: "UTC"}, cutoff)
+		if err != nil {
+			_ = rows.Close()
+			return ReportingRange{}, nil, err
+		}
+		var previousID string
+		var previous sql.NullInt64
+		for rows.Next() {
+			var id string
+			var current sql.NullInt64
+			if err := rows.Scan(&id, &current); err != nil {
+				_ = rows.Close()
+				return ReportingRange{}, nil, err
+			}
+			if id == previousID && previous.Valid && current.Valid {
+				from := time.UnixMicro(previous.Int64).UTC()
+				to := time.UnixMicro(current.Int64).UTC()
+				start, end, ok := activity.EffectiveIntervalBounds(from, to, from, cutoff, time.Duration(query.GapCapSeconds)*time.Second)
+				if ok {
+					addDay(start)
+					addDay(end.Add(-time.Nanosecond))
+				}
+			}
+			previousID, previous = id, current
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return ReportingRange{}, nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return ReportingRange{}, nil, err
+		}
+	}
+	ordered := make([]time.Time, 0, len(days))
+	for day := range days {
+		ordered = append(ordered, day)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Before(ordered[j]) })
+	return result, ordered, nil
 }

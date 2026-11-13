@@ -110,7 +110,7 @@ func (db *DB) readFederationPulseSnapshot(
 	for id := range owners {
 		scope[id] = struct{}{}
 	}
-	rng, err := reportingRangeFrom(ctx, tx, now, scope)
+	rng, days, err := reportingEvidenceDaysFrom(ctx, tx, now, scope, true)
 	if err != nil {
 		return ReportingRange{}, err
 	}
@@ -127,7 +127,10 @@ func (db *DB) readFederationPulseSnapshot(
 	}
 	cutoff := now.UTC().Truncate(time.Hour)
 	if start != nil {
-		for date := *start; date.Before(cutoff); date = date.AddDate(0, 0, 1) {
+		for _, date := range days {
+			if date.Before(*start) || !date.Before(cutoff) {
+				continue
+			}
 			if err := ctx.Err(); err != nil {
 				return ReportingRange{}, err
 			}

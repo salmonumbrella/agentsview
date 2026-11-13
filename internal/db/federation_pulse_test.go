@@ -1309,15 +1309,20 @@ func TestFederationPulseDatedEvidenceAndPublicReporting(t *testing.T) {
 			assert.Equal(t, []string{"2026-07-28"}, dates)
 			pulse, err := d.readFederationPulse(ctx, "2026-07-28", 1, now)
 			require.NoError(t, err)
-			assert.Equal(t, Ptr(int64(1)), pulse.Totals["sessions"].Value)
+			if tc.name == "terminal" {
+				assert.Equal(t, "unavailable", pulse.Totals["sessions"].State)
+				assert.Nil(t, pulse.Totals["sessions"].Value)
+			} else {
+				assert.Equal(t, Ptr(int64(1)), pulse.Totals["sessions"].Value)
+			}
 			day, err := d.ExportReportingDay(ctx, ReportingExportOptions{Date: date, Now: now})
 			require.NoError(t, err)
-			assert.True(t, day.HasData)
+			assert.Equal(t, tc.name != "terminal", day.HasData)
 			digest, err := d.ExportReportingDigest(ctx, ReportingDigestExportOptions{From: date, To: date, Now: now})
 			require.NoError(t, err)
 			require.Len(t, digest.Days, 1)
 			assert.Equal(t, "2026-07-28", digest.Days[0].Date)
-			assert.True(t, digest.Days[0].HasData)
+			assert.Equal(t, tc.name != "terminal", digest.Days[0].HasData)
 			assert.Equal(t, day.Digest, digest.Days[0].DayDigest)
 		})
 	}
