@@ -879,28 +879,34 @@ func TestResolvePushProjectRemotes(t *testing.T) {
 		target  storage.ConfiguredReplica
 		cfg     ReplicaPushConfig
 		want    []string
-		wantErr bool
+		wantErr string
 	}{
 		{name: "configured", target: storage.ConfiguredReplica{ProjectRemotes: []string{"github.com/org/repo"}}, want: []string{"github.com/org/repo"}},
 		{name: "flag normalized", cfg: ReplicaPushConfig{ProjectRemotes: "git@github.com:org/repo.git"}, want: []string{"github.com/org/repo"}},
-		{name: "label flag with remote config", target: storage.ConfiguredReplica{ProjectRemotes: []string{"github.com/org/repo"}}, cfg: ReplicaPushConfig{ProjectsFlag: "label"}, wantErr: true},
-		{name: "remote flag with label config", target: storage.ConfiguredReplica{Projects: []string{"label"}}, cfg: ReplicaPushConfig{ProjectRemotes: "github.com/org/repo"}, wantErr: true},
-		{name: "exclude flag with remote config", target: storage.ConfiguredReplica{ProjectRemotes: []string{"github.com/org/repo"}}, cfg: ReplicaPushConfig{ExcludeProjects: "label"}, wantErr: true},
-		{name: "remote flag with exclusion config", target: storage.ConfiguredReplica{ExcludeProjects: []string{"label"}}, cfg: ReplicaPushConfig{ProjectRemotes: "github.com/org/repo"}, wantErr: true},
-		{name: "explicit empty label with remote", cfg: ReplicaPushConfig{ProjectsSet: true, ProjectRemotes: "github.com/org/repo"}, wantErr: true},
-		{name: "mixed flags", cfg: ReplicaPushConfig{ProjectsFlag: "label", ProjectRemotes: "github.com/org/repo"}, wantErr: true},
-		{name: "mixed configuration", target: storage.ConfiguredReplica{Projects: []string{"label"}, ProjectRemotes: []string{"github.com/org/repo"}}, wantErr: true},
+		{name: "label flag with remote config", target: storage.ConfiguredReplica{ProjectRemotes: []string{"github.com/org/repo"}}, cfg: ReplicaPushConfig{ProjectsFlag: "label"}, wantErr: "project_remotes and project labels are mutually exclusive"},
+		{name: "remote flag with label config", target: storage.ConfiguredReplica{Projects: []string{"label"}}, cfg: ReplicaPushConfig{ProjectRemotes: "github.com/org/repo"}, wantErr: "project_remotes and project labels are mutually exclusive"},
+		{name: "exclude flag with remote config", target: storage.ConfiguredReplica{ProjectRemotes: []string{"github.com/org/repo"}}, cfg: ReplicaPushConfig{ExcludeProjects: "label"}, wantErr: "project_remotes and project labels are mutually exclusive"},
+		{name: "remote flag with exclusion config", target: storage.ConfiguredReplica{ExcludeProjects: []string{"label"}}, cfg: ReplicaPushConfig{ProjectRemotes: "github.com/org/repo"}, wantErr: "project_remotes and project labels are mutually exclusive"},
+		{name: "explicit empty label with remote", cfg: ReplicaPushConfig{ProjectsSet: true, ProjectRemotes: "github.com/org/repo"}, wantErr: "project_remotes and project labels are mutually exclusive"},
+		{name: "mixed flags", cfg: ReplicaPushConfig{ProjectsFlag: "label", ProjectRemotes: "github.com/org/repo"}, wantErr: "project_remotes and project labels are mutually exclusive"},
+		{name: "mixed configuration", target: storage.ConfiguredReplica{Projects: []string{"label"}, ProjectRemotes: []string{"github.com/org/repo"}}, wantErr: "project_remotes and project labels are mutually exclusive"},
 		{name: "remote flag replaces remote config", target: storage.ConfiguredReplica{ProjectRemotes: []string{"github.com/org/old"}}, cfg: ReplicaPushConfig{ProjectRemotes: "github.com/org/repo"}, want: []string{"github.com/org/repo"}},
-		{name: "explicit empty remote", cfg: ReplicaPushConfig{ProjectRemotesSet: true}, wantErr: true},
-		{name: "all with explicit empty remote", cfg: ReplicaPushConfig{AllProjects: true, ProjectRemotesSet: true}, wantErr: true},
-		{name: "empty remote entry", cfg: ReplicaPushConfig{ProjectRemotes: "github.com/org/repo,"}, wantErr: true},
+		{name: "explicit empty remote", cfg: ReplicaPushConfig{ProjectRemotesSet: true}, wantErr: "project_remotes cannot be empty"},
+		{name: "all with explicit empty remote", cfg: ReplicaPushConfig{AllProjects: true, ProjectRemotesSet: true}, wantErr: "--all-projects cannot be combined with project scope flags"},
+		{name: "empty remote entry", cfg: ReplicaPushConfig{ProjectRemotes: "github.com/org/repo,"}, wantErr: "invalid project remote \"\""},
 		{name: "all clears", target: storage.ConfiguredReplica{ProjectRemotes: []string{"github.com/org/repo"}}, cfg: ReplicaPushConfig{AllProjects: true}},
-		{name: "all with remote flag", cfg: ReplicaPushConfig{AllProjects: true, ProjectRemotes: "github.com/org/repo"}, wantErr: true},
+		{name: "all with remote flag", cfg: ReplicaPushConfig{AllProjects: true, ProjectRemotes: "github.com/org/repo"}, wantErr: "--all-projects cannot be combined with project scope flags"},
+		{name: "bad config", target: storage.ConfiguredReplica{ProjectRemotesErr: errors.New("invalid project remote")}, wantErr: "invalid project remote"},
+		{name: "remote overrides bad config", target: storage.ConfiguredReplica{ProjectRemotesErr: errors.New("invalid project remote")}, cfg: ReplicaPushConfig{ProjectRemotes: "github.com/org/repo"}, want: []string{"github.com/org/repo"}},
+		{name: "all clears bad config", target: storage.ConfiguredReplica{ProjectRemotesErr: errors.New("invalid project remote")}, cfg: ReplicaPushConfig{AllProjects: true}},
+		{name: "label with bad config", target: storage.ConfiguredReplica{ProjectRemotesErr: errors.New("invalid project remote")}, cfg: ReplicaPushConfig{ProjectsFlag: "work"}, wantErr: "project_remotes and project labels are mutually exclusive"},
+		{name: "ipv6", cfg: ReplicaPushConfig{ProjectRemotes: "https://[2001:db8::1]/org/repo"}, want: []string{"[2001:db8::1]/org/repo"}},
+		{name: "ipv6 port", cfg: ReplicaPushConfig{ProjectRemotes: "https://[2001:db8::1]:8443/org/repo"}, want: []string{"[2001:db8::1]:8443/org/repo"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, remotes, err := resolvePushProjects(tc.target, tc.cfg)
-			if tc.wantErr {
-				require.Error(t, err)
+			if tc.wantErr != "" {
+				require.EqualError(t, err, tc.wantErr)
 				return
 			}
 			require.NoError(t, err)
@@ -914,64 +920,4 @@ func TestProjectRemotesFlagOnlyOnPGPush(t *testing.T) {
 	require.NoError(t, pg.ParseFlags([]string{"--project-remotes", "example.com/org/repo"}))
 	other := newReplicaPushCommand(clickhouse.Backend{})
 	assert.Error(t, other.ParseFlags([]string{"--project-remotes", "example.com/org/repo"}))
-}
-
-func TestResolvePushProjectsConfiguredRemoteOverrides(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		target     storage.ConfiguredReplica
-		configured bool
-		bad        bool
-	}{
-		{"absent", storage.ConfiguredReplica{}, false, false},
-		{"valid", storage.ConfiguredReplica{ProjectRemotes: []string{"example.com:8443/org/repo"}}, true, false},
-		{"empty", storage.ConfiguredReplica{ProjectRemotesErr: errors.New("project_remotes cannot be empty")}, true, true},
-		{"invalid", storage.ConfiguredReplica{ProjectRemotesErr: errors.New("invalid project remote")}, true, true},
-	} {
-		for _, flag := range []string{"none", "remote", "all", "label"} {
-			t.Run(tc.name+"/"+flag, func(t *testing.T) {
-				cfg := ReplicaPushConfig{}
-				switch flag {
-				case "remote":
-					cfg.ProjectRemotes = "https://example.com:8443/org/repo"
-				case "all":
-					cfg.AllProjects = true
-				case "label":
-					cfg.ProjectsFlag = "work"
-				}
-				_, _, remotes, err := resolvePushProjects(tc.target, cfg)
-				if flag == "label" && tc.configured {
-					require.EqualError(t, err, "project_remotes and project labels are mutually exclusive")
-					return
-				}
-				if flag == "none" && tc.bad {
-					require.Error(t, err)
-					return
-				}
-				require.NoError(t, err)
-				if flag == "remote" {
-					assert.Equal(t, []string{"example.com:8443/org/repo"}, remotes)
-					require.NoError(t, storage.ValidateProjectFilters(nil, nil, remotes))
-				}
-				if flag == "all" {
-					assert.Empty(t, remotes)
-				}
-			})
-		}
-	}
-}
-
-func TestProjectRemoteDaemonBodyRoundTrip(t *testing.T) {
-	for _, raw := range []string{"https://example.com:8443/org/repo", "ssh://git@example.com:2222/org/repo.git", "https://[2001:db8::1]/org/repo", "https://[2001:db8::1]:8443/org/repo", "git@github.com:org/repo.git", "github.com/org/repo"} {
-		t.Run(raw, func(t *testing.T) {
-			_, _, remotes, err := resolvePushProjects(storage.ConfiguredReplica{}, ReplicaPushConfig{ProjectRemotes: raw})
-			require.NoError(t, err)
-			require.NoError(t, storage.ValidateProjectFilters(nil, nil, remotes))
-			data, err := json.Marshal(apiclient.DaemonPushRequest{ProjectRemotes: remotes})
-			require.NoError(t, err)
-			var decoded apiclient.DaemonPushRequest
-			require.NoError(t, json.Unmarshal(data, &decoded))
-			assert.Equal(t, remotes, decoded.ProjectRemotes)
-		})
-	}
 }

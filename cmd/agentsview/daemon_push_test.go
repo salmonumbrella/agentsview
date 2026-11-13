@@ -234,40 +234,8 @@ func TestPostDaemonPushReportsWhetherThePushStarted(t *testing.T) {
 	}
 	unreachable := httptest.NewServer(http.NotFoundHandler())
 	unreachable.Close()
-
-	for _, tt := range []struct {
-		name    string
-		url     string
-		started bool
-	}{
-		{"daemon refused", serve(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}), false},
-		{"daemon unreachable", unreachable.URL, false},
-		{"older daemon streamed an error", streamError(`{"error":"push: conn reset"}`), true},
-		{"pre-push resync failed", streamError(
-			`{"error":"resync failed","push_started":false}`), false},
-		{"copy failed without a stream", serve(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"error":"push: conn reset","push_started":true}`))
-		}), true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := postDaemonPush[storage.PushResult, storage.PushProgress](
-				t.Context(), transport{URL: tt.url}, "", replicaPushOperations["pg"],
-				apiclient.DaemonPushRequest{}, nil,
-			)
-			require.Error(t, err)
-			_, notStarted := errors.AsType[storage.PushNotStartedError](err)
-			assert.Equal(t, !tt.started, notStarted)
-		})
-	}
-}
-
-func TestDaemonPushOldDaemonRejectsRemoteScopeWithoutRetry(t *testing.T) {
 	attempts := 0
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	oldDaemon := serve(func(w http.ResponseWriter, r *http.Request) {
 		attempts++
 		var body map[string]jsontext.Value
 		if !assert.NoError(t, json.UnmarshalRead(r.Body, &body)) {
@@ -276,10 +244,40 @@ func TestDaemonPushOldDaemonRejectsRemoteScopeWithoutRetry(t *testing.T) {
 		assert.Contains(t, body, "project_remotes")
 		w.WriteHeader(http.StatusUnprocessableEntity)
 		_, _ = w.Write([]byte(`{"errors":[{"location":"body.project_remotes","message":"unexpected property"}]}`))
-	}))
-	t.Cleanup(ts.Close)
-	_, err := postDaemonPush[storage.PushResult, storage.PushProgress](t.Context(), transport{URL: ts.URL}, "", replicaPushOperations["pg"], apiclient.DaemonPushRequest{ProjectRemotes: []string{"example.com/org/repo"}, WatchBatch: &apiclient.SyncWatchBatch{}}, nil)
-	var notStarted storage.PushNotStartedError
-	require.ErrorAs(t, err, &notStarted)
-	assert.Equal(t, 1, attempts)
+	})
+
+	for _, tt := range []struct {
+		name     string
+		url      string
+		started  bool
+		body     apiclient.DaemonPushRequest
+		attempts *int
+	}{
+		{"daemon refused", serve(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}), false, apiclient.DaemonPushRequest{}, nil},
+		{"daemon unreachable", unreachable.URL, false, apiclient.DaemonPushRequest{}, nil},
+		{"older daemon streamed an error", streamError(`{"error":"push: conn reset"}`), true, apiclient.DaemonPushRequest{}, nil},
+		{"pre-push resync failed", streamError(
+			`{"error":"resync failed","push_started":false}`), false, apiclient.DaemonPushRequest{}, nil},
+		{"copy failed without a stream", serve(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"push: conn reset","push_started":true}`))
+		}), true, apiclient.DaemonPushRequest{}, nil},
+		{"old daemon rejects remote scope without retry", oldDaemon, false, apiclient.DaemonPushRequest{ProjectRemotes: []string{"example.com/org/repo"}, WatchBatch: &apiclient.SyncWatchBatch{}}, &attempts},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := postDaemonPush[storage.PushResult, storage.PushProgress](
+				t.Context(), transport{URL: tt.url}, "", replicaPushOperations["pg"],
+				tt.body, nil,
+			)
+			require.Error(t, err)
+			_, notStarted := errors.AsType[storage.PushNotStartedError](err)
+			assert.Equal(t, !tt.started, notStarted)
+			if tt.attempts != nil {
+				assert.Equal(t, 1, *tt.attempts)
+			}
+		})
+	}
 }

@@ -182,6 +182,13 @@ func TestPushSyncStateScopeIncludesProjectFilters(t *testing.T) {
 	assert.NotEqual(t, pushSyncStateScope("work", []string{"alpha"}, nil, nil),
 		includeAExcludeB)
 	assert.NotEqual(t, includeAB, defaultIncludeAB)
+	plain := pushSyncStateScope("work", nil, nil, nil)
+	label := pushSyncStateScope("work", []string{"alpha"}, nil, nil)
+	assert.Equal(t, "work:project-filter:29def59da1267056", label)
+	remote := pushSyncStateScope("work", nil, nil, []string{"example.com/team/repo"})
+	assert.NotEqual(t, plain, remote)
+	assert.NotEqual(t, label, remote)
+	assert.NotEqual(t, remote, pushSyncStateScope("work", nil, nil, []string{"example.com/team/other"}))
 }
 
 func TestNewRejectsIncludeAndExcludeProjects(t *testing.T) {
@@ -270,15 +277,4 @@ func TestReadLastPushAtDoesNotMigrateLegacyStateForProjectFilter(t *testing.T) {
 	legacyValue, err := local.GetSyncState(t.Context(), "last_push_at")
 	require.NoError(t, err)
 	assert.Equal(t, "2026-03-11T12:00:00.000Z", legacyValue)
-}
-
-func TestRemotePushScopeSeparatesCursors(t *testing.T) {
-	plain := pushSyncStateScope("work", nil, nil, nil)
-	label := pushSyncStateScope("work", []string{"alpha"}, nil, nil)
-	assert.Equal(t, "work", plain)
-	assert.Equal(t, "work:project-filter:29def59da1267056", label)
-	remote := pushSyncStateScope("work", nil, nil, []string{"example.com/team/repo"})
-	assert.NotEqual(t, plain, remote)
-	assert.NotEqual(t, label, remote)
-	assert.NotEqual(t, remote, pushSyncStateScope("work", nil, nil, []string{"example.com/team/other"}))
 }

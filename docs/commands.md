@@ -106,16 +106,18 @@ Status shows the stored link, the hub state, and the hub's current policy when
 it answers; the spoke keeps no copy of that policy. It blocks the link if the
 hub archive ID changes. When the hub rejects the credential, status shows hub
 state `error` with a message that says it is revoked, unknown, or for another
-archive. Get a new enrollment, run `leave`, then `join` to recover. Join refuses while a link exists; run `leave`
-first. The credential file must be mode 0600; a permissive mode is refused.
+archive. Get a new enrollment, run `leave`, then `join` to recover. Join refuses
+while a link exists; run `leave` first. The credential file must be mode 0600;
+a permissive mode is refused.
 
 The hub operator can use `agentsview federation enrollments list` and
 `agentsview federation revoke <enrollment-uid>`. The list shows `enrolled` for
 a member that has never contacted the hub, `contacted` after any contact, and
-`revoked` after revocation. `last_handshake_at` records the last contact and is updated by
-join and status. A join the spoke refuses still counts as contact. The member
-can run `agentsview federation leave` to remove the local link; the credential
-file remains in place. The hub is not told when a
+`revoked` after revocation. `last_handshake_at` records the last contact and is
+updated by join and status. A join the spoke refuses still counts as contact.
+The member can run `agentsview federation leave` to remove the local link before
+setting the role to `off`; it needs the spoke role and the link stays until
+removed. The credential file remains in place. The hub is not told when a
 member leaves, so a `contacted` install may have left; revoke that enrollment.
 
 ### Find a command by task
@@ -2142,7 +2144,9 @@ agentsview export conversations message SESSION_ID MESSAGE_ID \
 ```
 
 These commands read the local archive and do not send content to another system.
-Existing session summary and activity exports remain content-free.
+`message` masks detected secrets by default and marks such bodies with
+`redacted: true`; pass `--reveal` to return the stored text unchanged. Existing
+session summary and activity exports remain content-free.
 
 ______________________________________________________________________
 
@@ -2194,7 +2198,7 @@ agentsview session list --resume         # recently-active resume table
 agentsview session messages <id>         # paginated messages
 agentsview session commits <id>          # commits and their prompts
 agentsview session tool-calls <id>       # flat tool-call list
-agentsview session export <id>           # stream raw source file
+agentsview session export <id>           # stream raw source, secrets masked
 agentsview session sync <path-or-id>     # parse + insert
 agentsview session watch <id>            # NDJSON event stream
 agentsview session search <pattern>      # content search across sessions

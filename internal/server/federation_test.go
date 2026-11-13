@@ -24,7 +24,7 @@ import (
 )
 
 func TestFederationCredentialIsolation(t *testing.T) {
-	for _, role := range []string{"hub", "spoke"} {
+	for _, role := range []string{"hub", "spoke", "off"} {
 		for _, requireAuth := range []bool{false, true} {
 			t.Run(role+map[bool]string{false: "_auth_off", true: "_auth_on"}[requireAuth], func(t *testing.T) {
 				database := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "archive.db"))
@@ -34,7 +34,11 @@ func TestFederationCredentialIsolation(t *testing.T) {
 				if role == "spoke" {
 					svc = federation.NewService("spoke", "spoke-a", config.FederationHubConfig{}, database)
 				}
-				srv := New(config.Config{Host: "127.0.0.1", Port: 8080, AuthToken: "personal", RequireAuth: requireAuth}, database, nil, WithFederation(svc))
+				var options []Option
+				if role != "off" {
+					options = append(options, WithFederation(svc))
+				}
+				srv := New(config.Config{Host: "127.0.0.1", Port: 8080, AuthToken: "personal", RequireAuth: requireAuth}, database, nil, options...)
 				type operation struct{ method, path string }
 				ops := []operation{{http.MethodGet, "/"}, {http.MethodGet, "/api/ping"}, {http.MethodGet, "/debug/pprof/"}, {http.MethodGet, "/api/v1/federation/enrollments"}, {http.MethodPost, "/api/v1/federation/enrollments"}, {http.MethodPost, "/api/v1/federation/enrollments/enr-a/revoke"}}
 				for path, item := range srv.api.OpenAPI().Paths {
@@ -64,7 +68,7 @@ func TestFederationCredentialIsolation(t *testing.T) {
 						assert.Equal(t, "Unauthorized\n", rec.Body.String())
 					}
 				}
-				if role == "spoke" {
+				if role != "hub" {
 					req := httptest.NewRequest(http.MethodGet, federationHandshakePath, nil)
 					req.Header.Set("Authorization", "Bearer "+token)
 					rec := httptest.NewRecorder()
@@ -130,24 +134,46 @@ func TestFederationOffPreservesOrdinaryAuth(t *testing.T) {
 	for _, required := range []bool{false, true} {
 		database := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "archive.db"))
 		srv := New(config.Config{Host: "127.0.0.1", Port: 8080, AuthToken: "personal", RequireAuth: required}, database, nil)
-		request := func(header string) *httptest.ResponseRecorder {
-			req := httptest.NewRequest(http.MethodGet, "/api/ping", nil)
-			if header != "" {
-				req.Header.Set("Authorization", header)
+		var plain *httptest.ResponseRecorder
+		for _, tc := range []struct {
+			path, header string
+			refused      bool
+		}{
+			{"/api/ping", "", required},
+			{"/api/ping", "Bearer other", required},
+			{"/api/ping", "Bearer personal", false},
+			{"/api/ping", "Bearer avfc_x", true},
+			{"/api/ping?token=avfc_x", "", true},
+		} {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			if tc.header != "" {
+				req.Header.Set("Authorization", tc.header)
 			}
 			rec := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(rec, req)
-			return rec
-		}
-		got := request("Bearer avfc_x")
-		if required {
-			assert.Equal(t, http.StatusUnauthorized, got.Code)
-		} else {
-			plain := request("")
-			assert.Equal(t, plain.Code, got.Code)
-			assert.Equal(t, plain.Body.String(), got.Body.String())
+			if tc.refused {
+				assert.Equal(t, http.StatusUnauthorized, rec.Code)
+				assert.Equal(t, "Unauthorized\n", rec.Body.String())
+			} else {
+				assert.NotEqual(t, http.StatusUnauthorized, rec.Code)
+			}
+			if tc.header == "" && tc.path == "/api/ping" {
+				plain = rec
+			}
+			if !required && tc.header == "Bearer other" {
+				assert.Equal(t, plain.Code, rec.Code)
+				assert.Equal(t, plain.Body.String(), rec.Body.String())
+			}
 		}
 	}
+	database := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "archive.db"))
+	srv := New(config.Config{Host: "127.0.0.1", Port: 8080, AuthToken: "avfc_personal", RequireAuth: true}, database, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/ping", nil)
+	req.Header.Set("Authorization", "Bearer avfc_personal")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, "Unauthorized\n", rec.Body.String())
 }
 
 func TestFederationControlRequiresDirectLoopback(t *testing.T) {
@@ -316,17 +342,6 @@ func TestFederationControlInputMessages(t *testing.T) {
 		assert.Equal(t, tc.message, decoded.Error)
 		assert.NotContains(t, string(data), secret)
 	}
-	// Route registration is role-specific; change the synthetic service role after
-	// registration to exercise its defensive role refusal through the real server.
-	wrongRole := New(config.Config{Host: "127.0.0.1", Port: 8080}, database, nil, WithFederation(svc))
-	wrongRole.federation = federation.NewService("spoke", "spoke-a", config.FederationHubConfig{}, database)
-	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/v1/federation/enrollments", strings.NewReader(`{"spoke_archive_id":"a","member":"m"}`))
-	req.RemoteAddr = "127.0.0.1:1234"
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	wrongRole.Handler().ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "hub role required")
 }
 
 func TestFederationJoinControlMessages(t *testing.T) {

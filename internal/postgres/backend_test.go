@@ -84,13 +84,6 @@ func TestBackendNewPusherRejectsPushBatchSize(t *testing.T) {
 		"push_batch_size is a ClickHouse setting; PostgreSQL push does not accept it (got 250)")
 }
 
-func TestBackendResolveTargetNormalizesProjectRemotes(t *testing.T) {
-	cfg := config.Config{PG: config.PGConfig{URL: "postgres://localhost/db", ProjectRemotes: []string{"git@example.com:org/repo.git", "example.com/org/repo"}}}
-	target, err := (Backend{}).ResolveTarget(cfg, storage.ReplicaTargetRef{})
-	require.NoError(t, err)
-	assert.Equal(t, []string{"example.com/org/repo"}, target.ProjectRemotes)
-}
-
 func TestResolveTargetDefersProjectRemoteErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -99,6 +92,7 @@ func TestResolveTargetDefersProjectRemoteErrors(t *testing.T) {
 	}{
 		{"absent", nil, nil, ""},
 		{"valid", []string{"https://example.com:8443/org/repo"}, []string{"example.com:8443/org/repo"}, ""},
+		{"deduplicated", []string{"git@example.com:org/repo.git", "example.com/org/repo"}, []string{"example.com/org/repo"}, ""},
 		{"empty", []string{}, nil, "project_remotes cannot be empty"},
 		{"invalid", []string{"/local/path"}, nil, "invalid project remote"},
 	} {

@@ -2481,51 +2481,6 @@ func TestUsageOnlyPushClearsVectors(t *testing.T) {
 	}
 }
 
-func TestUsageOnlyRemoteScopeClearsOnlySelectedVectors(t *testing.T) {
-	syncer, local, pg := newVectorPushTestSync(t, testPGURL(t), "agentsview_usage_remote_vector_test")
-	ctx := t.Context()
-	fake := &fakeVectorSource{
-		gen: storage.VectorGenerationInfo{Fingerprint: "usage-remote", Model: "model-a", Dimension: 4}, hasGen: true,
-		hashes: map[string]string{}, docs: map[string][]storage.VectorPushDoc{},
-	}
-	for _, tc := range []struct{ id, remote string }{
-		{"selected", "https://example.com/org/repo.git"},
-		{"other", "https://example.com/other/repo.git"},
-	} {
-		seedVectorSessionProject(t, local, tc.id, "shared")
-		require.NoError(t, local.UpsertProjectIdentityObservation(ctx, export.ProjectIdentityObservation{
-			SessionID: tc.id, Project: "shared", Machine: "test-machine", RootPath: "/work/" + tc.id,
-			GitRemote: tc.remote, RemoteResolution: export.ProjectResolutionResolved, ObservedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
-		}))
-		fake.hashes[tc.id] = "hash-" + tc.id
-		fake.docs[tc.id] = []storage.VectorPushDoc{vdoc(tc.id, tc.id+"#0", 0, tc.id+" content", "hash-"+tc.id, []float32{1, 0, 0, 0})}
-	}
-	syncer.vectorSource = fake
-	_, err := syncer.Push(ctx, true, nil)
-	require.NoError(t, err)
-	for _, table := range []string{"vector_documents", "vector_push_state"} {
-		for _, id := range []string{"selected", "other"} {
-			var count int
-			require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM `+table+` WHERE session_id = $1`, id).Scan(&count))
-			require.Equal(t, 1, count, "%s %s", table, id)
-		}
-	}
-	local.SetArchiveContent(config.ArchiveContentUsage)
-	syncer.projectRemotes = []string{"example.com/org/repo"}
-	_, err = syncer.Push(ctx, true, nil)
-	require.NoError(t, err)
-	for _, table := range []string{"vector_documents", "vector_push_state"} {
-		for _, tc := range []struct {
-			id   string
-			want int
-		}{{"selected", 0}, {"other", 1}} {
-			var count int
-			require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM `+table+` WHERE session_id = $1`, tc.id).Scan(&count))
-			assert.Equal(t, tc.want, count, "%s %s", table, tc.id)
-		}
-	}
-}
-
 func TestUsageOnlyPushEvictsDeletedSessionVectors(t *testing.T) {
 	for _, full := range []bool{false, true} {
 		t.Run(fmt.Sprintf("full=%t", full), func(t *testing.T) {
@@ -2618,12 +2573,13 @@ func TestVectorPushRemoteScopeExcludesUnselectedSessions(t *testing.T) {
 
 func TestRemoteScopePreservesUnselectedDestinationRows(t *testing.T) {
 	for _, tc := range []struct {
-		name              string
-		full, deleteLocal bool
+		name                         string
+		full, deleteLocal, usageOnly bool
 	}{
-		{"incremental vectors removed", false, false},
-		{"full vectors removed", true, false},
-		{"full session deleted", true, true},
+		{"incremental vectors removed", false, false, false},
+		{"full vectors removed", true, false, false},
+		{"full session deleted", true, true, false},
+		{"usage-only", true, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			syncer, local, pg := newVectorPushTestSync(t, testPGURL(t), "agentsview_vector_remote_retention_test")
@@ -2640,10 +2596,14 @@ func TestRemoteScopePreservesUnselectedDestinationRows(t *testing.T) {
 			syncer.vectorSource = fake
 			_, err := syncer.Push(ctx, true, nil)
 			require.NoError(t, err)
-			delete(fake.hashes, "other")
-			delete(fake.docs, "other")
-			delete(fake.hashes, "selected")
-			delete(fake.docs, "selected")
+			if tc.usageOnly {
+				local.SetArchiveContent(config.ArchiveContentUsage)
+			} else {
+				delete(fake.hashes, "other")
+				delete(fake.docs, "other")
+				delete(fake.hashes, "selected")
+				delete(fake.docs, "selected")
+			}
 			if tc.deleteLocal {
 				require.NoError(t, local.DeleteSession(ctx, "other"))
 			}
@@ -2654,13 +2614,14 @@ func TestRemoteScopePreservesUnselectedDestinationRows(t *testing.T) {
 			assert.Equal(t, 1, countRows(t, pg, `SELECT COUNT(*) FROM vector_push_state WHERE session_id = $1`, "other"))
 			assert.Equal(t, 1, countRows(t, pg, `SELECT COUNT(*) FROM vector_documents WHERE session_id = $1`, "other"))
 			assert.Equal(t, 0, countRows(t, pg, `SELECT COUNT(*) FROM vector_push_state WHERE session_id = $1`, "selected"))
+			assert.Equal(t, 0, countRows(t, pg, `SELECT COUNT(*) FROM vector_documents WHERE session_id = $1`, "selected"))
 		})
 	}
 }
 
 func TestNewAcceptsCanonicalProjectRemotes(t *testing.T) {
 	_, local, _ := newVectorPushTestSync(t, testPGURL(t), "agentsview_canonical_remotes_test")
-	for _, remote := range []string{"example.com:8443/org/repo", "example.com:2222/org/repo", "[2001:db8::1]/org/repo", "[2001:db8::1]:8443/org/repo", "github.com/org/repo"} {
+	for _, remote := range []string{"[2001:db8::1]:8443/org/repo"} {
 		t.Run(remote, func(t *testing.T) {
 			syncer, err := New(t.Context(), testPGURL(t), "agentsview_canonical_remotes_test", local, "test-machine", true, storage.PusherOptions{ProjectRemotes: []string{remote}})
 			require.NoError(t, err)

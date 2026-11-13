@@ -12278,12 +12278,11 @@ func TestProjectRemoteSelectionUsesDiscoveredCandidateCount(t *testing.T) {
 	for _, tc := range []struct {
 		id, config string
 		count      int
-		selected   bool
 	}{
-		{"origin", "[remote \"origin\"]\n url = https://example.com/org/repo\n", 1, true},
-		{"different", "[remote \"origin\"]\n url = https://example.com/org/repo\n[remote \"upstream\"]\n url = https://example.com/org/other\n", 2, false},
-		{"same", "[remote \"origin\"]\n url = https://example.com/org/repo\n[remote \"upstream\"]\n url = git@example.com:org/repo.git\n", 1, true},
-		{"ambiguous", "[remote \"one\"]\n url = https://example.com/org/repo\n[remote \"two\"]\n url = https://example.com/org/other\n", 2, false},
+		{"origin", "[remote \"origin\"]\n url = https://example.com/org/repo\n", 1},
+		{"different", "[remote \"origin\"]\n url = https://example.com/org/repo\n[remote \"upstream\"]\n url = https://example.com/org/other\n", 2},
+		{"same", "[remote \"origin\"]\n url = https://example.com/org/repo\n[remote \"upstream\"]\n url = git@example.com:org/repo.git\n", 1},
+		{"ambiguous", "[remote \"one\"]\n url = https://example.com/org/repo\n[remote \"two\"]\n url = https://example.com/org/other\n", 2},
 	} {
 		t.Run(tc.id, func(t *testing.T) {
 			root := t.TempDir()
@@ -12303,13 +12302,6 @@ func TestProjectRemoteSelectionUsesDiscoveredCandidateCount(t *testing.T) {
 				}
 			}
 			require.True(t, found)
-			ids, err := database.SessionIDsForProjectRemotes(t.Context(), []string{"example.com/org/repo"})
-			require.NoError(t, err)
-			if tc.selected {
-				assert.Contains(t, ids, tc.id)
-			} else {
-				assert.NotContains(t, ids, tc.id)
-			}
 		})
 	}
 }

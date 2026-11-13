@@ -12,11 +12,12 @@ import (
 
 const federationHandshakePath = "/api/v1/federation/handshake"
 
-// federationAuth returns true when it has handled the request.
+// federationAuth returns true when it has handled the request; a nil service
+// still refuses federation credentials.
 func (s *Server) federationAuth(w http.ResponseWriter, r *http.Request, next http.Handler) bool {
 	token, hasBearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	unauthorized := func() { setCORSOnAuthError(w, r); http.Error(w, "Unauthorized", http.StatusUnauthorized) }
-	if r.URL.Path != federationHandshakePath || s.federation.Role() != "hub" {
+	if s.federation == nil || r.URL.Path != federationHandshakePath || s.federation.Role() != "hub" {
 		queryCredential := false
 		for _, value := range r.URL.Query()["token"] {
 			if strings.HasPrefix(value, "avfc_") {

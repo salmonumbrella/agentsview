@@ -102,9 +102,6 @@ func normalizeIdentifier(value, field string, limit int, required bool) (string,
 }
 func (s *Service) Enroll(ctx context.Context, archive, member, name string) (db.FederationEnrollment, string, error) {
 	var e db.FederationEnrollment
-	if s.role != "hub" {
-		return e, "", inputError("hub role required")
-	}
 	var err error
 	if archive, err = normalizeIdentifier(archive, "spoke archive ID", 128, true); err != nil {
 		return e, "", err
@@ -135,15 +132,9 @@ func (s *Service) Enroll(ctx context.Context, archive, member, name string) (db.
 	return e, token, nil
 }
 func (s *Service) List(ctx context.Context) ([]db.FederationEnrollment, error) {
-	if s.role != "hub" {
-		return nil, inputError("hub role required")
-	}
 	return s.db.ListFederationEnrollments(ctx)
 }
 func (s *Service) Revoke(ctx context.Context, uid string) error {
-	if s.role != "hub" {
-		return inputError("hub role required")
-	}
 	err := s.db.RevokeFederationEnrollment(ctx, uid)
 	if errors.Is(err, sql.ErrNoRows) {
 		return inputError("enrollment not found")
@@ -152,7 +143,7 @@ func (s *Service) Revoke(ctx context.Context, uid string) error {
 }
 func (s *Service) Authenticate(ctx context.Context, token, archive string) (HandshakeResponse, error) {
 	var out HandshakeResponse
-	if s.role != "hub" || !strings.HasPrefix(token, "avfc_") {
+	if !strings.HasPrefix(token, "avfc_") {
 		return out, db.ErrFederationUnauthorized
 	}
 	e, err := s.db.AuthenticateFederationCredential(ctx, credentialDigest(token), archive)
@@ -201,8 +192,8 @@ func (s *Service) Join(ctx context.Context, origin, hubID, tokenFile string) err
 	if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if s.role != "spoke" || hubID == "" {
-		return inputError("spoke role and hub archive required")
+	if hubID == "" {
+		return inputError("hub archive ID is required")
 	}
 	origin, err = ParseHubOrigin(origin)
 	if err != nil {
@@ -245,9 +236,6 @@ type HubStatus struct {
 
 func (s *Service) Status(ctx context.Context) (Status, error) {
 	out := Status{ArchiveID: s.archiveID}
-	if s.role != "spoke" {
-		return out, inputError("spoke role required")
-	}
 	link, err := s.db.GetFederationLink(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, nil
@@ -273,7 +261,7 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	h, err := Handshake(ctx, link.HubOrigin, token, s.archiveID)
 	if err != nil {
 		var input *InputError
-		if errors.Is(err, ErrHubError) {
+		if errors.Is(err, ErrHubRefused) {
 			out.Hub.State, out.Hub.Message = HubError, err.Error()
 			return out, nil
 		}
@@ -303,8 +291,5 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	return out, nil
 }
 func (s *Service) Leave(ctx context.Context) error {
-	if s.role != "spoke" {
-		return inputError("spoke role required")
-	}
 	return s.db.DeleteFederationLink(ctx)
 }

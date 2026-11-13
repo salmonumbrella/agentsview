@@ -3295,27 +3295,13 @@ func TestSaveVectorSetupRejectsInvalidCurrentSettings(t *testing.T) {
 
 func TestPGConfigProjectRemotes(t *testing.T) {
 	for _, tc := range []struct {
-		name, text string
-		target     string
+		name, text, target string
+		want               []string
 	}{
-		{"legacy", "[pg]\nurl = 'postgres://localhost/test'\nproject_remotes = ['example.com/org/repo']\n", ""},
-		{"named", "default_pg = 'work'\n[pg.work]\nurl = 'postgres://localhost/test'\nproject_remotes = ['example.com/org/repo']\n", "work"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newConfigFixture(t)
-			f.WriteConfigText(t, tc.text)
-			cfg := f.LoadFile(t)
-			pg, err := cfg.ResolvePGTarget(tc.target)
-			require.NoError(t, err)
-			assert.Equal(t, []string{"example.com/org/repo"}, pg.ProjectRemotes)
-		})
-	}
-}
-
-func TestPGConfigEmptyProjectRemotesPreservesPresence(t *testing.T) {
-	for _, tc := range []struct{ name, text, target string }{
-		{"legacy", "[pg]\nurl = 'postgres://localhost/test'\nproject_remotes = []\n", ""},
-		{"named", "default_pg = 'work'\n[pg.work]\nurl = 'postgres://localhost/test'\nproject_remotes = []\n", "work"},
+		{"legacy", "[pg]\nurl = 'postgres://localhost/test'\nproject_remotes = ['example.com/org/repo']\n", "", []string{"example.com/org/repo"}},
+		{"named", "default_pg = 'work'\n[pg.work]\nurl = 'postgres://localhost/test'\nproject_remotes = ['example.com/org/repo']\n", "work", []string{"example.com/org/repo"}},
+		{"legacy empty", "[pg]\nurl = 'postgres://localhost/test'\nproject_remotes = []\n", "", []string{}},
+		{"named empty", "default_pg = 'work'\n[pg.work]\nurl = 'postgres://localhost/test'\nproject_remotes = []\n", "work", []string{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newConfigFixture(t)
@@ -3324,7 +3310,7 @@ func TestPGConfigEmptyProjectRemotesPreservesPresence(t *testing.T) {
 			pg, err := cfg.ResolvePGTarget(tc.target)
 			require.NoError(t, err)
 			require.NotNil(t, pg.ProjectRemotes)
-			assert.Empty(t, pg.ProjectRemotes)
+			assert.Equal(t, tc.want, pg.ProjectRemotes)
 		})
 	}
 }
