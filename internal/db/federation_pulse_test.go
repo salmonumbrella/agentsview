@@ -420,8 +420,10 @@ func TestFederationPulseDirtyProjectKeepsIndependentProject(t *testing.T) {
 	// A traced update to Q must not validate P's earlier untraced write.
 	cost := money.Money{Microdollars: 400}
 	record := FederationHubRecord{UID: "d", Hash: "metadata-only", Remote: "example/q", ProjectKey: "q", Write: SessionBatchWrite{Session: Session{ID: "d", Project: "example/q", Agent: "codex", StartedAt: &start, DisplayName: Ptr("updated")}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "federation", Model: "model", InputTokens: 40, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: start, DedupKey: "model"}}}}
-	_, err = d.CommitFederationBatch(ctx, "e-d", "s-d", "h-d", "policy", 1, 2, "metadata-only", []FederationHubRecord{record})
+	ack, err := d.CommitFederationBatch(ctx, "e-d", "s-d", "h-d", "policy", 1, 2, "metadata-only", []FederationHubRecord{record})
 	require.NoError(t, err)
+	require.Empty(t, ack.Refused)
+	assert.EqualValues(t, 2, ack.Committed)
 	afterUpdate, err := d.readFederationPulse(ctx, "2026-07-29", 3, now)
 	require.NoError(t, err)
 	assert.True(t, afterUpdate.Suppressed)
