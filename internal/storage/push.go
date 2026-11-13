@@ -145,20 +145,25 @@ type VectorPushResult struct {
 	GenerationID int64
 }
 
-// ValidateProjectFilters rejects ambiguous include/exclude project filters.
-func ValidateProjectFilters(projects, excludeProjects []string, remotes []string) error {
-	if len(remotes) > 0 {
-		if len(projects) > 0 || len(excludeProjects) > 0 {
-			return errors.New("project_remotes and project labels are mutually exclusive")
-		}
-		if err := export.ValidateProjectRemotes(remotes); err != nil {
-			return err
-		}
+// ValidateProjectFilterCombination checks exclusivity for canonical remotes;
+// it does not judge their grammar.
+func ValidateProjectFilterCombination(projects, excludeProjects, remotes []string) error {
+	if len(remotes) > 0 && (len(projects) > 0 || len(excludeProjects) > 0) {
+		return errors.New("project_remotes and project labels are mutually exclusive")
 	}
 	if len(projects) > 0 && len(excludeProjects) > 0 {
 		return errors.New("projects and exclude_projects are mutually exclusive")
 	}
 	return nil
+}
+
+// ValidateProjectFilters checks combinations and remote grammar for callers
+// receiving remotes they did not normalize, such as the daemon and pusher.
+func ValidateProjectFilters(projects, excludeProjects, remotes []string) error {
+	if err := ValidateProjectFilterCombination(projects, excludeProjects, remotes); err != nil {
+		return err
+	}
+	return export.ValidateProjectRemotes(remotes)
 }
 
 // DeferSession records that sessionID's vector reconciliation was deferred.

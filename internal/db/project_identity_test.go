@@ -1744,10 +1744,13 @@ func TestSessionIDsForProjectRemotesUsesOwnSnapshot(t *testing.T) {
 	ctx := t.Context()
 	for _, id := range []string{"repo", "renamed", "personal", "ambiguous", "none", "child", "missing"} {
 		project := "shared"
-		if id == "renamed" {
-			project = "renamed"
+		if id == "renamed" || id == "personal" {
+			project = id
 		}
 		session := Session{ID: id, Project: project, Machine: "local", Agent: "codex"}
+		if id == "personal" {
+			session.Cwd = "/workspace/personal"
+		}
 		if id == "child" {
 			session.ParentSessionID = new("repo")
 		}
@@ -1759,7 +1762,7 @@ func TestSessionIDsForProjectRemotesUsesOwnSnapshot(t *testing.T) {
 	}{
 		{"repo", "shared", "https://example.com/team/repo.git", export.ProjectResolutionResolved},
 		{"renamed", "renamed", "https://example.com/team/repo.git", export.ProjectResolutionResolved},
-		{"personal", "shared", "https://example.com/personal/repo.git", export.ProjectResolutionResolved},
+		{"personal", "personal", "https://example.com/personal/repo.git", export.ProjectResolutionResolved},
 		{"ambiguous", "shared", "", export.ProjectResolutionAmbiguous},
 		{"none", "shared", "", export.ProjectResolutionUnknown},
 		{"child", "shared", "https://example.com/other/repo.git", export.ProjectResolutionResolved},
@@ -1769,6 +1772,20 @@ func TestSessionIDsForProjectRemotesUsesOwnSnapshot(t *testing.T) {
 			GitRemote: tc.remote, RemoteResolution: tc.resolution, ObservedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
 		}))
 	}
+	// The rule changes the label; the session's own snapshot still names another repository.
+	_, err := d.CreateWorktreeProjectMapping(ctx, WorktreeProjectMapping{
+		Machine: "local", PathPrefix: "/workspace/personal", Project: "shared", Enabled: true,
+	})
+	require.NoError(t, err)
+	draft := WorktreeReclassificationDraft{Machine: "local", PathPrefix: "/workspace/personal", Project: "shared", Enabled: true}
+	preview, err := d.PreviewWorktreeReclassification(ctx, draft)
+	require.NoError(t, err)
+	_, _, err = d.ApplyWorktreeReclassification(ctx, draft, preview.MappingToken, preview.ExistingMappingID)
+	require.NoError(t, err)
+	personal, err := d.GetSession(ctx, "personal")
+	require.NoError(t, err)
+	require.NotNil(t, personal)
+	require.Equal(t, "shared", personal.Project)
 	ids, err := d.SessionIDsForProjectRemotes(ctx, []string{"example.com/team/repo"})
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"repo", "renamed"}, ids)

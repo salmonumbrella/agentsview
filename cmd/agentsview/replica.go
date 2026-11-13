@@ -860,7 +860,8 @@ func resolvePushProjects(
 	} else if target.ProjectRemotesErr != nil {
 		return nil, nil, nil, target.ProjectRemotesErr
 	}
-	if err = storage.ValidateProjectFilters(projects, exclude, remotes); err != nil {
+	// Remotes were canonicalized above; the daemon and constructor check what they receive.
+	if err = storage.ValidateProjectFilterCombination(projects, exclude, remotes); err != nil {
 		return nil, nil, nil, err
 	}
 	return projects, exclude, remotes, nil

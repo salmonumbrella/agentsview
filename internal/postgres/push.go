@@ -1061,9 +1061,6 @@ func (s *Sync) syncProjectIdentityObservations(
 		if err != nil {
 			return fmt.Errorf("loading session project identity snapshots: %w", err)
 		}
-		if len(s.projectRemotes) > 0 {
-			snapshots = db.FilterIdentityByRemotes(snapshots, s.projectRemotes)
-		}
 	} else {
 		delta, err = s.local.LoadProjectIdentityPublicationDelta(
 			ctx, publishedRevision, revision, s.projects, s.excludeProjects,

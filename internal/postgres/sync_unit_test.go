@@ -188,7 +188,7 @@ func TestNewRejectsIncludeAndExcludeProjects(t *testing.T) {
 	local := testDB(t)
 
 	_, err := New(
-		t.Context(), "postgres://user:pass@127.0.0.1:1/db?sslmode=disable",
+		t.Context(), "postgres://127.0.0.1:1/db?sslmode=disable",
 		"agentsview",
 		local,
 		"test-machine",
@@ -201,6 +201,24 @@ func TestNewRejectsIncludeAndExcludeProjects(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(),
 		"projects and exclude_projects are mutually exclusive")
+}
+
+func TestNewRejectsInvalidProjectRemotes(t *testing.T) {
+	local := testDB(t)
+	for _, tc := range []struct {
+		name    string
+		options storage.PusherOptions
+		wantErr string
+	}{
+		{name: "local path", options: storage.PusherOptions{ProjectRemotes: []string{"/tmp/repo"}}, wantErr: "invalid project remote"},
+		{name: "raw URL", options: storage.PusherOptions{ProjectRemotes: []string{"https://example.com/org/repo"}}, wantErr: "invalid project remote"},
+		{name: "mixed labels and remotes", options: storage.PusherOptions{Projects: []string{"label"}, ProjectRemotes: []string{"example.com/org/repo"}}, wantErr: "project_remotes and project labels are mutually exclusive"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := New(t.Context(), "postgres://127.0.0.1:1/db?sslmode=disable", "agentsview", local, "test-machine", true, tc.options)
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
 }
 
 func TestReadLastPushAtUsesProjectFilterScope(t *testing.T) {

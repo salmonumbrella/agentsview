@@ -68,18 +68,23 @@ func NormalizeGitRemote(raw string) (string, bool) {
 		host = normalizeGitRemoteHost(host, "", "")
 	}
 
+	cleaned, ok := cleanGitRemotePath(repoPath)
+	if host == "" || !ok {
+		return "", false
+	}
+	return host + "/" + cleaned, true
+}
+
+func cleanGitRemotePath(repoPath string) (string, bool) {
 	repoPath = strings.TrimSpace(repoPath)
-	if host == "" || repoPath == "" {
+	if repoPath == "" {
 		return "", false
 	}
 	cleaned := path.Clean("/" + strings.ReplaceAll(repoPath, "\\", "/"))
 	cleaned = strings.Trim(cleaned, "/")
 	cleaned = strings.TrimSuffix(cleaned, ".git")
 	cleaned = strings.Trim(cleaned, "/")
-	if cleaned == "" || cleaned == "." {
-		return "", false
-	}
-	return host + "/" + cleaned, true
+	return cleaned, cleaned != "" && cleaned != "."
 }
 
 // NormalizeProjectRemotes validates and canonicalizes a repository push scope.
@@ -111,51 +116,18 @@ func ValidateProjectRemotes(remotes []string) error {
 	for _, remote := range remotes {
 		invalid := func() error { return fmt.Errorf("invalid project remote %q", remote) }
 		host, repo, ok := strings.Cut(remote, "/")
-		if !ok || host == "" || repo == "" || strings.Contains(remote, "://") || strings.ContainsAny(remote, "@?#") || strings.IndexFunc(remote, unicode.IsSpace) >= 0 || strings.ContainsAny(repo, "*?[]\\") || strings.HasPrefix(repo, "/") || strings.HasSuffix(repo, "/") || strings.HasSuffix(repo, ".git") {
+		if !ok || host == "" || repo == "" || strings.Contains(remote, "://") ||
+			strings.IndexFunc(remote, unicode.IsSpace) >= 0 || strings.ContainsAny(repo, "*?#[]\\") {
 			return invalid()
 		}
-		name := host
-		port := ""
-		if strings.HasPrefix(host, "[") {
-			end := strings.IndexByte(host, ']')
-			if host != strings.ToLower(host) || end < 0 || net.ParseIP(host[1:end]) == nil || !strings.Contains(host[1:end], ":") {
-				return invalid()
-			}
-			name = host[:end+1]
-			rest := host[end+1:]
-			if rest != "" {
-				if !strings.HasPrefix(rest, ":") {
-					return invalid()
-				}
-				port = rest[1:]
-				if port == "" {
-					return invalid()
-				}
-			}
-		} else {
-			if strings.ContainsAny(host, "[]") {
-				return invalid()
-			}
-			if strings.Contains(host, ":") {
-				var found bool
-				name, port, found = strings.Cut(host, ":")
-				if !found || port == "" {
-					return invalid()
-				}
-			}
-			if name == "" || name != strings.ToLower(name) || strings.HasPrefix(name, ".") {
-				return invalid()
-			}
-			for _, c := range name {
-				if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '.' || c == '-') {
-					return invalid()
-				}
-			}
+		u, err := url.Parse("//" + host)
+		if err != nil || u.User != nil || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" ||
+			host != normalizeGitRemoteHost(u.Hostname(), "", u.Port()) {
+			return invalid()
 		}
-		for _, c := range port {
-			if c < '0' || c > '9' {
-				return invalid()
-			}
+		cleaned, ok := cleanGitRemotePath(repo)
+		if !ok || repo != cleaned {
+			return invalid()
 		}
 	}
 	return nil

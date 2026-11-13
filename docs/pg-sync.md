@@ -346,12 +346,11 @@ Or set `project_remotes = ["github.com/example/widgets"]` in the target's
 `host/path` normalize to the same remote. Local paths, empty entries and globs
 are rejected. Non-default ports and IPv6 hosts need the full URL form; Git reads
 `host:path` as an SCP-style remote. A session is selected only when its own
-snapshot resolves unambiguously to a listed Git remote. Labels, folder rules and related sessions
-do not change that selection. Sessions without a matching snapshot are omitted;
-a snapshot backfilled later is picked up by an incremental push. A checkout with
-more than one distinct remote when its identity was recorded is excluded, even
-if one remote is named `origin`. A session recorded before the remote count was
-stored counts as one remote.
+snapshot resolves unambiguously to a listed Git remote. Labels, folder rules
+and related sessions do not change that selection. Sessions without a matching
+snapshot are omitted; a snapshot backfilled later is picked up by an
+incremental push. A checkout with more than one distinct remote when its
+identity was recorded is excluded, even if one remote is named `origin`.
 
 Remote selection limits sessions, project identity observations, session
 identity snapshots and vector work. Remote-scoped pushes omit cursor usage
@@ -359,7 +358,8 @@ events, diagnostics, machine labels and aliases, retained commit links and
 worktree mappings. Pricing is still published. Identity publication replaces
 this scope's owned identity rows when they change. Session and vector rows
 already pushed are not retracted when a session later leaves the selection or
-is deleted locally.
+is deleted locally. `--embed` still builds embeddings for the whole local
+archive, and only the selected sessions' vectors are pushed.
 
 Remote selection cannot be combined with project label includes or excludes,
 including across flags and configuration. A flag replaces configuration from
