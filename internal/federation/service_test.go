@@ -206,3 +206,19 @@ func TestEnrollmentStateValidation(t *testing.T) {
 	assert.Equal(t, HubError, status.Hub.State)
 	assert.Equal(t, "invalid federation policy digest", status.Hub.Message)
 }
+
+func TestUnusedFederationRolesKeepArchiveVersion(t *testing.T) {
+	for _, role := range []string{"off", "hub", "spoke"} {
+		t.Run(role, func(t *testing.T) {
+			archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, archive.Close()) })
+			if role != "off" {
+				_ = NewService(role, "archive-a", config.FederationHubConfig{}, archive)
+			}
+			var raw int
+			require.NoError(t, archive.Reader().QueryRow(t.Context(), `PRAGMA user_version`).Scan(&raw))
+			assert.Equal(t, db.CurrentDataVersion(), raw)
+		})
+	}
+}
