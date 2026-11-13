@@ -413,12 +413,12 @@ func TestSessionAliasBackfillRequirementUsesSyncAliasStateAcrossFilters(t *testi
 		"work",
 		[]string{"alpha"},
 		nil,
-	)
+		nil)
 	filterScopeB := pushSyncStateScope(
 		"work",
 		[]string{"beta"},
 		nil,
-	)
+		nil)
 
 	store := &syncStateStoreStub{}
 	syncA := &Sync{
@@ -455,8 +455,8 @@ func TestSessionAliasBackfillRequirementUsesSyncAliasStateAcrossFilters(t *testi
 }
 
 func TestPushUsesTargetScopedAliasBackfillStateAcrossFilters(t *testing.T) {
-	filterScopeA := pushSyncStateScope("work", []string{"alpha"}, nil)
-	filterScopeB := pushSyncStateScope("work", []string{"beta"}, nil)
+	filterScopeA := pushSyncStateScope("work", []string{"alpha"}, nil, nil)
+	filterScopeB := pushSyncStateScope("work", []string{"beta"}, nil, nil)
 	local := testDB(t)
 	pg := newPushAliasRoutingDB(t)
 	ctx := t.Context()
@@ -518,7 +518,7 @@ func TestPushUsesTargetScopedAliasBackfillStateAcrossFilters(t *testing.T) {
 
 func TestSessionAliasBackfillStateFallsBackToEffectiveScope(t *testing.T) {
 	store := &syncStateStoreStub{}
-	scope := pushSyncStateScope("work", []string{"alpha"}, nil)
+	scope := pushSyncStateScope("work", []string{"alpha"}, nil, nil)
 	syncer := &Sync{
 		syncState: newScopedSyncStateStore(store, scope, false),
 	}
@@ -530,8 +530,8 @@ func TestSessionAliasBackfillStateFallsBackToEffectiveScope(t *testing.T) {
 }
 
 func TestSessionAliasBackfillKeysStayFilteredForPushState(t *testing.T) {
-	filterScopeA := pushSyncStateScope("work", []string{"alpha"}, nil)
-	filterScopeB := pushSyncStateScope("work", []string{"beta"}, nil)
+	filterScopeA := pushSyncStateScope("work", []string{"alpha"}, nil, nil)
+	filterScopeB := pushSyncStateScope("work", []string{"beta"}, nil, nil)
 	store := &syncStateStoreStub{}
 	syncA := &Sync{
 		syncState:          newScopedSyncStateStore(store, filterScopeA, false),

@@ -1233,3 +1233,28 @@ func TestNormalizeProjectRemotes(t *testing.T) {
 		})
 	}
 }
+
+func TestProjectRemoteCanonicalShapes(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{"https://example.com:8443/org/repo", "example.com:8443/org/repo"},
+		{"ssh://git@example.com:2222/org/repo.git", "example.com:2222/org/repo"},
+		{"https://[2001:db8::1]/org/repo", "[2001:db8::1]/org/repo"},
+		{"https://[2001:db8::1]:8443/org/repo", "[2001:db8::1]:8443/org/repo"},
+		{"git@github.com:org/repo.git", "github.com/org/repo"},
+		{"github.com/org/repo", "github.com/org/repo"},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			got, err := NormalizeProjectRemotes([]string{tc.raw})
+			require.NoError(t, err)
+			require.Equal(t, []string{tc.want}, got)
+			require.NoError(t, ValidateProjectRemotes(got))
+			assert.Equal(t, []string{tc.want}, got)
+		})
+	}
+	for _, raw := range []string{"*", "github.com/org/*", "github.com/org/[a-z]", "/local/path", "file:///x", "", ".x"} {
+		t.Run("reject "+raw, func(t *testing.T) { _, err := NormalizeProjectRemotes([]string{raw}); require.Error(t, err) })
+	}
+	for _, canonical := range []string{"https://example.com/org/repo", "example.com:/org/repo", "[invalid]/org/repo", "example.com/org/repo.git", "example.com/org/[a-z]", "EXAMPLE.com/org/repo"} {
+		t.Run("invalid "+canonical, func(t *testing.T) { require.Error(t, ValidateProjectRemotes([]string{canonical})) })
+	}
+}

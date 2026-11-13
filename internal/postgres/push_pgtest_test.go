@@ -2911,7 +2911,7 @@ func TestFilteredPushAdoptsOwnerlessRowsFromLegacyUnscopedMarker(t *testing.T) {
 		"seed local push marker")
 
 	projects := []string{"proj"}
-	scope := pushSyncStateScope("team-target", projects, nil)
+	scope := pushSyncStateScope("team-target", projects, nil, nil)
 	sync := &Sync{
 		pg:              pg,
 		local:           localDB,
@@ -3445,7 +3445,7 @@ func TestSessionProvenanceBackfillCompletesPerFilterScope(t *testing.T) {
 	// marker scoped to the target only ("" here), shared with the
 	// unfiltered sync's unscoped keys.
 	projects := []string{"proj"}
-	filterScope := pushSyncStateScope("", projects, nil)
+	filterScope := pushSyncStateScope("", projects, nil, nil)
 	filtered := &Sync{
 		pg:                 unfiltered.pg,
 		local:              localDB,
@@ -3840,7 +3840,7 @@ func TestRemoteScopePushPublishesOnlyMatchingIdentities(t *testing.T) {
 
 	// Another filtered publisher owns the personal observation independently.
 	foreign := &Sync{pg: pg, local: local, machine: "workstation", schema: syncer.schema, schemaDone: true, projects: []string{"shared"}}
-	foreignScope := pushSyncStateScope("", foreign.projects, nil)
+	foreignScope := pushSyncStateScope("", foreign.projects, nil, nil)
 	foreign.syncState = newScopedSyncStateStore(handoffSyncState{local}, foreignScope, false)
 	foreign.syncStateTarget = foreignScope
 	_, err = foreign.Push(ctx, true, nil)

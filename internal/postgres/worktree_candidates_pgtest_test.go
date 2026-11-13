@@ -206,7 +206,7 @@ func TestPGWorktreeCandidatesUseSessionDatabaseGeneration(t *testing.T) {
 	)
 	_, localDB, pg, ctx := newSessionProvenancePushSync(t, schema)
 	newFilteredSync := func(source *db.DB, project string) *Sync {
-		scope := pushSyncStateScope("", []string{project}, nil)
+		scope := pushSyncStateScope("", []string{project}, nil, nil)
 		return &Sync{
 			pg: pg, local: source, machine: "workstation",
 			schema: schema, schemaDone: true,

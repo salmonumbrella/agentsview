@@ -77,7 +77,7 @@ func TestPushAfterArchiveRebuildRemovesMissingSessions(t *testing.T) {
 			s := f.sync()
 			s.projects, s.excludeProjects = tc.projects, tc.excludeProjects
 			s.syncState = newScopedSyncStateStore(handoffSyncState{f.local},
-				pushSyncStateScope("", tc.projects, tc.excludeProjects), false)
+				pushSyncStateScope("", tc.projects, tc.excludeProjects, nil), false)
 			_, err = s.Push(t.Context(), false, nil)
 			require.NoError(t, err)
 			_, err = f.pg.ExecContext(t.Context(), `UPDATE sessions SET owner_marker = 'another-archive' WHERE id = 'foreign'`)
@@ -103,7 +103,7 @@ func TestPushAfterArchiveRebuildRemovesMissingSessions(t *testing.T) {
 			s = f.sync()
 			s.projects, s.excludeProjects = tc.projects, tc.excludeProjects
 			s.syncState = newScopedSyncStateStore(handoffSyncState{f.local},
-				pushSyncStateScope("", tc.projects, tc.excludeProjects), false)
+				pushSyncStateScope("", tc.projects, tc.excludeProjects, nil), false)
 			if tc.interrupt {
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
@@ -137,7 +137,7 @@ func TestFirstFilteredPushDoesNotClaimLostState(t *testing.T) {
 	filtered := f.sync()
 	filtered.projects = []string{"proj"}
 	filtered.syncState = newScopedSyncStateStore(handoffSyncState{f.local},
-		pushSyncStateScope("", filtered.projects, nil), false)
+		pushSyncStateScope("", filtered.projects, nil, nil), false)
 	res, err := filtered.Push(t.Context(), false, nil)
 	require.NoError(t, err)
 	assert.NotEqual(t, lostStateReason, res.FullReason)

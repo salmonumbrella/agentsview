@@ -1475,6 +1475,10 @@ func TestPushRejectsInvalidProjectRemoteScopes(t *testing.T) {
 			_, err := s.humaReplicaPush(t.Context(), postgres.Backend{}, &daemonPushInput{Body: daemonPushRequest{ProjectRemotes: []string{}}})
 			return err
 		}},
+		{"raw URL", func() error {
+			_, err := s.humaReplicaPush(t.Context(), postgres.Backend{}, &daemonPushInput{Body: daemonPushRequest{ProjectRemotes: []string{"https://example.com/org/repo"}}})
+			return err
+		}},
 		{"invalid", func() error {
 			_, err := s.humaReplicaPush(t.Context(), postgres.Backend{}, &daemonPushInput{Body: daemonPushRequest{ProjectRemotes: []string{"/tmp/repo"}}})
 			return err

@@ -69,7 +69,7 @@ func TestPGDialogueBackfillPerScope(t *testing.T) {
 	unfiltered, local, pg, ctx := newSessionProvenancePushSync(t, "agentsview_dialogue_backfill_test")
 	dbtest.SeedDialogueSearch(t, local)
 	projects := []string{"dialogue-search"}
-	scope := pushSyncStateScope("", projects, nil)
+	scope := pushSyncStateScope("", projects, nil, nil)
 	filtered := &Sync{
 		pg: pg, local: local, machine: unfiltered.machine, schema: unfiltered.schema, schemaDone: true,
 		syncState: newScopedSyncStateStore(local, scope, false), syncStateTarget: scope, projects: projects,

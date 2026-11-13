@@ -87,7 +87,7 @@ func NormalizeProjectRemotes(remotes []string) ([]string, error) {
 	var result []string
 	for _, raw := range remotes {
 		raw = strings.TrimSpace(raw)
-		if raw == "" || strings.ContainsAny(raw, "*?[]\\") || strings.HasPrefix(raw, ".") {
+		if raw == "" || strings.ContainsAny(raw, "*?\\") || strings.HasPrefix(raw, ".") {
 			return nil, fmt.Errorf("invalid project remote %q", raw)
 		}
 		normalized, ok := NormalizeGitRemote(raw)
@@ -97,10 +97,68 @@ func NormalizeProjectRemotes(remotes []string) ([]string, error) {
 		if !ok {
 			return nil, fmt.Errorf("invalid project remote %q", raw)
 		}
+		if err := ValidateProjectRemotes([]string{normalized}); err != nil {
+			return nil, fmt.Errorf("invalid project remote %q", raw)
+		}
 		result = append(result, normalized)
 	}
 	sort.Strings(result)
 	return slices.Compact(result), nil
+}
+
+// ValidateProjectRemotes checks canonical push scope values without rewriting them.
+func ValidateProjectRemotes(remotes []string) error {
+	for _, remote := range remotes {
+		invalid := func() error { return fmt.Errorf("invalid project remote %q", remote) }
+		host, repo, ok := strings.Cut(remote, "/")
+		if !ok || host == "" || repo == "" || strings.Contains(remote, "://") || strings.ContainsAny(remote, "@?#") || strings.IndexFunc(remote, unicode.IsSpace) >= 0 || strings.ContainsAny(repo, "*?[]\\") || strings.HasPrefix(repo, "/") || strings.HasSuffix(repo, "/") || strings.HasSuffix(repo, ".git") {
+			return invalid()
+		}
+		name := host
+		port := ""
+		if strings.HasPrefix(host, "[") {
+			end := strings.IndexByte(host, ']')
+			if host != strings.ToLower(host) || end < 0 || net.ParseIP(host[1:end]) == nil || !strings.Contains(host[1:end], ":") {
+				return invalid()
+			}
+			name = host[:end+1]
+			rest := host[end+1:]
+			if rest != "" {
+				if !strings.HasPrefix(rest, ":") {
+					return invalid()
+				}
+				port = rest[1:]
+				if port == "" {
+					return invalid()
+				}
+			}
+		} else {
+			if strings.ContainsAny(host, "[]") {
+				return invalid()
+			}
+			if strings.Contains(host, ":") {
+				var found bool
+				name, port, found = strings.Cut(host, ":")
+				if !found || port == "" {
+					return invalid()
+				}
+			}
+			if name == "" || name != strings.ToLower(name) || strings.HasPrefix(name, ".") {
+				return invalid()
+			}
+			for _, c := range name {
+				if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '.' || c == '-') {
+					return invalid()
+				}
+			}
+		}
+		for _, c := range port {
+			if c < '0' || c > '9' {
+				return invalid()
+			}
+		}
+	}
+	return nil
 }
 
 func normalizeGitRemoteHost(host, scheme, port string) string {

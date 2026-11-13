@@ -682,6 +682,11 @@ func (s *Sync) vectorSessionsOutOfScope(
 				out[id] = struct{}{}
 			}
 		}
+		for id := range pgState {
+			if _, ok := s.selected[id]; !ok {
+				out[id] = struct{}{}
+			}
+		}
 		return out, nil
 	}
 	localIDs := make([]string, 0, len(local))

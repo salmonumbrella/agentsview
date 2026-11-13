@@ -915,3 +915,63 @@ func TestProjectRemotesFlagOnlyOnPGPush(t *testing.T) {
 	other := newReplicaPushCommand(clickhouse.Backend{})
 	assert.Error(t, other.ParseFlags([]string{"--project-remotes", "example.com/org/repo"}))
 }
+
+func TestResolvePushProjectsConfiguredRemoteOverrides(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		target     storage.ConfiguredReplica
+		configured bool
+		bad        bool
+	}{
+		{"absent", storage.ConfiguredReplica{}, false, false},
+		{"valid", storage.ConfiguredReplica{ProjectRemotes: []string{"example.com:8443/org/repo"}}, true, false},
+		{"empty", storage.ConfiguredReplica{ProjectRemotesErr: errors.New("project_remotes cannot be empty")}, true, true},
+		{"invalid", storage.ConfiguredReplica{ProjectRemotesErr: errors.New("invalid project remote")}, true, true},
+	} {
+		for _, flag := range []string{"none", "remote", "all", "label"} {
+			t.Run(tc.name+"/"+flag, func(t *testing.T) {
+				cfg := ReplicaPushConfig{}
+				switch flag {
+				case "remote":
+					cfg.ProjectRemotes = "https://example.com:8443/org/repo"
+				case "all":
+					cfg.AllProjects = true
+				case "label":
+					cfg.ProjectsFlag = "work"
+				}
+				_, _, remotes, err := resolvePushProjects(tc.target, cfg)
+				if flag == "label" && tc.configured {
+					require.EqualError(t, err, "project_remotes and project labels are mutually exclusive")
+					return
+				}
+				if flag == "none" && tc.bad {
+					require.Error(t, err)
+					return
+				}
+				require.NoError(t, err)
+				if flag == "remote" {
+					assert.Equal(t, []string{"example.com:8443/org/repo"}, remotes)
+					require.NoError(t, storage.ValidateProjectFilters(nil, nil, remotes))
+				}
+				if flag == "all" {
+					assert.Empty(t, remotes)
+				}
+			})
+		}
+	}
+}
+
+func TestProjectRemoteDaemonBodyRoundTrip(t *testing.T) {
+	for _, raw := range []string{"https://example.com:8443/org/repo", "ssh://git@example.com:2222/org/repo.git", "https://[2001:db8::1]/org/repo", "https://[2001:db8::1]:8443/org/repo", "git@github.com:org/repo.git", "github.com/org/repo"} {
+		t.Run(raw, func(t *testing.T) {
+			_, _, remotes, err := resolvePushProjects(storage.ConfiguredReplica{}, ReplicaPushConfig{ProjectRemotes: raw})
+			require.NoError(t, err)
+			require.NoError(t, storage.ValidateProjectFilters(nil, nil, remotes))
+			data, err := json.Marshal(apiclient.DaemonPushRequest{ProjectRemotes: remotes})
+			require.NoError(t, err)
+			var decoded apiclient.DaemonPushRequest
+			require.NoError(t, json.Unmarshal(data, &decoded))
+			assert.Equal(t, remotes, decoded.ProjectRemotes)
+		})
+	}
+}

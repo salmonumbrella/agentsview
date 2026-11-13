@@ -1940,7 +1940,7 @@ func (db *DB) SessionIDsForProjectRemotes(ctx context.Context, remotes []string)
 	ids := make([]string, 0)
 	err := QueryChunkedSize(remotes, maxSQLVars, func(chunk []string) error {
 		placeholders, args := InPlaceholders(chunk)
-		rows, err := db.getReader().QueryContext(ctx, `SELECT session_id, remote_resolution, key_source, normalized_remote
+		rows, err := db.getReader().QueryContext(ctx, `SELECT session_id, remote_resolution, key_source, normalized_remote, remote_candidate_count
 			FROM session_project_identity_snapshots WHERE normalized_remote IN `+placeholders, args...)
 		if err != nil {
 			return fmt.Errorf("listing session identity snapshots by remote: %w", err)
@@ -1948,7 +1948,7 @@ func (db *DB) SessionIDsForProjectRemotes(ctx context.Context, remotes []string)
 		defer rows.Close()
 		for rows.Next() {
 			var obs export.ProjectIdentityObservation
-			if err := rows.Scan(&obs.SessionID, &obs.RemoteResolution, &obs.KeySource, &obs.NormalizedRemote); err != nil {
+			if err := rows.Scan(&obs.SessionID, &obs.RemoteResolution, &obs.KeySource, &obs.NormalizedRemote, &obs.RemoteCandidateCount); err != nil {
 				return err
 			}
 			if IdentitySelectedByRemotes(obs, remotes) {

@@ -233,6 +233,7 @@ func runReplicaPushTarget(
 	}
 
 	target.ProjectRemotes = remotes
+	target.ProjectRemotesErr = nil
 	result, err := writer.ReplicaPush(
 		ctx, backend, target, cfg, projects, excludeProjects,
 	)
@@ -503,6 +504,7 @@ func runReplicaStatusTarget(
 	}
 
 	target.ProjectRemotes = remotes
+	target.ProjectRemotesErr = nil
 	now := time.Now()
 	path := replicaWatchHealthPath(appCfg.DataDir, backend.Name())
 	rec, recErr := loadReplicaWatchRecord(path)
@@ -823,33 +825,45 @@ func writeReplicaServeRuntimeRecord(name string, rt *serveRuntime) bool {
 func resolvePushProjects(
 	target storage.ConfiguredReplica, cfg ReplicaPushConfig,
 ) (projects, exclude, remotes []string, err error) {
+	labelFlag := cfg.ProjectsSet || cfg.ExcludeProjectsSet || cfg.ProjectsFlag != "" || cfg.ExcludeProjects != ""
+	remoteFlag := cfg.ProjectRemotesSet || cfg.ProjectRemotes != ""
 	if cfg.ProjectsFlag != "" && cfg.ExcludeProjects != "" {
 		return nil, nil, nil, errors.New("--projects and --exclude-projects are mutually exclusive")
 	}
-	if cfg.AllProjects && (cfg.ProjectsFlag != "" || cfg.ProjectsSet || cfg.ExcludeProjects != "" || cfg.ExcludeProjectsSet || cfg.ProjectRemotes != "" || cfg.ProjectRemotesSet) {
-		return nil, nil, nil, errors.New("--all-projects cannot be combined with project scope flags")
+	if labelFlag && remoteFlag {
+		return nil, nil, nil, errors.New("project_remotes and project labels are mutually exclusive")
 	}
-	if (cfg.ProjectsSet || cfg.ExcludeProjectsSet) && (cfg.ProjectRemotesSet || cfg.ProjectRemotes != "" || len(target.ProjectRemotes) > 0) {
+	if cfg.AllProjects {
+		if labelFlag || remoteFlag {
+			return nil, nil, nil, errors.New("--all-projects cannot be combined with project scope flags")
+		}
+		return nil, nil, nil, nil
+	}
+	if labelFlag && (len(target.ProjectRemotes) > 0 || target.ProjectRemotesErr != nil) || remoteFlag && (len(target.Projects) > 0 || len(target.ExcludeProjects) > 0) {
 		return nil, nil, nil, errors.New("project_remotes and project labels are mutually exclusive")
 	}
 	projects, exclude, remotes = target.Projects, target.ExcludeProjects, target.ProjectRemotes
-	if cfg.AllProjects {
-		return nil, nil, nil, nil
-	}
 	if cfg.ProjectsFlag != "" {
 		projects, exclude = splitProjectList(cfg.ProjectsFlag), nil
 	}
 	if cfg.ExcludeProjects != "" {
 		exclude, projects = splitProjectList(cfg.ExcludeProjects), nil
 	}
-	if cfg.ProjectRemotesSet || cfg.ProjectRemotes != "" {
-		remotes = strings.Split(cfg.ProjectRemotes, ",")
+	if remoteFlag {
+		if strings.TrimSpace(cfg.ProjectRemotes) == "" {
+			return nil, nil, nil, errors.New("project_remotes cannot be empty")
+		}
+		remotes, err = export.NormalizeProjectRemotes(strings.Split(cfg.ProjectRemotes, ","))
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	} else if target.ProjectRemotesErr != nil {
+		return nil, nil, nil, target.ProjectRemotesErr
 	}
 	if err = storage.ValidateProjectFilters(projects, exclude, remotes); err != nil {
 		return nil, nil, nil, err
 	}
-	remotes, err = export.NormalizeProjectRemotes(remotes)
-	return projects, exclude, remotes, err
+	return projects, exclude, remotes, nil
 }
 
 func splitProjectList(s string) []string {

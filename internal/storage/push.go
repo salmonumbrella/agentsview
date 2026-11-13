@@ -146,12 +146,12 @@ type VectorPushResult struct {
 }
 
 // ValidateProjectFilters rejects ambiguous include/exclude project filters.
-func ValidateProjectFilters(projects, excludeProjects []string, remoteSets ...[]string) error {
-	if len(remoteSets) > 0 && len(remoteSets[0]) > 0 {
+func ValidateProjectFilters(projects, excludeProjects []string, remotes []string) error {
+	if len(remotes) > 0 {
 		if len(projects) > 0 || len(excludeProjects) > 0 {
 			return errors.New("project_remotes and project labels are mutually exclusive")
 		}
-		if _, err := export.NormalizeProjectRemotes(remoteSets[0]); err != nil {
+		if err := export.ValidateProjectRemotes(remotes); err != nil {
 			return err
 		}
 	}

@@ -2276,6 +2276,10 @@ func purgePGExcludedPushSessions(
 func (s *Sync) reconcilePGMissingSessions(
 	ctx context.Context, ownerMarker string, legacyMarkerMachines []string,
 ) error {
+	// The owner marker spans all archive scopes; a remote scope cannot judge a missing local session.
+	if len(s.projectRemotes) > 0 {
+		return nil
+	}
 	// Empty Codex thread anchors still own remote restore/purge scope.
 	where := "owner_marker = $1 AND NOT (trash_includes_codex_pages AND deleted_at IS NOT NULL)"
 	args := []any{ownerMarker}

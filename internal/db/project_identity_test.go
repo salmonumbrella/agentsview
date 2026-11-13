@@ -1777,3 +1777,15 @@ func TestSessionIDsForProjectRemotesUsesOwnSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"repo", "renamed"}, ids)
 }
+
+func TestRemoteSelectionDistinguishesPortFromSCPPath(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	for _, tc := range []struct{ id, remote string }{{"port", "https://example.com:8443/org/repo"}, {"scp", "git@example.com:8443/org/repo"}} {
+		require.NoError(t, d.UpsertSession(ctx, Session{ID: tc.id, Project: tc.id, Machine: "local", Agent: "codex"}))
+		require.NoError(t, d.UpsertProjectIdentityObservation(ctx, export.ProjectIdentityObservation{SessionID: tc.id, Project: tc.id, Machine: "local", RootPath: "/workspace/" + tc.id, GitRemote: tc.remote, RemoteResolution: export.ProjectResolutionResolved, ObservedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)}))
+	}
+	ids, err := d.SessionIDsForProjectRemotes(ctx, []string{"example.com:8443/org/repo"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"port"}, ids)
+}

@@ -3311,3 +3311,20 @@ func TestPGConfigProjectRemotes(t *testing.T) {
 		})
 	}
 }
+
+func TestPGConfigEmptyProjectRemotesPreservesPresence(t *testing.T) {
+	for _, tc := range []struct{ name, text, target string }{
+		{"legacy", "[pg]\nurl = 'postgres://localhost/test'\nproject_remotes = []\n", ""},
+		{"named", "default_pg = 'work'\n[pg.work]\nurl = 'postgres://localhost/test'\nproject_remotes = []\n", "work"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newConfigFixture(t)
+			f.WriteConfigText(t, tc.text)
+			cfg := f.LoadFile(t)
+			pg, err := cfg.ResolvePGTarget(tc.target)
+			require.NoError(t, err)
+			require.NotNil(t, pg.ProjectRemotes)
+			assert.Empty(t, pg.ProjectRemotes)
+		})
+	}
+}

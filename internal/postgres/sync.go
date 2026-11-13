@@ -16,7 +16,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"go.kenn.io/agentsview/internal/db"
-	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/storage"
 )
 
@@ -350,12 +349,6 @@ func New(
 		return nil, err
 	}
 
-	remotes, err := export.NormalizeProjectRemotes(opts.ProjectRemotes)
-	if err != nil {
-		return nil, err
-	}
-	opts.ProjectRemotes = remotes
-
 	pg, err := Open(ctx, pgURL, schema, allowInsecure)
 	if err != nil {
 		return nil, err
@@ -405,15 +398,15 @@ func New(
 	}, nil
 }
 
-func hasProjectFilter(projects, excludeProjects []string, remoteSets ...[]string) bool {
-	return len(projects) > 0 || len(excludeProjects) > 0 || (len(remoteSets) > 0 && len(remoteSets[0]) > 0)
+func hasProjectFilter(projects, excludeProjects []string, remotes []string) bool {
+	return len(projects) > 0 || len(excludeProjects) > 0 || len(remotes) > 0
 }
 
 func pushSyncStateScope(
 	target string,
-	projects, excludeProjects []string, remoteSets ...[]string,
+	projects, excludeProjects []string, remotes []string,
 ) string {
-	if !hasProjectFilter(projects, excludeProjects, remoteSets...) {
+	if !hasProjectFilter(projects, excludeProjects, remotes) {
 		return target
 	}
 
@@ -433,8 +426,8 @@ func pushSyncStateScope(
 	for _, value := range excludeValues {
 		writeSyncScopeField(sum, value)
 	}
-	if len(remoteSets) > 0 && len(remoteSets[0]) > 0 {
-		values := normalizeProjectFilterValues(remoteSets[0])
+	if len(remotes) > 0 {
+		values := normalizeProjectFilterValues(remotes)
 		writeSyncScopeField(sum, "remotes")
 		writeSyncScopeField(sum, strconv.Itoa(len(values)))
 		for _, value := range values {
@@ -572,7 +565,7 @@ func (s *Sync) Status(
 ) (SyncStatus, error) {
 	lastPush, err := ReadLastPushAt(ctx,
 		s.local, s.syncStateTarget, nil, nil,
-		s.migrateLegacySyncState,
+		s.migrateLegacySyncState, nil,
 	)
 	if err != nil {
 		log.Printf(
@@ -661,12 +654,12 @@ func ReadLastPushAt(ctx context.Context,
 	local storage.SyncStateStore,
 	target string,
 	projects, excludeProjects []string,
-	migrateLegacy bool, remoteSets ...[]string,
+	migrateLegacy bool, remotes []string,
 ) (string, error) {
 	if local == nil {
 		return "", errors.New("local sync state is required")
 	}
-	scope := pushSyncStateScope(target, projects, excludeProjects, remoteSets...)
+	scope := pushSyncStateScope(target, projects, excludeProjects, remotes)
 	if scope == "" {
 		return local.GetSyncState(ctx, "last_push_at")
 	}
@@ -681,7 +674,7 @@ func ReadLastPushAt(ctx context.Context,
 	}
 	if lastPush != "" ||
 		!migrateLegacy ||
-		hasProjectFilter(projects, excludeProjects, remoteSets...) {
+		hasProjectFilter(projects, excludeProjects, remotes) {
 		return lastPush, nil
 	}
 	return local.GetSyncState(ctx, "last_push_at")

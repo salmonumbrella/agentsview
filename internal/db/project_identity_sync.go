@@ -104,6 +104,7 @@ func FilterIdentityScope(
 func IdentitySelectedByRemotes(item export.ProjectIdentityObservation, remotes []string) bool {
 	return item.RemoteResolution == export.ProjectResolutionResolved &&
 		item.KeySource == export.ProjectIdentityKeySourceGitRemote &&
+		item.RemoteCandidateCount <= 1 &&
 		item.NormalizedRemote != "" && slices.Contains(remotes, item.NormalizedRemote)
 }
 

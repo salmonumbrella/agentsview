@@ -16,7 +16,6 @@ import (
 	"go.kenn.io/agentsview/internal/archivesource"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
-	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/parser"
 	"go.kenn.io/agentsview/internal/storage"
 	syncpkg "go.kenn.io/agentsview/internal/sync"
@@ -731,11 +730,6 @@ func (s *Server) humaReplicaPush(
 	); err != nil {
 		return nil, apiError(http.StatusBadRequest, err.Error())
 	}
-	remotes, err := export.NormalizeProjectRemotes(in.Body.ProjectRemotes)
-	if err != nil {
-		return nil, apiError(http.StatusBadRequest, err.Error())
-	}
-	in.Body.ProjectRemotes = remotes
 	local, err := s.localPushTarget(ctx)
 	if err != nil {
 		return nil, err

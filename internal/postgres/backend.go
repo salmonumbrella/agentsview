@@ -63,16 +63,22 @@ func (Backend) ResolveTarget(
 	if err != nil {
 		return storage.ConfiguredReplica{}, err
 	}
-	remotes, err := export.NormalizeProjectRemotes(pg.ProjectRemotes)
-	if err != nil {
-		return storage.ConfiguredReplica{}, err
+	var remotes []string
+	var remotesErr error
+	if pg.ProjectRemotes != nil {
+		if len(pg.ProjectRemotes) == 0 {
+			remotesErr = errors.New("project_remotes cannot be empty")
+		} else {
+			remotes, remotesErr = export.NormalizeProjectRemotes(pg.ProjectRemotes)
+		}
 	}
 	return storage.ConfiguredReplica{
-		ReplicaTargetRef: ref,
-		Target:           ReplicaTarget(pg),
-		Projects:         pg.Projects,
-		ExcludeProjects:  pg.ExcludeProjects,
-		ProjectRemotes:   remotes,
+		ReplicaTargetRef:  ref,
+		Target:            ReplicaTarget(pg),
+		Projects:          pg.Projects,
+		ExcludeProjects:   pg.ExcludeProjects,
+		ProjectRemotes:    remotes,
+		ProjectRemotesErr: remotesErr,
 	}, nil
 }
 
@@ -268,6 +274,9 @@ func (Backend) LastPushAt(
 	ctx context.Context, local *db.DB, target storage.ConfiguredReplica,
 	projects, excludeProjects []string,
 ) (string, error) {
+	if target.ProjectRemotesErr != nil {
+		return "", target.ProjectRemotesErr
+	}
 	if local == nil {
 		return "", nil
 	}

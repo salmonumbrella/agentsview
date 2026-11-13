@@ -64,9 +64,10 @@ type ConfiguredReplica struct {
 	Target ReplicaTarget
 	// Projects and ExcludeProjects are the configured push scope. At most
 	// one is set.
-	Projects        []string
-	ExcludeProjects []string
-	ProjectRemotes  []string
+	Projects          []string
+	ExcludeProjects   []string
+	ProjectRemotes    []string
+	ProjectRemotesErr error
 }
 
 // PusherOptions scopes one connected push session.

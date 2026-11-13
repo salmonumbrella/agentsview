@@ -275,6 +275,7 @@ func resolveWatchTarget(
 		return storage.ConfiguredReplica{}, nil, nil, err
 	}
 	target.ProjectRemotes = remotes
+	target.ProjectRemotesErr = nil
 	return target, projects, exclude, nil
 }
 
