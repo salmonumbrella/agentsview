@@ -131,7 +131,32 @@ func reportingHourSupport(start time.Time, bucket time.Duration, usage []activit
 	sessions map[string]activity.SessionMeta, projects map[string]export.ProjectMapEntry,
 ) (reportingJointSupport, error) {
 	support := reportingJointSupport{}
+	// Preserve the public cell's checked money sums even when contributors
+	// are separate. These values are validation only and are not released.
+	type checkedCosts struct{ total, computed, allocated, reported money.Money }
+	checked := map[reportingCellKey]*checkedCosts{}
 	err := walkReportingHourUsage(start, bucket, usage, sessions, projects, func(row activity.UsageRow, _ activity.SessionMeta, _ bool, _ time.Time, key reportingCellKey, identity reportingJointContributor) error {
+		costs := checked[key]
+		if costs == nil {
+			costs = &checkedCosts{}
+			checked[key] = costs
+		}
+		var err error
+		costs.total, err = money.Add(costs.total, row.Cost)
+		if err != nil {
+			return fmt.Errorf("sum joint cell usage: %w", err)
+		}
+		partition := &costs.computed
+		switch {
+		case row.CostAllocated:
+			partition = &costs.allocated
+		case row.CostSource == export.CostSourceReported:
+			partition = &costs.reported
+		}
+		*partition, err = money.Add(*partition, row.Cost)
+		if err != nil {
+			return fmt.Errorf("sum joint cell pricing: %w", err)
+		}
 		return addReportingJointSupport(support, key, identity, row)
 	})
 	return support, err
