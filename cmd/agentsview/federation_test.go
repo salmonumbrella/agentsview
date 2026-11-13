@@ -222,4 +222,8 @@ func TestFederationStatusPrintsStopReceipts(t *testing.T) {
 	printFederationStatus(&out, status)
 	assert.Contains(t, out.String(), "Share share-a (current: false): hub https://a.example, archive hub-a, repository example.org/a; sent 0, refused 0, tombstoned 0, unconfirmed 0; stop remove, receipt purged\n")
 	assert.Contains(t, out.String(), "Share share-b (current: false): hub https://b.example, archive hub-b, repository example.org/b; sent 0, refused 0, tombstoned 0, unconfirmed 0; stop leave, receipt retained\n")
+	encoded, err := json.Marshal(status)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"stop_receipt":"purged"`)
+	assert.Contains(t, string(encoded), `"stop_receipt":"retained"`)
 }

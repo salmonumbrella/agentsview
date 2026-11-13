@@ -371,6 +371,11 @@ func TestFederationStopPurgesOnlyOwnedAndCannotBeReactivatedByStaleManifest(t *t
 	require.NoError(t, err)
 	assert.Equal(t, "active", stale.State)
 	assert.EqualValues(t, 3, stale.Epoch)
+	share.State, share.Epoch = "active", 1
+	stale, err = d.PutFederationHubShare(ctx, "spoke", share)
+	require.NoError(t, err)
+	assert.Equal(t, "active", stale.State)
+	assert.EqualValues(t, 3, stale.Epoch)
 }
 
 func TestFederationReconcileIsShareScopedAndRejectsOutOfOrderPages(t *testing.T) {
