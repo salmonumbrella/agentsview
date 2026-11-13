@@ -18268,4 +18268,16 @@ func TestResyncAllPreservesFederationState(t *testing.T) {
 	link, err := env.db.GetFederationLink(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, "https://hub.example/av", link.HubOrigin)
+	var version int
+	require.NoError(t, env.db.Reader().QueryRow(ctx, `PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, (1<<21)+db.CurrentDataVersion(), version)
+}
+
+func TestResyncAllWithoutFederationKeepsUserVersion(t *testing.T) {
+	env := setupTestEnv(t)
+	stats := env.engine.ResyncAll(t.Context(), nil)
+	require.False(t, stats.Aborted, "%v", stats.Warnings)
+	var version int
+	require.NoError(t, env.db.Reader().QueryRow(t.Context(), `PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, db.CurrentDataVersion(), version)
 }

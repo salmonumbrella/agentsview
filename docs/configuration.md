@@ -2829,4 +2829,5 @@ archive ID and base URL, including any reverse-proxy path. HTTPS is required
 except on loopback. Federation management commands contact the local SQLite
 daemon. Bind it to loopback or a bind-all address: a specific non-loopback bind
 cannot accept the local-only management requests. See [Commands](commands.md)
-for enrollment and link setup.
+for enrollment and link setup. Once the archive holds an enrollment or a link,
+builds older than this one refuse to open it; use this build or newer.

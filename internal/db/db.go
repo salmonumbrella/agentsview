@@ -693,6 +693,9 @@ const dataVersion = 179
 
 const archiveOnlyVersionBase = 1 << 20
 
+// Older builds refuse archives with federation rows; other archives are unchanged.
+const federationVersionBase = 1 << 21
+
 const tokenCoverageRepairStatsKey = "token_coverage_repair_v1"
 
 const toolCallFieldBackfillStatsKey = "tool_call_field_backfill_v1"
@@ -2419,6 +2422,7 @@ func readUserVersion(ctx context.Context, conn interface {
 
 // DecodeUserVersion returns the parser version and permanent archive-only mode.
 func DecodeUserVersion(version int) (int, bool) {
+	version &^= federationVersionBase
 	if version >= archiveOnlyVersionBase {
 		return version - archiveOnlyVersionBase, true
 	}
@@ -2437,6 +2441,22 @@ func writeUserVersion(ctx context.Context, tx *sql.Tx, version int) error {
 		}
 		if archiveOnly {
 			version += archiveOnlyVersionBase
+		}
+	}
+	for _, table := range []string{"federation_enrollments", "federation_links"} {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)`, table).Scan(&exists); err != nil {
+			return err
+		}
+		if exists {
+			var hasRows bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM `+table+`)`).Scan(&hasRows); err != nil {
+				return err
+			}
+			if hasRows {
+				version += federationVersionBase
+				break
+			}
 		}
 	}
 	_, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", version))

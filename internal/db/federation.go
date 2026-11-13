@@ -41,7 +41,10 @@ func (db *DB) CreateFederationEnrollment(ctx context.Context, e FederationEnroll
 		if isSQLiteUniqueConstraint(err) {
 			return ErrFederationEnrollmentExists
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		return stampFederationVersion(ctx, tx)
 	})
 }
 
@@ -127,7 +130,10 @@ func (db *DB) PutFederationLink(ctx context.Context, l FederationLink) error {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO federation_links (link_uid,hub_origin,hub_archive_id,enrollment_uid,member,token_file,protocol_version,state) VALUES (?,?,?,?,?,?,?,?)`, l.UID, l.HubOrigin, l.HubArchiveID, l.EnrollmentUID, l.Member, l.TokenFile, l.ProtocolVersion, l.State)
-		return err
+		if err != nil {
+			return err
+		}
+		return stampFederationVersion(ctx, tx)
 	})
 }
 func (db *DB) BlockFederationLink(ctx context.Context, uid string) error {
@@ -137,7 +143,20 @@ func (db *DB) BlockFederationLink(ctx context.Context, uid string) error {
 	})
 }
 func (db *DB) DeleteFederationLink(ctx context.Context) error {
-	return db.Update(ctx, func(tx *sql.Tx) error { _, err := tx.ExecContext(ctx, `DELETE FROM federation_links`); return err })
+	return db.Update(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM federation_links`); err != nil {
+			return err
+		}
+		return stampFederationVersion(ctx, tx)
+	})
+}
+
+func stampFederationVersion(ctx context.Context, tx *sql.Tx) error {
+	version, _, err := readUserVersion(ctx, tx)
+	if err != nil {
+		return err
+	}
+	return writeUserVersion(ctx, tx, version)
 }
 
 func (db *DB) CopyFederationStateFrom(ctx context.Context, sourcePath string) error {
@@ -152,17 +171,25 @@ func (db *DB) CopyFederationStateFrom(ctx context.Context, sourcePath string) er
 		return err
 	}
 	defer func() { _, _ = execWithoutCancel(ctx, conn, `DETACH DATABASE federation_old`) }()
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	for table, columns := range map[string]string{"federation_enrollments": "enrollment_uid,spoke_archive_id,member,spoke_name,credential_sha256,created_at,last_handshake_at,revoked_at", "federation_links": "link_uid,hub_origin,hub_archive_id,enrollment_uid,member,token_file,protocol_version,state,created_at"} {
 		var present int
-		if err = conn.QueryRowContext(ctx, `SELECT count(*) FROM federation_old.sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&present); err != nil {
+		if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM federation_old.sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&present); err != nil {
 			return err
 		}
 		if present == 0 {
 			continue
 		}
-		if _, err = conn.ExecContext(ctx, `INSERT OR IGNORE INTO `+table+` (`+columns+`) SELECT `+columns+` FROM federation_old.`+table); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO `+table+` (`+columns+`) SELECT `+columns+` FROM federation_old.`+table); err != nil {
 			return fmt.Errorf("copying federation state: %w", err)
 		}
 	}
-	return nil
+	if err := stampFederationVersion(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

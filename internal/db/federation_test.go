@@ -138,3 +138,70 @@ func TestFederationRevokedAfterLookupBeforeStamp(t *testing.T) {
 	assert.Empty(t, rows[0].LastHandshakeAt)
 	assert.Equal(t, "revoked", rows[0].State)
 }
+
+func TestFederationUserVersion(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "archive.db")
+	database, err := OpenIsolated(ctx, path)
+	require.NoError(t, err)
+	raw := func() int {
+		var version int
+		require.NoError(t, database.Reader().QueryRow(ctx, `PRAGMA user_version`).Scan(&version))
+		return version
+	}
+	assert.Equal(t, CurrentDataVersion(), raw())
+	require.NoError(t, database.Update(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO stats (key, value) VALUES ('fixture', '1')`)
+		return err
+	}))
+	assert.Equal(t, CurrentDataVersion(), raw())
+	link := FederationLink{UID: "link-a", HubOrigin: "https://hub.example", HubArchiveID: "hub-a", EnrollmentUID: "enr-a", Member: "member-a", TokenFile: "/fixture/credential", ProtocolVersion: 1, State: "active"}
+	require.NoError(t, database.PutFederationLink(ctx, link))
+	assert.Equal(t, federationVersionBase+CurrentDataVersion(), raw())
+	require.NoError(t, database.DeleteFederationLink(ctx))
+	assert.Equal(t, CurrentDataVersion(), raw())
+	require.NoError(t, database.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr-a", SpokeArchiveID: "spoke-a", Member: "member-a", CredentialSHA256: "digest-a"}))
+	version := raw()
+	assert.Equal(t, federationVersionBase+CurrentDataVersion(), version)
+	assert.Greater(t, version, CurrentDataVersion())
+	decoded, archiveOnly := DecodeUserVersion(version)
+	assert.Equal(t, CurrentDataVersion(), decoded)
+	assert.False(t, archiveOnly)
+	require.NoError(t, database.RevokeFederationEnrollment(ctx, "enr-a"))
+	assert.Equal(t, version, raw())
+	require.NoError(t, database.PutFederationLink(ctx, link))
+	require.NoError(t, database.DeleteFederationLink(ctx))
+	assert.Equal(t, version, raw())
+	require.NoError(t, database.Close())
+	require.NoError(t, CheckDataVersion(ctx, path))
+	database, err = OpenIsolated(ctx, path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, database.Close()) })
+	assert.Equal(t, version, raw())
+	require.NoError(t, database.EnableArchiveOnly(ctx))
+	assert.Equal(t, archiveOnlyVersionBase+federationVersionBase+CurrentDataVersion(), raw())
+}
+
+func TestDecodeFederationUserVersion(t *testing.T) {
+	for _, tc := range []struct {
+		version     int
+		archiveOnly bool
+	}{
+		{179, false}, {archiveOnlyVersionBase + 179, true},
+		{federationVersionBase + 179, false}, {archiveOnlyVersionBase + federationVersionBase + 179, true},
+	} {
+		version, archiveOnly := DecodeUserVersion(tc.version)
+		assert.Equal(t, 179, version)
+		assert.Equal(t, tc.archiveOnly, archiveOnly)
+	}
+}
+
+func TestArchiveOnlyGainsFederationVersion(t *testing.T) {
+	database := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, database.EnableArchiveOnly(ctx))
+	require.NoError(t, database.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr-a", SpokeArchiveID: "spoke-a", Member: "member-a", CredentialSHA256: "digest-a"}))
+	var raw int
+	require.NoError(t, database.Reader().QueryRow(ctx, `PRAGMA user_version`).Scan(&raw))
+	assert.Equal(t, archiveOnlyVersionBase+federationVersionBase+CurrentDataVersion(), raw)
+}
