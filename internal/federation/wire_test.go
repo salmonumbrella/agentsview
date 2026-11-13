@@ -17,16 +17,13 @@ func TestDecodeBatchRejectsExcessAndUnknownPayloadFields(t *testing.T) {
 		_, err = DecodeBatch([]byte(`{"protocol":1,"spoke_instance":"s","share_uid":"x","epoch":1,"sequence":1,"records":[{"record_uid":"a","kind":"session_summary","hash":"x","payload":{` + extra + `}}]}`))
 		require.Error(t, err)
 	}
-}
-
-func TestDecodeBatchRejectsUnknownEnvelopeAndOversize(t *testing.T) {
-	_, err := DecodeBatch([]byte(`{"protocol":1}`))
+	_, err = DecodeBatch([]byte(`{"protocol":1}`))
 	require.Error(t, err)
 	_, err = DecodeBatch([]byte(`{"records":[],"records":[]}`))
 	require.Error(t, err)
 
 	_, err = DecodeBatch([]byte(`{"protocol":1,"spoke_instance":"s","share_uid":"x","epoch":1,"sequence":1,"records":[],"unexpected":true}`))
 	require.Error(t, err)
-	_, err = DecodeBatch([]byte(strings.Repeat(" ", (16<<20)+1)))
+	_, err = DecodeBatch([]byte(`{"records":[]}` + strings.Repeat(" ", 16<<20)))
 	require.Error(t, err)
 }

@@ -275,19 +275,13 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 		for _, share := range shares {
 			if out.History[i].ShareUID == share.UID {
 				out.History[i].Current = true
+				counts := out.History[i].Delivery
+				out.Delivery.Sent += counts.Sent
+				out.Delivery.Refused += counts.Refused
+				out.Delivery.Unconfirmed += counts.Unconfirmed
 				break
 			}
 		}
-	}
-	for _, share := range shares {
-		ledger, e := s.db.FederationLedger(ctx, share.UID)
-		if e != nil {
-			return out, e
-		}
-		counts := deliveryCounts(ledger)
-		out.Delivery.Sent += counts.Sent
-		out.Delivery.Refused += counts.Refused
-		out.Delivery.Unconfirmed += counts.Unconfirmed
 	}
 	out.Quarantine, err = s.db.FederationQuarantines(ctx)
 	if err != nil {

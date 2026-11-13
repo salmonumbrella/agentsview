@@ -84,7 +84,7 @@ func TestActivityDoesNotInferFederationFromMachineName(t *testing.T) {
 	ordinaryTime := "2024-06-01T09:00:00Z"
 	ordinary := syncSession("ordinary", "alpha", "fixture", ordinaryTime, 1)
 	ordinary.Machine = "federated"
-	unknown := syncSession("summary-without-usage", "alpha", "fixture", "2024-06-02T09:00:00Z", 0)
+	unknown := syncSession("summary-without-usage", "alpha", "fixture", "2024-06-02T09:00:00Z", 1)
 	unknown.Machine = "federated"
 	unknown.UserMessageCount = 0
 	store := newDuckAnalyticsStore(t, []db.SessionBatchWrite{

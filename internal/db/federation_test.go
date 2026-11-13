@@ -214,7 +214,13 @@ func TestFederationShareStateSurvivesCopyAndLeave(t *testing.T) {
 	assert.Equal(t, "leave", shares[0].StopIntent)
 	var afterLeave int
 	require.NoError(t, target.Reader().QueryRow(ctx, `PRAGMA user_version`).Scan(&afterLeave))
-	assert.Equal(t, federationVersionBase+federationShareVersionBase+federationWithdrawalVersionBase+CurrentDataVersion(), afterLeave)
+	assert.Equal(t, federationVersionBase+federationShareVersionBase+federationDeliveryVersionBase+federationWithdrawalVersionBase+CurrentDataVersion(), afterLeave)
+	ledger, err = target.FederationLedger(ctx, share.UID)
+	require.NoError(t, err)
+	assert.Equal(t, "confirmed", ledger["record"].Hash)
+	assert.Equal(t, "https://hub.example", ledger["record"].HubOrigin)
+	assert.Equal(t, "hub-a", ledger["record"].HubArchiveID)
+	assert.Equal(t, "github.com/example/api", ledger["record"].NormalizedRemote)
 	var reason string
 	require.NoError(t, target.Reader().QueryRow(ctx, `SELECT reason FROM federation_exclusions WHERE session_id = 'session-a'`).Scan(&reason))
 	assert.Equal(t, "private", reason)
@@ -351,8 +357,8 @@ func TestFederationDeliveryStateSurvivesCopyAndMarksVersion(t *testing.T) {
 	require.NoError(t, source.Update(ctx, func(tx *sql.Tx) error {
 		for _, q := range []string{
 			`INSERT INTO federation_deliveries (share_uid,record_uid,session_id,hash,state) VALUES ('share','record','session','hash','sent')`,
-			`INSERT INTO federation_quarantine VALUES ('share','invalid batch',1)`,
-			`INSERT INTO federation_hub_shares VALUES ('share','enrollment','example.org/repo','key','summary','pooled','operators','digest',1,1,'batch','{}','active')`,
+			`INSERT INTO federation_quarantine VALUES ('share','invalid batch',7)`,
+			`INSERT INTO federation_hub_shares VALUES ('share','enrollment','example.org/repo','key','summary','pooled','operators','digest',1,6,'batch','{"denied":"session ID unavailable"}','active')`,
 			`INSERT INTO federation_records (share_uid,record_uid,session_id,hash) VALUES ('share','record','session','hash')`,
 		} {
 			if _, err := tx.ExecContext(ctx, q); err != nil {
@@ -370,6 +376,21 @@ func TestFederationDeliveryStateSurvivesCopyAndMarksVersion(t *testing.T) {
 		require.NoError(t, target.rawReader().QueryRowContext(ctx, `SELECT count(*) FROM `+table).Scan(&count))
 		assert.Equal(t, 1, count, table)
 	}
+	var record, session, hash, state string
+	require.NoError(t, target.rawReader().QueryRowContext(ctx, `SELECT record_uid,session_id,hash,state FROM federation_deliveries WHERE share_uid='share'`).Scan(&record, &session, &hash, &state))
+	assert.Equal(t, []string{"record", "session", "hash", "sent"}, []string{record, session, hash, state})
+	var sequence int64
+	var digest, refused string
+	require.NoError(t, target.rawReader().QueryRowContext(ctx, `SELECT sequence,last_batch_digest,last_refused FROM federation_hub_shares WHERE share_uid='share'`).Scan(&sequence, &digest, &refused))
+	assert.Equal(t, int64(6), sequence)
+	assert.Equal(t, "batch", digest)
+	assert.Equal(t, `{"denied":"session ID unavailable"}`, refused)
+	require.NoError(t, target.rawReader().QueryRowContext(ctx, `SELECT record_uid,session_id,hash FROM federation_records WHERE share_uid='share'`).Scan(&record, &session, &hash))
+	assert.Equal(t, []string{"record", "session", "hash"}, []string{record, session, hash})
+	var failure string
+	require.NoError(t, target.rawReader().QueryRowContext(ctx, `SELECT error,sequence FROM federation_quarantine WHERE share_uid='share'`).Scan(&failure, &sequence))
+	assert.Equal(t, "invalid batch", failure)
+	assert.Equal(t, int64(7), sequence)
 }
 
 func TestFederationAttemptPreservesAcknowledgmentAndQuarantine(t *testing.T) {

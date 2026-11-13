@@ -73,6 +73,7 @@ func TestFederationCredentialIsolation(t *testing.T) {
 					path := regexp.MustCompile(`\{[^}]+\}`).ReplaceAllString(op.path, "x")
 					for _, query := range []bool{false, true} {
 						req := httptest.NewRequest(op.method, path, nil)
+						req.Header.Set(federation.SpokeArchiveHeader, "spoke-a")
 						if query {
 							q := req.URL.Query()
 							q.Set("token", token)

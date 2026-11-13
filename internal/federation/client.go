@@ -27,7 +27,6 @@ func ParseHubOrigin(raw string) (string, error) {
 
 type peerHTTPError struct {
 	Status int
-	Body   []byte
 }
 
 func (e *peerHTTPError) Error() string { return fmt.Sprintf("hub returned HTTP %d", e.Status) }
@@ -71,7 +70,7 @@ func peerRequest(ctx context.Context, base, credential, archive, method, path st
 		return ErrHubRefused
 	}
 	if resp.StatusCode != http.StatusOK {
-		return &peerHTTPError{Status: resp.StatusCode, Body: data}
+		return &peerHTTPError{Status: resp.StatusCode}
 	}
 	if err = json.Unmarshal(data, result, json.RejectUnknownMembers(true)); err != nil {
 		return inputError("invalid federation response")
@@ -91,9 +90,6 @@ func PutShare(ctx context.Context, base, credential, archive string, m ShareMani
 func PostBatch(ctx context.Context, base, credential, archive string, b Batch) (BatchAck, error) {
 	var result BatchAck
 	err := peerRequest(ctx, base, credential, archive, http.MethodPost, "/api/v1/federation/shares/"+url.PathEscape(b.ShareUID)+"/batches", b, &result, (16<<20)+(64<<10))
-	if e, ok := err.(*peerHTTPError); ok && e.Status == http.StatusConflict {
-		_ = json.Unmarshal(e.Body, &result)
-	}
 	return result, err
 }
 

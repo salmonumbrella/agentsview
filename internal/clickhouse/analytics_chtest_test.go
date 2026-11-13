@@ -34,7 +34,7 @@ func TestFederationSummaryModelAnalytics(t *testing.T) {
 	ordinaryTime := "2026-02-02T09:00:00Z"
 	ordinary := fixtureSession("ordinary-federated-machine", "alpha", "fixture", ordinaryTime, 1)
 	ordinary.Machine = "federated"
-	unknown := fixtureSession("no-usage-summary", "alpha", "fixture", "2026-02-03T09:00:00Z", 0)
+	unknown := fixtureSession("no-usage-summary", "alpha", "fixture", "2026-02-03T09:00:00Z", 1)
 	unknown.Machine = "federated"
 	unknown.UserMessageCount = 0
 	_, err = local.WriteSessionBatchAtomic(ctx, []db.SessionBatchWrite{

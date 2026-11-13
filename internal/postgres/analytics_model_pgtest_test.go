@@ -68,7 +68,7 @@ func TestFederationSummaryModelAnalytics(t *testing.T) {
 func TestActivityDoesNotInferFederationFromMachineName(t *testing.T) {
 	_, store := prepareUsageSchema(t, "agentsview_activity_unknown_federation_test")
 	ctx := t.Context()
-	_, err := store.DB().ExecContext(ctx, `INSERT INTO sessions(id,machine,project,agent,started_at,message_count,user_message_count) VALUES ('ordinary','federated','alpha','claude','2024-06-01T09:00:00Z',1,0),('no-usage','federated','alpha','claude','2024-06-02T09:00:00Z',0,0)`)
+	_, err := store.DB().ExecContext(ctx, `INSERT INTO sessions(id,machine,project,agent,started_at,message_count,user_message_count) VALUES ('ordinary','federated','alpha','claude','2024-06-01T09:00:00Z',1,0),('no-usage','federated','alpha','claude','2024-06-02T09:00:00Z',1,0)`)
 	require.NoError(t, err)
 	_, err = store.DB().ExecContext(ctx, `INSERT INTO messages(session_id,ordinal,role,content,timestamp,content_length,is_system,model) VALUES('ordinary',0,'assistant','answer','2024-06-01T09:00:00Z',6,FALSE,'model-a')`)
 	require.NoError(t, err)

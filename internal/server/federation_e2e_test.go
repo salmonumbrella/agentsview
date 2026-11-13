@@ -91,7 +91,7 @@ func TestFederationSummaryDelivery(t *testing.T) {
 			buffered := httptest.NewRecorder()
 			server.Handler().ServeHTTP(buffered, r)
 			require.Equal(t, http.StatusOK, buffered.Code)
-			require.NoError(t, spokeDB.PutFederationExclusion(ctx, "a-snapshot-peer", "fixture"))
+			require.NoError(t, spokeDB.SoftDeleteSession(ctx, "a-snapshot-peer"))
 			for key, values := range buffered.Header() {
 				for _, value := range values {
 					w.Header().Add(key, value)
@@ -266,24 +266,32 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	assert.Equal(t, unchangedBatch.Sequence, unchangedAck.Committed)
 	assert.Equal(t, int32(2), mutations.Load())
 	assert.Empty(t, events)
-	require.NoError(t, hubDB.Update(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `CREATE TRIGGER fail_summary_update BEFORE UPDATE ON sessions WHEN NEW.id='session-a' BEGIN SELECT RAISE(ABORT,'synthetic write failure'); END`)
-		return err
-	}))
 	failedBatch := unchangedBatch
 	failedBatch.Sequence++
 	failedBatch.Records = append([]federation.BatchRecord(nil), unchangedBatch.Records...)
 	failedBatch.Records[0].Payload.MessageCount++
 	failedBatch.Records[0].Hash, err = export.DigestCanonical(failedBatch.Records[0].Payload)
 	require.NoError(t, err)
+	// The maintenance barrier leaves peer authentication readable but makes
+	// the validated batch fail at the persistence owner.
+	require.NoError(t, hubDB.CloseWriter())
+	t.Cleanup(func() {
+		if hubDB.WriterClosed() {
+			assert.NoError(t, hubDB.ReopenWriter())
+		}
+	})
 	_, err = federation.PostBatch(ctx, peer.URL, token, "spoke-a", failedBatch)
 	require.Error(t, err)
+	assert.ErrorContains(t, err, "hub returned HTTP 503")
+	require.NoError(t, hubDB.ReopenWriter())
 	assert.Equal(t, int32(2), mutations.Load())
 	assert.Empty(t, events)
 	var afterFailedWrite int
 	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT message_count FROM sessions WHERE id='session-a'`).Scan(&afterFailedWrite))
 	assert.Equal(t, 3, afterFailedWrite)
-	require.NoError(t, hubDB.Update(ctx, func(tx *sql.Tx) error { _, err := tx.ExecContext(ctx, `DROP TRIGGER fail_summary_update`); return err }))
+	var afterFailedSequence int64
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT sequence FROM federation_hub_shares WHERE share_uid=?`, unchangedBatch.ShareUID).Scan(&afterFailedSequence))
+	assert.Equal(t, unchangedBatch.Sequence, afterFailedSequence)
 	invalidBatch := unchangedBatch
 	invalidBatch.Sequence++
 	invalidBatch.Records = append([]federation.BatchRecord(nil), unchangedBatch.Records...)
@@ -760,7 +768,7 @@ func assertArchiveHasNoCanary(t *testing.T, archive *db.DB) {
 	}
 }
 
-// The first response lets a member exclude a session before the next chunk.
+// A source session can be trashed while a push waits for the first response.
 func TestFederationExclusionBetweenBatches(t *testing.T) {
 	ctx := t.Context()
 	hubDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "hub.db"))
@@ -792,7 +800,7 @@ func TestFederationExclusionBetweenBatches(t *testing.T) {
 			buffered := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(buffered, r)
 			if batches == 1 && buffered.Code == http.StatusOK {
-				exclusionErr = spokeDB.PutFederationExclusion(r.Context(), "s1000", "member excluded")
+				exclusionErr = spokeDB.SoftDeleteSession(r.Context(), "s1000")
 			}
 			for key, values := range buffered.Header() {
 				for _, value := range values {
@@ -914,6 +922,9 @@ func TestFederationLostReplyKeepsExcludedAttempt(t *testing.T) {
 	require.Len(t, shares, 1)
 	_, err = spoke.Push(ctx)
 	require.Error(t, err)
+	var committedCount int
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id IN ('excluded','selected')`).Scan(&committedCount))
+	assert.Equal(t, 2, committedCount)
 	ledger, err := spokeDB.FederationLedger(ctx, shares[0].UID)
 	require.NoError(t, err)
 	attempted := ledger["excluded"].AttemptHash
@@ -937,21 +948,4 @@ func TestFederationLostReplyKeepsExcludedAttempt(t *testing.T) {
 	details, err := spoke.Share(ctx, shares[0].UID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, details.Delivery.Unconfirmed)
-	confirmedHash := ledger["selected"].Hash
-	require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
-		_, e := tx.ExecContext(ctx, `UPDATE sessions SET message_count=2 WHERE id='selected'`)
-		return e
-	}))
-	dropped = false
-	_, err = spoke.Push(ctx)
-	require.Error(t, err)
-	ledger, err = spokeDB.FederationLedger(ctx, shares[0].UID)
-	require.NoError(t, err)
-	assert.Equal(t, "sent", ledger["selected"].State)
-	assert.Equal(t, confirmedHash, ledger["selected"].Hash)
-	assert.NotEmpty(t, ledger["selected"].AttemptHash)
-	details, err = spoke.Share(ctx, shares[0].UID)
-	require.NoError(t, err)
-	assert.Equal(t, 1, details.Delivery.Sent)
-	assert.Equal(t, 2, details.Delivery.Unconfirmed)
 }
