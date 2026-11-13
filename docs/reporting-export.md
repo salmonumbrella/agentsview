@@ -556,7 +556,9 @@ memory. It does not write to the archive or replace a non-empty stored catalog.
 
 The sum of a completed export day's usage fields reconciles with the Usage view
 for the same UTC date and filters. Usage-session selection follows usage
-timestamps independently of the session activity window.
+timestamps independently of the session activity window. Dated message-less
+sessions contribute first-seen session and project counts, but do not create a
+timed activity interval or model on their own.
 
 The checked-in fixtures under `cmd/agentsview/testdata/reporting/` freeze v3
 bytes and their SHA-256 manifest for portable contract tests.

@@ -472,7 +472,7 @@ func (db *DB) readFederationPulse(ctx context.Context, since string, minimum int
 		if err != nil {
 			return err
 		}
-		first, _ := reportingSessionEvidence(start, end, time.Duration(query.GapCapSeconds)*time.Second, mergeReportingSessions(source.activitySessions, source.usageSessions), source.createdAt, source.activityEvents, usage)
+		first, _ := reportingSessionEvidence(start, end, time.Duration(query.GapCapSeconds)*time.Second, mergeReportingSessions(mergeReportingSessions(source.activitySessions, source.sessionEvidence), source.usageSessions), source.createdAt, source.activityEvents, usage)
 		for _, event := range source.activityEvents {
 			at, err := parseTimestamp(event.Timestamp)
 			if err == nil && !at.Before(start) && at.Before(end) {

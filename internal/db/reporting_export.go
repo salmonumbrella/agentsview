@@ -303,7 +303,7 @@ func reportingHoursFromSource(
 		return hours, err
 	}
 	machines := map[string]bool{source.localMachineID: true}
-	for _, session := range mergeReportingSessions(source.activitySessions, source.usageSessions) {
+	for _, session := range mergeReportingSessions(mergeReportingSessions(source.activitySessions, source.sessionEvidence), source.usageSessions) {
 		machines[source.machineID(session.Machine)] = true
 	}
 	if len(source.standaloneUsage) > 0 {
@@ -364,11 +364,13 @@ func reportingHoursFromMachineSource(
 		return nil, err
 	}
 	sessions := source.activitySessions
+	evidence := source.sessionEvidence
 	ids := source.activityIDs
 	events := source.activityEvents
 	projects := source.projects
 	if machine != "" {
 		sessions = slices.DeleteFunc(slices.Clone(sessions), func(s activity.SessionMeta) bool { return source.machineID(s.Machine) != machine })
+		evidence = slices.DeleteFunc(slices.Clone(evidence), func(s activity.SessionMeta) bool { return source.machineID(s.Machine) != machine })
 		ids = make([]string, 0, len(sessions))
 		for _, session := range sessions {
 			ids = append(ids, session.SessionID)
@@ -387,6 +389,11 @@ func reportingHoursFromMachineSource(
 			sessions[i] = sessionByID[sessions[i].SessionID]
 		}
 		sessions, ids, events, usage = scopeJointReporting(sessions, events, usage, sessionByID, projects, projectKeys)
+		evidence = slices.Clone(evidence)
+		for i := range evidence {
+			evidence[i] = sessionByID[evidence[i].SessionID]
+		}
+		evidence, _, _, _ = scopeJointReporting(evidence, nil, nil, sessionByID, projects, projectKeys)
 		for i := range sessions {
 			sessions[i].ProjectKey = export.ProjectKeyForEntry(projects[sessions[i].Project])
 		}
@@ -399,7 +406,7 @@ func reportingHoursFromMachineSource(
 		date,
 		end,
 		gapCap,
-		sessions,
+		mergeReportingSessions(sessions, evidence),
 		createdAt,
 		events,
 		activityUsage,
@@ -492,7 +499,7 @@ func reportingMaterializedUsage(query activity.Query, source reportingDaySource)
 		return nil, nil, err
 	}
 	usage := append(append([]activity.UsageRow(nil), sessionUsage...), source.standaloneUsage...)
-	allSessions := mergeReportingSessions(source.activitySessions, source.usageSessions)
+	allSessions := mergeReportingSessions(mergeReportingSessions(source.activitySessions, source.sessionEvidence), source.usageSessions)
 	sessionByID := make(map[string]activity.SessionMeta, len(allSessions))
 	for _, session := range allSessions {
 		sessionByID[session.SessionID] = session

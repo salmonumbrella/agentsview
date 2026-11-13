@@ -467,3 +467,37 @@ func TestScopedReportingUsageMatchesExport(t *testing.T) {
 	assert.EqualValues(t, 3, day.Hours[9].Usage.Totals.OutputTokens)
 	assert.Equal(t, cost, day.Hours[9].Usage.Totals.Cost)
 }
+
+func TestReportingMessageLessExistenceHonorsScopeAndWindow(t *testing.T) {
+	d := testDB(t)
+	for _, item := range []struct{ id, start string }{
+		{"ordinary", "2026-07-28T09:00:00Z"}, {"impostor", "2026-07-28T09:00:00Z"},
+		{"deleted", "2026-07-28T09:00:00Z"}, {"outside", "2026-07-30T09:00:00Z"},
+	} {
+		insertSession(t, d, item.id, "example/repo", func(s *Session) { s.StartedAt = &item.start; s.Machine = "federated" })
+	}
+	require.NoError(t, d.Update(t.Context(), func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(t.Context(), `UPDATE sessions SET deleted_at='2026-07-29' WHERE id='deleted'`)
+		return err
+	}))
+	tx, err := d.getReader().BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	start := time.Date(2026, 7, 28, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		scope map[string]struct{}
+		want  []string
+	}{
+		{nil, []string{"impostor", "ordinary"}},
+		{map[string]struct{}{"ordinary": {}, "deleted": {}, "outside": {}}, []string{"ordinary"}},
+		{map[string]struct{}{}, nil},
+	} {
+		source, err := d.loadReportingExportSourceScoped(t.Context(), tx, start, start.Add(24*time.Hour), export.ReportingJointSchemaVersion, tc.scope)
+		require.NoError(t, err)
+		var ids []string
+		for _, session := range source.forDate(start, start.Add(24*time.Hour)).sessionEvidence {
+			ids = append(ids, session.SessionID)
+		}
+		assert.Equal(t, tc.want, ids)
+	}
+}

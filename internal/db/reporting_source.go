@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"time"
 
 	"go.kenn.io/agentsview/internal/activity"
@@ -23,6 +22,7 @@ type reportingExportSource struct {
 	localMachineID      string
 	machineAliases      map[string]string
 	activitySessions    []reportingSourceSession
+	sessionEvidence     []reportingSourceSession
 	activityEvents      []activity.ActivityEvent
 	usageSessions       []activity.SessionMeta
 	usageCandidates     []activityReportUsageCandidate
@@ -48,6 +48,7 @@ type reportingDaySource struct {
 	machineAliases   map[string]string
 	archiveID        string
 	activitySessions []activity.SessionMeta
+	sessionEvidence  []activity.SessionMeta
 	activityIDs      []string
 	activityEvents   []activity.ActivityEvent
 	usageSessions    []activity.SessionMeta
@@ -109,20 +110,20 @@ func (db *DB) loadReportingExportSourceScoped(
 	if err != nil {
 		return source, err
 	}
-	if scope != nil {
-		extra, err := reportingMessageLessSessions(ctx, tx, scope, rangeStartUTC, rangeEndUTC)
-		if err != nil {
-			return source, err
-		}
-		sessions = append(sessions, extra...)
-		sort.Slice(sessions, func(i, j int) bool { return sessions[i].SessionID < sessions[j].SessionID })
-	}
 	sessions, activityIDs = scopeReportingSessions(sessions, scope)
+	evidence, err := reportingMessageLessSessions(ctx, tx, scope, rangeStartUTC, rangeEndUTC)
+	if err != nil {
+		return source, err
+	}
 	events, err := db.activityReportActivityFrom(ctx, tx, activityIDs)
 	if err != nil {
 		return source, err
 	}
-	createdAtRaw, createdAt, err := reportingCreatedAtFrom(ctx, tx, activityIDs)
+	evidenceIDs := make([]string, 0, len(evidence))
+	for _, session := range evidence {
+		evidenceIDs = append(evidenceIDs, session.SessionID)
+	}
+	createdAtRaw, createdAt, err := reportingCreatedAtFrom(ctx, tx, append(append([]string(nil), activityIDs...), evidenceIDs...))
 	if err != nil {
 		return source, err
 	}
@@ -183,7 +184,19 @@ func (db *DB) loadReportingExportSourceScoped(
 		})
 	}
 
-	allSessions := mergeReportingSessions(sessions, usageSessions)
+	evidenceSessions := make([]reportingSourceSession, 0, len(evidence))
+	for _, session := range evidence {
+		started := session.StartedAt
+		if started == "" {
+			started = createdAtRaw[session.SessionID]
+		}
+		ended := session.EndedAt
+		if ended == "" {
+			ended = started
+		}
+		evidenceSessions = append(evidenceSessions, reportingSourceSession{meta: session, effectiveStart: started, effectiveEnd: ended})
+	}
+	allSessions := mergeReportingSessions(mergeReportingSessions(sessions, evidence), usageSessions)
 	labels := activity.ProjectLabels(allSessions)
 	observations := []export.ProjectIdentityObservation{}
 	archiveScope := export.IdentityScope{}
@@ -214,6 +227,7 @@ func (db *DB) loadReportingExportSourceScoped(
 	}
 
 	source.activitySessions = activitySessions
+	source.sessionEvidence = evidenceSessions
 	source.activityEvents = events
 	source.usageSessions = usageSessions
 	source.usageCandidates = usageCandidates
@@ -232,8 +246,7 @@ func (db *DB) loadReportingExportSourceScoped(
 	return source, nil
 }
 
-// reportingMessageLessSessions supplies scoped dated session evidence without
-// inventing messages or changing the ordinary export's activity eligibility.
+// reportingMessageLessSessions selects dated existence separately from activity.
 func reportingMessageLessSessions(ctx context.Context, tx *sql.Tx, scope map[string]struct{}, start, end string) ([]activity.SessionMeta, error) {
 	ids := make([]string, 0, len(scope))
 	for id := range scope {
@@ -243,12 +256,19 @@ func reportingMessageLessSessions(ctx context.Context, tx *sql.Tx, scope map[str
 	if err != nil {
 		return nil, err
 	}
+	scopePredicate := ""
+	var args []any
+	if scope != nil {
+		scopePredicate = " AND s.id IN (SELECT value FROM json_each(?))"
+		args = append(args, string(encoded))
+	}
+	args = append(args, start, start, end)
 	rows, err := tx.QueryContext(ctx, `SELECT s.id,
 		COALESCE(NULLIF(s.display_name,''), NULLIF(s.session_name,''), NULLIF(s.project,''),s.id),
 		s.project,s.agent,s.machine,COALESCE(s.started_at,''),COALESCE(s.ended_at,''),
 		s.is_automated,s.relationship_type='subagent'
 		FROM sessions s WHERE s.message_count=0 AND s.deleted_at IS NULL
-		AND s.id IN (SELECT value FROM json_each(?1)) AND `+activityReportSessionWindowPredicate(), string(encoded), start, start, end)
+		`+scopePredicate+` AND `+activityReportSessionWindowPredicate()+` ORDER BY s.id`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query message-less reporting sessions: %w", err)
 	}
@@ -300,6 +320,13 @@ func (src reportingExportSource) forDate(
 		selected[candidate.meta.SessionID] = struct{}{}
 	}
 
+	evidence := make([]activity.SessionMeta, 0, len(src.sessionEvidence))
+	for _, candidate := range src.sessionEvidence {
+		if candidate.effectiveEnd >= startBound && candidate.effectiveStart < endBound {
+			evidence = append(evidence, candidate.meta)
+		}
+	}
+
 	activityEvents := make([]activity.ActivityEvent, 0, len(src.activityEvents))
 	for _, event := range src.activityEvents {
 		if _, ok := selected[event.SessionID]; ok {
@@ -333,7 +360,7 @@ func (src reportingExportSource) forDate(
 		}
 	}
 
-	allSessions := mergeReportingSessions(selectedSessions, usageSessions)
+	allSessions := mergeReportingSessions(mergeReportingSessions(selectedSessions, evidence), usageSessions)
 	labels := activity.ProjectLabels(allSessions)
 	labelSet := make(map[string]struct{}, len(labels))
 	for _, label := range labels {
@@ -355,7 +382,8 @@ func (src reportingExportSource) forDate(
 		}
 	}
 	createdAt := make(map[string]time.Time, len(activityIDs))
-	for _, id := range activityIDs {
+	for _, session := range allSessions {
+		id := session.SessionID
 		if created, ok := src.createdAt[id]; ok {
 			createdAt[id] = created
 		}
@@ -365,6 +393,7 @@ func (src reportingExportSource) forDate(
 		machineAliases:   src.machineAliases,
 		archiveID:        src.archiveScope.ArchiveID,
 		activitySessions: selectedSessions,
+		sessionEvidence:  evidence,
 		activityIDs:      activityIDs,
 		activityEvents:   activityEvents,
 		usageSessions:    usageSessions,

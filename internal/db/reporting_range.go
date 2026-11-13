@@ -38,6 +38,7 @@ func reportingRangeFrom(ctx context.Context, reader sessionExportQuerier, now ti
 	if scope != nil {
 		activityWhere = "s.deleted_at IS NULL"
 	}
+	existenceWhere := "s.deleted_at IS NULL"
 	var hasCursorUsage bool
 	err := reader.QueryRowContext(ctx, `SELECT EXISTS(
 		SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cursor_usage_events'
@@ -69,7 +70,7 @@ func reportingRangeFrom(ctx context.Context, reader sessionExportQuerier, now ti
 		WITH timestamps(ts) AS (
 			SELECT COALESCE(agentsview_timestamp_unix_micro(COALESCE(s.started_at, '')),
 				agentsview_timestamp_unix_micro(s.created_at))
-			FROM sessions s WHERE (`+activityWhere+`)`+scopeWhere+`
+			FROM sessions s WHERE (`+existenceWhere+`)`+scopeWhere+`
 			UNION ALL
 			SELECT agentsview_timestamp_unix_micro(COALESCE(
 				NULLIF(m.timestamp, ''), NULLIF(s.started_at, ''), s.created_at))
