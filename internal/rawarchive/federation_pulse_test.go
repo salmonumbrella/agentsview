@@ -15,7 +15,7 @@ import (
 
 // Both managed copy paths must preserve the original publication constraint.
 func TestManagedCopiesKeepFederationPulseHistory(t *testing.T) {
-	for _, method := range []string{"restore", "seed", "restore-old-seed", "restore-old-after-revoke", "restore-without-authority"} {
+	for _, method := range []string{"restore", "seed", "restore-old-seed", "restore-old-after-revoke", "restore-old-after-exclusion", "restore-without-authority"} {
 		t.Run(method, func(t *testing.T) {
 			ctx := t.Context()
 			home := t.TempDir()
@@ -43,13 +43,13 @@ func TestManagedCopiesKeepFederationPulseHistory(t *testing.T) {
 			_, err = database.CommitFederationBatch(ctx, "e-a", "s-a", "h-a", "policy", 1, 2, "batch-2", []db.FederationHubRecord{record})
 			require.NoError(t, err)
 			var oldBackupPath, oldSnapshot string
-			if method == "seed" || method == "restore-old-seed" || method == "restore-old-after-revoke" || method == "restore-without-authority" {
+			if method == "seed" || method == "restore-old-seed" || method == "restore-old-after-revoke" || method == "restore-old-after-exclusion" || method == "restore-without-authority" {
 				// Capture the source before any pulse publication. The later seed
 				// must join the authority that the original creates afterward.
 				require.NoError(t, database.Close())
 				_, err = Capture(ctx, opts)
 				require.NoError(t, err)
-				if method == "restore-old-seed" || method == "restore-old-after-revoke" || method == "restore-without-authority" {
+				if method == "restore-old-seed" || method == "restore-old-after-revoke" || method == "restore-old-after-exclusion" || method == "restore-without-authority" {
 					seed := filepath.Join(t.TempDir(), "seed")
 					_, err = Seed(ctx, filepath.Join(opts.Destination, "capture.json"), seed, nil)
 					require.NoError(t, err)
@@ -97,13 +97,16 @@ func TestManagedCopiesKeepFederationPulseHistory(t *testing.T) {
 					_, err = database.PutFederationHubShare(ctx, "s-a", db.FederationHubShare{UID: "h-a", EnrollmentUID: "e-a", Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 2, State: "stopped", Retention: "member-controlled"})
 					require.NoError(t, err)
 				}
+				if method == "restore-old-after-exclusion" {
+					require.NoError(t, database.PutFederationExclusion(ctx, "a", "synthetic"))
+				}
 				require.NoError(t, database.Close())
 				if method == "restore-without-authority" {
 					require.NoError(t, os.Rename(home, filepath.Join(t.TempDir(), "held-home")))
 					require.NoError(t, os.Mkdir(home, 0o700))
 				}
 				_, err = Restore(ctx, oldBackupPath, oldSnapshot, target, nil)
-				if (method == "restore-old-after-revoke" || method == "restore-without-authority") && err != nil {
+				if (method == "restore-old-after-revoke" || method == "restore-old-after-exclusion" || method == "restore-without-authority") && err != nil {
 					assert.NoDirExists(t, target)
 					return
 				}
@@ -119,6 +122,12 @@ func TestManagedCopiesKeepFederationPulseHistory(t *testing.T) {
 				olderRevoked, err := copied.GetSessionFull(ctx, "a-older")
 				require.NoError(t, err)
 				assert.Nil(t, olderRevoked)
+			}
+			if method == "restore-old-after-exclusion" {
+				var reason string
+				err := copied.Reader().QueryRowContext(ctx, `SELECT reason FROM federation_exclusions WHERE session_id='a'`).Scan(&reason)
+				require.NoError(t, err)
+				assert.Equal(t, "synthetic", reason)
 			}
 			later, err := copied.FederationPulse(ctx, day.AddDate(0, 0, -1).Format("2006-01-02"), 3)
 			if method == "restore-without-authority" {
