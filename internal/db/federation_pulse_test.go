@@ -233,6 +233,31 @@ func TestFederationPulseWithholdsIntersectingSafeMarginals(t *testing.T) {
 	}
 }
 
+func TestFederationPulseWithholdsModelComplementOfEightAndOne(t *testing.T) {
+	owners := map[string]federationPulseOwner{}
+	for _, id := range []string{"a", "b", "c", "d", "e", "f", "g", "h", "i"} {
+		owners[id] = federationPulseOwner{member: id, project: "project"}
+	}
+	a := newFederationPulseAccumulator(owners)
+	for _, id := range []string{"a", "b", "c", "d", "e", "f", "g", "h", "i"} {
+		a.add(id, "total", "", "sessions", 1)
+		model := "common"
+		if id == "i" {
+			model = "private-model"
+		}
+		a.add(id, "model", model, "sessions", 1)
+	}
+	got := a.release(3)
+	assert.True(t, got.Suppressed)
+	assert.Empty(t, got.Projects)
+	assert.Nil(t, got.Totals["sessions"].Value)
+	assert.Equal(t, "suppressed", got.Totals["sessions"].State)
+	encoded, err := json.Marshal(got)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "private-model")
+	assert.NotContains(t, string(encoded), "common")
+}
+
 func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T) {
 	d := testDB(t)
 	ctx := t.Context()

@@ -85,7 +85,7 @@ func TestActivityDoesNotInferFederationFromMachineName(t *testing.T) {
 	ordinary := syncSession("ordinary", "alpha", "fixture", ordinaryTime, 1)
 	ordinary.Machine = "federated"
 	unknown := syncSession("summary-without-usage", "alpha", "fixture", "2024-06-02T09:00:00Z", 1)
-	unknown.Machine = "federated"
+	unknown.Machine = "local"
 	unknown.UserMessageCount = 0
 	knownMixedTime := "2024-06-02T10:00:00Z"
 	knownMixed := syncSession("known-mixed", "alpha", "fixture", knownMixedTime, 1)

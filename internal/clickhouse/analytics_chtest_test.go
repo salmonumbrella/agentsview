@@ -35,7 +35,7 @@ func TestFederationSummaryModelAnalytics(t *testing.T) {
 	ordinary := fixtureSession("ordinary-federated-machine", "alpha", "fixture", ordinaryTime, 1)
 	ordinary.Machine = "federated"
 	unknown := fixtureSession("no-usage-summary", "alpha", "fixture", "2026-02-03T09:00:00Z", 1)
-	unknown.Machine = "federated"
+	unknown.Machine = "local"
 	unknown.UserMessageCount = 0
 	knownMixedTime := "2026-02-03T10:00:00Z"
 	knownMixed := fixtureSession("known-mixed", "alpha", "fixture", knownMixedTime, 1)
