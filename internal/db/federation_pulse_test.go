@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/agentsview/internal/export"
@@ -438,7 +439,7 @@ func TestFederationPulseDirtyProjectKeepsIndependentProject(t *testing.T) {
 // These regressions describe the accepted cross-release privacy requirement.
 // The publication policy is still open; no admission bypass is used here.
 func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
-	for _, scenario := range []string{"window", "reverse-window", "update", "rolled-back-update", "canceled-commit", "missing-authority", "traced-exclusion", "copy-before-publication", "copy-after-publication", "cancel-before-admission", "concurrent", "purge-regrant", "untraced-write", "reopen", "second-handle", "closed-writer", "untraced-session", "untraced-record", "untraced-message", "untraced-tool-result", "untraced-exclusion"} {
+	for _, scenario := range []string{"window", "reverse-window", "update", "rolled-back-update", "canceled-commit", "failed-commit", "missing-authority", "traced-exclusion", "copy-before-publication", "copy-after-publication", "cancel-before-admission", "concurrent", "purge-regrant", "untraced-write", "reopen", "second-handle", "closed-writer", "untraced-session", "untraced-record", "untraced-message", "untraced-tool-result", "untraced-exclusion"} {
 		t.Run(scenario, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
@@ -569,7 +570,7 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 				require.NoError(t, err)
 				assert.Equal(t, 4, count)
 			}
-			if scenario == "rolled-back-update" || scenario == "canceled-commit" {
+			if scenario == "rolled-back-update" || scenario == "canceled-commit" || scenario == "failed-commit" {
 				if scenario == "rolled-back-update" {
 					abort := errors.New("synthetic transaction failure")
 					err := d.Update(ctx, func(tx *sql.Tx) error {
@@ -580,6 +581,27 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 						return abort
 					})
 					require.ErrorIs(t, err, abort)
+				} else if scenario == "failed-commit" {
+					conn, err := d.getWriter().Conn(ctx)
+					require.NoError(t, err)
+					commits := 0
+					require.NoError(t, conn.Raw(func(raw any) error {
+						raw.(*sqlite3.SQLiteConn).RegisterCommitHook(func() int { commits++; return 1 })
+						return nil
+					}))
+					require.NoError(t, conn.Close())
+					cost := money.Money{Microdollars: 170}
+					record := FederationHubRecord{UID: "a", Hash: "failed", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: "a", Project: "example/repo", Agent: "codex", StartedAt: &start}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: 17, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: start, DedupKey: "a"}}}}
+					_, commitErr := d.CommitFederationBatch(ctx, "e-a", "s-a", "h-a", "policy", 1, 2, "failed", []FederationHubRecord{record})
+					conn, err = d.getWriter().Conn(ctx)
+					require.NoError(t, err)
+					require.NoError(t, conn.Raw(func(raw any) error {
+						raw.(*sqlite3.SQLiteConn).RegisterCommitHook(nil)
+						return nil
+					}))
+					require.NoError(t, conn.Close())
+					require.Error(t, commitErr)
+					require.Equal(t, 1, commits)
 				} else {
 					canceled, cancel := context.WithCancel(ctx)
 					defer cancel()
