@@ -98,6 +98,107 @@ func TestStopManifestUsesConsentedRetentionAndStaleRegisterStaysStopped(t *testi
 	assert.Equal(t, "stopped", view.State)
 }
 
+// A change to any published membership or availability dimension must not
+// become a second view of a single member while another project stays useful.
+func TestHubPulseProtectsWholeSummaryAfterOneMemberChanges(t *testing.T) {
+	for _, dimension := range []string{"agent", "model", "outcome", "health", "automation", "cost-availability"} {
+		t.Run(dimension, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			ctx := t.Context()
+			archive, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "hub.db"))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, archive.Close()) })
+			cfg, err := config.Default()
+			require.NoError(t, err)
+			cfg.Federation.Hub.SuggestedProjects = []string{}
+			hub := NewService("hub", "hub", cfg.Federation.Hub, archive)
+			digest, err := export.DigestCanonical(cfg.Federation.Hub)
+			require.NoError(t, err)
+			started := "2020-07-29T09:00:00Z"
+			type member struct {
+				name, spoke, share, enrollment string
+				payload                        SummaryRecord
+			}
+			members := make([]member, 0, 6)
+			for i, name := range []string{"a", "b", "c", "d", "e", "f"} {
+				remote := "github.com/example/p"
+				if i >= 3 {
+					remote = "github.com/example/q"
+				}
+				key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
+				m := member{name: name, spoke: "spoke-" + name, share: "share-" + name}
+				m.payload = SummaryRecord{SessionID: name, Remote: remote, ProjectKey: key, Agent: "codex", StartedAt: &started, Outcome: "unknown", ByModel: map[string]db.SessionModelUsageBreakdown{"model": {InputTokens: (i + 1) * 10, HasCost: true, Cost: money.Money{Microdollars: int64((i + 1) * 100)}}}}
+				enrollment, _, err := hub.Enroll(ctx, m.spoke, name, "")
+				require.NoError(t, err)
+				m.enrollment = enrollment.UID
+				_, err = hub.RegisterShare(ctx, m.enrollment, m.spoke, m.share, ShareManifest{Protocol: ProtocolVersion, SpokeInstance: m.spoke, ShareUID: m.share, Epoch: 1, Remote: remote, ProjectKey: key, Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: digest})
+				require.NoError(t, err)
+				members = append(members, m)
+			}
+			apply := func(m member, sequence int64) {
+				t.Helper()
+				hash, err := export.DigestCanonical(m.payload)
+				require.NoError(t, err)
+				ack, err := hub.ApplyBatch(ctx, m.enrollment, m.spoke, m.share, Batch{Protocol: ProtocolVersion, SpokeInstance: m.spoke, ShareUID: m.share, Epoch: 1, Sequence: sequence, Records: []BatchRecord{{RecordUID: m.name, Kind: "session_summary", Hash: hash, Payload: &m.payload}}})
+				require.NoError(t, err)
+				assert.Empty(t, ack.Refused)
+				assert.Equal(t, sequence, ack.Committed)
+			}
+			for _, m := range members {
+				apply(m, 1)
+			}
+			first, err := hub.Pulse(ctx, "2020-07-29")
+			require.NoError(t, err)
+			require.Len(t, first.Projects, 2)
+			require.NotNil(t, first.Totals["tokens"].Value)
+			assert.EqualValues(t, 210, *first.Totals["tokens"].Value)
+			require.NotNil(t, first.Totals["cost_microdollars"].Value)
+			assert.EqualValues(t, 2100, *first.Totals["cost_microdollars"].Value)
+			p := &members[0].payload
+			switch dimension {
+			case "agent":
+				p.Agent = "claude"
+			case "model":
+				p.ByModel = map[string]db.SessionModelUsageBreakdown{"other": p.ByModel["model"]}
+			case "outcome":
+				p.Outcome = "completed"
+			case "health":
+				grade := "A"
+				p.Health = &grade
+			case "automation":
+				p.Automated = true
+			case "cost-availability":
+				p.ByModel = map[string]db.SessionModelUsageBreakdown{"model": {InputTokens: 10}}
+			}
+			apply(members[0], 2)
+			later, err := hub.Pulse(ctx, "2020-07-29")
+			require.NoError(t, err)
+			assert.True(t, later.Suppressed)
+			for _, metric := range []string{"sessions", "active_projects", "tokens", "cost_microdollars", "automated_sessions", "usage_observed_sessions", "health_observed_sessions", "outcome_observed_sessions"} {
+				assert.Equal(t, "suppressed", later.Totals[metric].State, metric)
+				assert.Nil(t, later.Totals[metric].Value, metric)
+			}
+			for _, ratio := range []string{"automation_share", "usage_coverage", "health_coverage", "outcome_coverage"} {
+				assert.Equal(t, "suppressed", later.Ratios[ratio].State, ratio)
+				assert.Nil(t, later.Ratios[ratio].Value, ratio)
+			}
+			assert.Empty(t, later.Agents)
+			assert.Empty(t, later.Models)
+			assert.Empty(t, later.Outcomes)
+			assert.Empty(t, later.Grades)
+			assert.Empty(t, later.Categories)
+			require.Len(t, later.Projects, 1)
+			assert.Equal(t, members[3].payload.ProjectKey, later.Projects[0].Key)
+			require.NotNil(t, later.Projects[0].Totals["sessions"].Value)
+			assert.EqualValues(t, 3, *later.Projects[0].Totals["sessions"].Value)
+			require.NotNil(t, later.Projects[0].Totals["tokens"].Value)
+			assert.EqualValues(t, 150, *later.Projects[0].Totals["tokens"].Value)
+			require.NotNil(t, later.Projects[0].Totals["cost_microdollars"].Value)
+			assert.EqualValues(t, 1500, *later.Projects[0].Totals["cost_microdollars"].Value)
+		})
+	}
+}
+
 // A real summary batch must participate in the same publication history as
 // other pulse callers; a separate project remains useful after P is withheld.
 func TestHubPulseProtectsSummaryUpdatesAndKeepsIndependentProject(t *testing.T) {
