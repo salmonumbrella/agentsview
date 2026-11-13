@@ -666,10 +666,17 @@ func (s *Service) postFederationRecords(ctx context.Context, link db.FederationL
 		for _, id := range selection.IDs {
 			allowed[id] = true
 		}
+		var retainedEvidence map[string]bool
+		if share.State != "active" {
+			retainedEvidence, err = s.db.FederationRetainedProven(ctx, share.UID, ids)
+			if err != nil {
+				return err
+			}
+		}
 		filtered := batch.Records[:0]
 		for _, record := range batch.Records {
 			if record.Kind == "tombstone" {
-				if !allowed[record.RecordUID] {
+				if !allowed[record.RecordUID] && (share.State == "active" || retainedEvidence[record.RecordUID]) {
 					filtered = append(filtered, record)
 				}
 				continue
@@ -745,9 +752,20 @@ func (s *Service) processRetainedNarrowing(ctx context.Context, link db.Federati
 			return err
 		}
 		generationChanged := share.SourceGeneration == "" || share.SourceGeneration != generation
+		if !generationChanged {
+			usage, e := s.db.UsageChangeRevision(ctx)
+			if e != nil {
+				return e
+			}
+			deletion, e := s.db.SessionDeletionPublicationRevision(ctx)
+			if e != nil {
+				return e
+			}
+			generationChanged = share.UsageCursor > usage || share.DeletionCursor > deletion
+		}
 		var explicit []string
 		if generationChanged {
-			explicit, err = s.db.FederationRetainedExclusions(ctx, share.UID, "", 400)
+			explicit, err = s.db.FederationRetainedRemovals(ctx, share.UID, "", 400)
 			if err != nil {
 				return err
 			}
@@ -776,49 +794,85 @@ func (s *Service) processRetainedNarrowing(ctx context.Context, link db.Federati
 		if handshake.EnrollmentUID != link.EnrollmentUID || handshake.Member != link.Member {
 			return inputError("federation hub identity mismatch")
 		}
-		view := ShareView{Committed: share.Sequence, Epoch: share.Epoch}
+		var consent SharePreview
+		if json.Unmarshal([]byte(share.ConsentJSON), &consent) != nil || (consent.DeliveryNotice != shareDeliveryNotice && consent.DeliveryNotice != shareLegacyDeliveryNotice) {
+			return inputError("invalid federation stop consent")
+		}
+		digest, e := export.DigestCanonical(consent.Policy)
+		if e != nil || digest != share.PolicyDigest || consent.Policy.Validate() != nil {
+			return inputError("invalid federation stop consent")
+		}
+		key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: share.NormalizedRemote}).Key
+		manifest := ShareManifest{Protocol: ProtocolVersion, SpokeInstance: s.archiveID, ShareUID: share.UID, Epoch: share.Epoch, Remote: share.NormalizedRemote, ProjectKey: key, Level: share.Level, Attribution: share.Attribution, Audience: share.Audience, PolicyDigest: share.PolicyDigest, Action: "stop", Policy: &consent.Policy}
+		view, err := PutShare(ctx, link.HubOrigin, token, s.archiveID, manifest)
+		if err != nil {
+			return err
+		}
+		if view.State != "stopped" || view.Retention != "org-retained" || view.Epoch < share.Epoch || view.Committed < 0 {
+			return inputError("invalid federation stop receipt")
+		}
 		if share.PendingBatch != "" {
 			var batch Batch
-			if err = json.Unmarshal([]byte(share.PendingBatch), &batch); err != nil || batch.ShareUID != share.UID || batch.Epoch != share.Epoch || batch.Sequence != share.Sequence+1 {
+			if err = json.Unmarshal([]byte(share.PendingBatch), &batch); err != nil || batch.Protocol != ProtocolVersion || batch.SpokeInstance != s.archiveID || batch.ShareUID != share.UID || batch.Epoch != share.Epoch || batch.Sequence != share.Sequence+1 || len(batch.Records) == 0 || len(batch.Records) > 1000 {
 				return inputError("invalid stored federation batch")
 			}
+			seen := make(map[string]bool, len(batch.Records))
 			for _, record := range batch.Records {
-				if record.Kind != "tombstone" {
+				if record.Kind != "tombstone" || record.RecordUID == "" || record.Hash != "" || record.Payload != nil || seen[record.RecordUID] {
 					return inputError("retained share has unresolved delivery")
 				}
+				seen[record.RecordUID] = true
 			}
 			ids := make([]string, 0, len(batch.Records))
 			for _, record := range batch.Records {
 				ids = append(ids, record.RecordUID)
 			}
-			if generationChanged {
-				excluded, e := s.db.FederationExplicitExclusions(ctx, share.UID, ids)
-				if e != nil {
-					return e
-				}
-				for _, id := range ids {
-					if !excluded[id] {
-						return inputError("retained share has unresolved deletion after restore")
-					}
-				}
-			} else {
-				allowed, _, e := s.federationEligibility(ctx, share, ids)
-				if e != nil {
-					return e
-				}
-				for _, id := range ids {
-					if allowed[id] {
-						return inputError("retained share has unresolved deletion after restore")
-					}
+			proven, e := s.db.FederationRetainedProven(ctx, share.UID, ids)
+			if e != nil {
+				return e
+			}
+			for _, id := range ids {
+				if !proven[id] {
+					return inputError("retained share has unresolved deletion after restore")
 				}
 			}
-			if err = s.deliverPending(ctx, link, token, batch, out); err != nil {
-				return err
+			if view.Epoch == share.Epoch {
+				err = s.deliverPending(ctx, link, token, batch, out)
+			} else {
+				err = &peerHTTPError{Status: http.StatusConflict}
+			}
+			if err != nil {
+				var peer *peerHTTPError
+				if !errors.As(err, &peer) || peer.Status != http.StatusConflict {
+					return err
+				}
+				next := max(view.Epoch, share.Epoch) + 1
+				if next <= view.Epoch || next <= share.Epoch {
+					return inputError("invalid federation stop receipt")
+				}
+				if err = s.db.AdvanceFederationStopEpoch(ctx, link.UID, share.UID, share.Epoch, next); err != nil {
+					return err
+				}
+				return inputError("retained share cleanup pending; retry federation push")
 			}
 			view.Committed = batch.Sequence
+		} else {
+			if view.Epoch != share.Epoch {
+				next := view.Epoch + 1
+				if next <= view.Epoch {
+					return inputError("invalid federation stop receipt")
+				}
+				if err = s.db.AdvanceFederationStopEpoch(ctx, link.UID, share.UID, share.Epoch, next); err != nil {
+					return err
+				}
+				return inputError("retained share cleanup pending; retry federation push")
+			}
+			if err = s.db.SyncFederationRetainedProgress(ctx, link.UID, share.UID, share.Epoch, view.Committed); err != nil {
+				return err
+			}
 		}
 		if generationChanged {
-			explicit, err = s.db.FederationRetainedExclusions(ctx, share.UID, "", 400)
+			explicit, err = s.db.FederationRetainedRemovals(ctx, share.UID, "", 400)
 			if err != nil {
 				return err
 			}
@@ -830,7 +884,7 @@ func (s *Service) processRetainedNarrowing(ctx context.Context, link db.Federati
 				if err = s.postFederationRecords(ctx, link, token, share, &view, tombstones, out); err != nil {
 					return err
 				}
-				explicit, err = s.db.FederationRetainedExclusions(ctx, share.UID, explicit[len(explicit)-1], 400)
+				explicit, err = s.db.FederationRetainedRemovals(ctx, share.UID, explicit[len(explicit)-1], 400)
 				if err != nil {
 					return err
 				}

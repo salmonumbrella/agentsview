@@ -3939,3 +3939,55 @@ func TestRemoteScopeRetriesSnapshotChangedDuringPush(t *testing.T) {
 	require.NoError(t, pg.QueryRowContext(ctx, `SELECT parent_session_id FROM sessions WHERE id = 'late'`).Scan(&parent))
 	assert.Equal(t, "parent", parent)
 }
+
+func TestIncrementalPushPublishesFederatedRelationshipChanges(t *testing.T) {
+	syncer, local, pg, ctx := newSessionProvenancePushSync(t, "agentsview_federation_relationship_test")
+	require.NoError(t, local.CreateFederationEnrollment(ctx, db.FederationEnrollment{UID: "enr", SpokeArchiveID: "spoke", Member: "member", CredentialSHA256: "digest"}))
+	share := db.FederationHubShare{UID: "share", EnrollmentUID: "enr", Remote: "example.org/repo", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active", Retention: "member-controlled"}
+	_, err := local.PutFederationHubShare(ctx, "spoke", share)
+	require.NoError(t, err)
+	parentID := "parent"
+	child := db.FederationHubRecord{UID: "child", Hash: "child-hash", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: db.SessionBatchWrite{Session: db.Session{ID: "child", Project: "fixture", Machine: "federated", Agent: "claude", ParentSessionID: &parentID, RelationshipType: "subagent", MessageCount: 1}}}
+	parent := db.FederationHubRecord{UID: parentID, Hash: "parent-hash", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: db.SessionBatchWrite{Session: db.Session{ID: parentID, Project: "fixture", Machine: "federated", Agent: "claude", MessageCount: 1}}}
+	_, err = local.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 1, "child", []db.FederationHubRecord{child})
+	require.NoError(t, err)
+	_, err = local.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 2, "parent", []db.FederationHubRecord{parent})
+	require.NoError(t, err)
+	_, err = syncer.Push(ctx, true, nil)
+	require.NoError(t, err)
+	ageChild := func() {
+		t.Helper()
+		require.NoError(t, local.Update(ctx, func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `UPDATE sessions SET sync_marker='2001-01-01T00:00:00.000Z' WHERE id='child'`)
+			return err
+		}))
+		result, err := syncer.Push(ctx, false, nil)
+		require.NoError(t, err)
+		assert.False(t, result.Full)
+	}
+	ageChild()
+	_, err = local.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 3, "repair", []db.FederationHubRecord{child})
+	require.NoError(t, err)
+	result, err := syncer.Push(ctx, false, nil)
+	require.NoError(t, err)
+	assert.False(t, result.Full)
+	var parentValue sql.NullString
+	var relationship string
+	require.NoError(t, pg.QueryRowContext(ctx, `SELECT parent_session_id,relationship_type FROM sessions WHERE id='child'`).Scan(&parentValue, &relationship))
+	assert.Equal(t, "parent", parentValue.String)
+	assert.True(t, parentValue.Valid)
+	assert.Equal(t, "subagent", relationship)
+	ageChild()
+	_, err = local.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 4, "remove-parent", []db.FederationHubRecord{{UID: "parent", Tombstone: true}})
+	require.NoError(t, err)
+	result, err = syncer.Push(ctx, false, nil)
+	require.NoError(t, err)
+	assert.False(t, result.Full)
+	var parentCount, childCount int
+	require.NoError(t, pg.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='parent'),(SELECT count(*) FROM sessions WHERE id='child')`).Scan(&parentCount, &childCount))
+	assert.Zero(t, parentCount)
+	assert.Equal(t, 1, childCount)
+	require.NoError(t, pg.QueryRowContext(ctx, `SELECT parent_session_id,relationship_type FROM sessions WHERE id='child'`).Scan(&parentValue, &relationship))
+	assert.False(t, parentValue.Valid)
+	assert.Empty(t, relationship)
+}

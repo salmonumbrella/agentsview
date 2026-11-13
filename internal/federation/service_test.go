@@ -19,6 +19,11 @@ import (
 	"go.kenn.io/agentsview/internal/testutil"
 )
 
+func revokeForTest(s *Service, ctx context.Context, uid string) error {
+	_, err := s.Revoke(ctx, uid)
+	return err
+}
+
 func TestStatusKeepsLocalSharesWhenPeerReturnsHTTPError(t *testing.T) {
 	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
 	require.NoError(t, err)
@@ -682,7 +687,7 @@ func TestLegacyRevokeRequiresMatchingRetentionProof(t *testing.T) {
 			require.NoError(t, err)
 			changed := policy
 			changed.MinGroupSize++
-			err = NewService("hub", "hub", changed, archive).Revoke(ctx, "enr")
+			err = revokeForTest(NewService("hub", "hub", changed, archive), ctx, "enr")
 			require.ErrorContains(t, err, "cleanup pending")
 			enrollments, err := archive.ListFederationEnrollments(ctx)
 			require.NoError(t, err)
@@ -691,7 +696,7 @@ func TestLegacyRevokeRequiresMatchingRetentionProof(t *testing.T) {
 			var count int
 			require.NoError(t, archive.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='owned'`).Scan(&count))
 			assert.Equal(t, 1, count)
-			require.NoError(t, NewService("hub", "hub", policy, archive).Revoke(ctx, "enr"))
+			require.NoError(t, revokeForTest(NewService("hub", "hub", policy, archive), ctx, "enr"))
 			require.NoError(t, archive.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='owned'`).Scan(&count))
 			if retention == "member-controlled" {
 				assert.Zero(t, count)

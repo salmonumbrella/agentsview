@@ -349,13 +349,20 @@ func purgeFederationRecordsTx(ctx context.Context, tx *sql.Tx, share string, ids
 		if _, err := tx.ExecContext(ctx, `UPDATE sessions SET parent_session_id=NULL,relationship_type='',sync_marker=MAX(COALESCE(sync_marker,''),strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE parent_session_id=? AND id IN (SELECT session_id FROM federation_records WHERE share_uid=?)`, id, share); err != nil {
 			return nil, err
 		}
-		if _, err := deleteSessionPhysicalTx(ctx, tx, id); err != nil {
+		result, err := deleteSessionPhysicalTx(ctx, tx, id)
+		if err != nil {
 			return nil, err
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM federation_records WHERE share_uid=? AND session_id=?`, share, id); err != nil {
 			return nil, err
 		}
-		deleted = append(deleted, id)
+		n, err := result.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if n > 0 {
+			deleted = append(deleted, id)
+		}
 	}
 	return deleted, nil
 }

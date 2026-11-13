@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -21,6 +22,11 @@ import (
 	"go.kenn.io/agentsview/internal/federation"
 	"go.kenn.io/agentsview/internal/testutil"
 )
+
+func revokeForTest(s *federation.Service, ctx context.Context, uid string) error {
+	_, err := s.Revoke(ctx, uid)
+	return err
+}
 
 func TestFederationCredentialIsolation(t *testing.T) {
 	for _, role := range []string{"hub", "spoke", "off"} {
@@ -127,7 +133,7 @@ func TestFederationCredentialIsolation(t *testing.T) {
 					assert.Equal(t, wrongResult.Body.String(), schemeResult.Body.String())
 					assert.Equal(t, wrongResult.Header(), schemeResult.Header())
 				}
-				require.NoError(t, svc.Revoke(t.Context(), enrollment.UID))
+				require.NoError(t, revokeForTest(svc, t.Context(), enrollment.UID))
 				for _, pair := range [][2]string{{"", "spoke-a"}, {"avfc_bad", "spoke-a"}, {token, "wrong"}, {token, "spoke-a"}, {"personal", "spoke-a"}} {
 					req = httptest.NewRequest(http.MethodGet, "/api/v1/federation/handshake", nil)
 					req.Header.Set("Authorization", "Bearer "+pair[0])
@@ -304,7 +310,7 @@ func TestFederationHubSpokeLifecycle(t *testing.T) {
 	assert.Contains(t, string(data), `"suggested_projects":[]`)
 	require.NotNil(t, status.Link)
 	assert.Equal(t, "member-a", status.Link.Member)
-	require.NoError(t, hub.Revoke(t.Context(), enrollment.UID))
+	require.NoError(t, revokeForTest(hub, t.Context(), enrollment.UID))
 	status, err = spoke.Status(t.Context())
 	require.NoError(t, err)
 	require.NotNil(t, status.Link)

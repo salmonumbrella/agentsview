@@ -130,7 +130,14 @@ func (s *Server) humaFederationList(ctx context.Context, _ *emptyInput) (*jsonOu
 	return &jsonOutput[[]db.FederationEnrollment]{Body: result}, nil
 }
 func (s *Server) humaFederationRevoke(ctx context.Context, in *federationRevokeInput) (*jsonOutput[map[string]bool], error) {
-	if err := federationControlError(s.federation.Revoke(ctx, in.UID)); err != nil {
+	changed, err := s.federation.Revoke(ctx, in.UID)
+	if changed {
+		if s.broadcaster != nil {
+			s.broadcaster.Emit("sessions")
+		}
+		s.notifySessionMutation()
+	}
+	if err = federationControlError(err); err != nil {
 		return nil, err
 	}
 	return &jsonOutput[map[string]bool]{Body: map[string]bool{"revoked": true}}, nil

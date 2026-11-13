@@ -2950,8 +2950,9 @@ was not registered. If the hub has a newer share epoch, a pending stop retries
 at a later epoch without sending summary content. An offline hub
 leaves cleanup pending for retry. A push can deliver to the current hub while
 reporting that cleanup for an earlier hub remains pending. After a retained
-share's source archive is replaced, explicit exclusions can still narrow its
-records. A missing record alone does not prove deletion and remains pending.
+share's source archive is replaced, explicit exclusions and hard deletions
+recorded in the current archive can still narrow its records. A missing record
+alone does not prove deletion and remains pending for retry.
 `federation exclude <session-id> [--reason text]` works before or after joining
 and keeps a session out of all shares in this archive, including after removal
 or rejoining. `federation push --dry-run` prints selected summaries locally. Run

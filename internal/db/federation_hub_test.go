@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"testing"
@@ -83,7 +84,7 @@ func TestFederationBatchOwnershipAndRevocation(t *testing.T) {
 	ack, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 2, "different", []FederationHubRecord{record})
 	require.ErrorIs(t, err, ErrFederationSequence)
 	assert.Equal(t, int64(2), ack.Committed)
-	require.NoError(t, d.RevokeFederationEnrollment(ctx, "enr"))
+	require.NoError(t, revokeFederationEnrollment(d, ctx, "enr"))
 	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 3, "batch2", []FederationHubRecord{record})
 	require.ErrorIs(t, err, sql.ErrNoRows)
 }
@@ -434,7 +435,15 @@ func TestFederationRevokeUsesShareRetention(t *testing.T) {
 	result, err := d.CommitFederationBatch(ctx, "enr", "spoke", "purge", "policy", 1, 2, "collision", []FederationHubRecord{collision})
 	require.NoError(t, err)
 	assert.Equal(t, FederationCollision, result.Refused["collision"])
-	require.NoError(t, d.RevokeFederationEnrollment(ctx, "enr"))
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	changed, err := d.RevokeFederationEnrollment(canceled, "enr")
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, changed)
+	var before int
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE id='purge'`).Scan(&before))
+	assert.Equal(t, 1, before)
+	require.NoError(t, revokeFederationEnrollment(d, ctx, "enr"))
 	var purged, retained int
 	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='purge'),(SELECT count(*) FROM sessions WHERE id='retain')`).Scan(&purged, &retained))
 	assert.Zero(t, purged)
@@ -694,4 +703,21 @@ func TestFederationSameHashAttachesLaterOwnedParent(t *testing.T) {
 	var messages int
 	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT count(*) FROM messages WHERE session_id='local-parent' AND content='original'`).Scan(&messages))
 	assert.Equal(t, 1, messages)
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE sessions SET sync_marker='2001-01-01T00:00:00.000Z' WHERE id='a-child'`)
+		return err
+	}))
+	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 9, "remove-parent", []FederationHubRecord{{UID: "z-parent", Tombstone: true}})
+	require.NoError(t, err)
+	// Removing the parent must publish the still-present child's detachment.
+	candidates, err = d.ListSessionsForMirrorWindow(ctx, "2002-01-01T00:00:00Z", nil, nil)
+	require.NoError(t, err)
+	candidateIDs = nil
+	for _, candidate := range candidates {
+		candidateIDs = append(candidateIDs, candidate.ID)
+	}
+	assert.Contains(t, candidateIDs, "a-child")
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT coalesce(parent_session_id,''),relationship_type FROM sessions WHERE id='a-child'`).Scan(&gotParent, &relationship))
+	assert.Empty(t, gotParent)
+	assert.Empty(t, relationship)
 }

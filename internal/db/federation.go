@@ -78,7 +78,7 @@ func (db *DB) ListFederationEnrollments(ctx context.Context) ([]FederationEnroll
 	return result, rows.Err()
 }
 
-func (db *DB) RevokeFederationEnrollment(ctx context.Context, uid string, proof ...FederationRetentionProof) error {
+func (db *DB) RevokeFederationEnrollment(ctx context.Context, uid string, proof ...FederationRetentionProof) (bool, error) {
 	var unresolved bool
 	var purged []string
 	var pending recallEvidenceRevocationEvents
@@ -146,10 +146,10 @@ func (db *DB) RevokeFederationEnrollment(ctx context.Context, uid string, proof 
 		db.notifyUsageSessions(purged)
 		pending.flush()
 		if unresolved {
-			return ErrFederationCleanupPending
+			return len(purged) > 0, ErrFederationCleanupPending
 		}
 	}
-	return err
+	return err == nil && len(purged) > 0, err
 }
 
 func (db *DB) AuthenticateFederationCredential(ctx context.Context, digest, archive string) (FederationEnrollment, error) {
@@ -486,7 +486,7 @@ func (db *DB) AdvanceFederationStopEpoch(ctx context.Context, linkUID, uid strin
 		return ErrFederationSequence
 	}
 	return db.Update(ctx, func(tx *sql.Tx) error {
-		result, err := tx.ExecContext(ctx, `UPDATE federation_shares SET epoch=?,sequence=0,pending_batch='' WHERE link_uid=? AND share_uid=? AND epoch=? AND state<>'active' AND stop_receipt='pending' AND stop_intent IN ('pause','remove','leave','policy')`, nextEpoch, linkUID, uid, oldEpoch)
+		result, err := tx.ExecContext(ctx, `UPDATE federation_shares SET epoch=?,sequence=0,stop_receipt='pending' WHERE link_uid=? AND share_uid=? AND epoch=? AND state<>'active' AND stop_receipt IN ('pending','retained') AND stop_intent IN ('pause','remove','leave','policy')`, nextEpoch, linkUID, uid, oldEpoch)
 		if err != nil {
 			return err
 		}
@@ -498,6 +498,25 @@ func (db *DB) AdvanceFederationStopEpoch(ctx context.Context, linkUID, uid strin
 			return ErrFederationSequence
 		}
 		return stampFederationVersion(ctx, tx)
+	})
+}
+
+// SyncFederationRetainedProgress records control progress only, never delivery
+// acknowledgments. A concurrent pending envelope must not be overwritten.
+func (db *DB) SyncFederationRetainedProgress(ctx context.Context, linkUID, uid string, epoch, sequence int64) error {
+	return db.Update(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE federation_shares SET sequence=? WHERE link_uid=? AND share_uid=? AND epoch=? AND state<>'active' AND stop_receipt='retained' AND pending_batch=''`, sequence, linkUID, uid, epoch)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return ErrFederationSequence
+		}
+		return nil
 	})
 }
 

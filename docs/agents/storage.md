@@ -1532,6 +1532,7 @@ mirror rows. Stopped shares retain local accounting and destination context for 
 status and share lookup. Tombstoned history keeps confirmed and uncertain
 attempt hashes separately.
 After a source generation changes, retained shares may send explicit
-exclusions as tombstones; missing rows alone do not prove deletion.
+exclusions and current-archive hard deletions as tombstones. Missing rows alone
+do not prove deletion and remain pending for retry.
 The additive `1 << 24` archive bit protects withdrawal state, including retired
 links without shares, from older writers.

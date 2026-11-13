@@ -12,6 +12,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func revokeFederationEnrollment(d *DB, ctx context.Context, uid string, proof ...FederationRetentionProof) error {
+	_, err := d.RevokeFederationEnrollment(ctx, uid, proof...)
+	return err
+}
+
 func TestFederationEnrollmentLifecycle(t *testing.T) {
 	db := testDB(t)
 	ctx := t.Context()
@@ -34,13 +39,13 @@ func TestFederationEnrollmentLifecycle(t *testing.T) {
 	assert.NotEmpty(t, rows[0].LastHandshakeAt)
 	assert.Equal(t, "contacted", rows[0].State)
 	require.ErrorIs(t, db.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr-b", SpokeArchiveID: "spoke-a", Member: "member-a", CredentialSHA256: "digest-b"}), ErrFederationEnrollmentExists)
-	require.NoError(t, db.RevokeFederationEnrollment(ctx, "enr-a"))
+	require.NoError(t, revokeFederationEnrollment(db, ctx, "enr-a"))
 	require.NoError(t, db.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr-b", SpokeArchiveID: "spoke-a", Member: "member-a", CredentialSHA256: "digest-b"}))
 	rows, err = db.ListFederationEnrollments(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, "revoked", rows[0].State)
-	require.NoError(t, db.RevokeFederationEnrollment(ctx, "enr-a"))
-	require.ErrorIs(t, db.RevokeFederationEnrollment(ctx, "missing"), sql.ErrNoRows)
+	require.NoError(t, revokeFederationEnrollment(db, ctx, "enr-a"))
+	require.ErrorIs(t, revokeFederationEnrollment(db, ctx, "missing"), sql.ErrNoRows)
 	_, err = db.AuthenticateFederationCredential(ctx, "digest-a", "spoke-a")
 	assert.True(t, errors.Is(err, ErrFederationUnauthorized))
 }
@@ -50,7 +55,7 @@ func TestFederationCopyPreservesEnrollmentAndLink(t *testing.T) {
 	target := testDB(t)
 	ctx := t.Context()
 	require.NoError(t, source.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr-a", SpokeArchiveID: "spoke-a", Member: "member-a", CredentialSHA256: "digest"}))
-	require.NoError(t, source.RevokeFederationEnrollment(ctx, "enr-a"))
+	require.NoError(t, revokeFederationEnrollment(source, ctx, "enr-a"))
 	sourceRows, err := source.ListFederationEnrollments(ctx)
 	require.NoError(t, err)
 	require.Len(t, sourceRows, 1)
@@ -159,7 +164,7 @@ func TestFederationUserVersion(t *testing.T) {
 	decoded, archiveOnly := DecodeUserVersion(version)
 	assert.Equal(t, CurrentDataVersion(), decoded)
 	assert.False(t, archiveOnly)
-	require.NoError(t, database.RevokeFederationEnrollment(ctx, "enr-a"))
+	require.NoError(t, revokeFederationEnrollment(database, ctx, "enr-a"))
 	assert.Equal(t, version, raw())
 	link.UID = "link-b"
 	require.NoError(t, database.PutFederationLink(ctx, link))
@@ -812,7 +817,7 @@ func TestLegacyHubRetentionIsNotInventedOnOpenOrCopy(t *testing.T) {
 				var stored string
 				require.NoError(t, archive.Reader().QueryRow(ctx, `SELECT retention FROM federation_hub_shares WHERE share_uid='share'`).Scan(&stored))
 				assert.Empty(t, stored)
-				err := archive.RevokeFederationEnrollment(ctx, "enr", FederationRetentionProof{PolicyDigest: "different", Retention: retention})
+				err := revokeFederationEnrollment(archive, ctx, "enr", FederationRetentionProof{PolicyDigest: "different", Retention: retention})
 				require.ErrorIs(t, err, ErrFederationCleanupPending)
 				var revoked string
 				var owned int
@@ -820,7 +825,7 @@ func TestLegacyHubRetentionIsNotInventedOnOpenOrCopy(t *testing.T) {
 				assert.NotEmpty(t, revoked)
 				require.NoError(t, archive.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='owned'`).Scan(&owned))
 				assert.Equal(t, 1, owned)
-				require.NoError(t, archive.RevokeFederationEnrollment(ctx, "enr", FederationRetentionProof{PolicyDigest: "accepted", Retention: retention}))
+				require.NoError(t, revokeFederationEnrollment(archive, ctx, "enr", FederationRetentionProof{PolicyDigest: "accepted", Retention: retention}))
 				require.NoError(t, archive.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='owned'`).Scan(&owned))
 				if retention == "member-controlled" {
 					assert.Zero(t, owned)

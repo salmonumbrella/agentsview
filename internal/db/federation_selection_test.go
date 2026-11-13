@@ -2,12 +2,56 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/agentsview/internal/export"
 )
+
+func TestRetainedDeletionEvidenceDistinguishesAbsenceAndReinsertion(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.PutFederationLink(ctx, FederationLink{UID: "link", HubOrigin: "https://hub.example", HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: "/fixture/token", ProtocolVersion: 2, State: "active"}))
+	require.NoError(t, d.PutFederationShare(ctx, FederationShare{UID: "share", LinkUID: "link", NormalizedRemote: "example.org/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: "{}", PolicyDigest: "policy"}))
+	var items []FederationDelivery
+	var records []map[string]any
+	key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: "example.org/repo"}).Key
+	for _, id := range []string{"absent", "deleted", "excluded", "restored"} {
+		payload := map[string]any{"session_id": id, "project_key": key, "normalized_remote": "example.org/repo", "agent": "claude", "started_at": nil, "ended_at": nil, "message_count": 0, "user_message_count": 0, "assistant_message_count": 0, "total_tool_count": 0, "by_model": map[string]any{}, "is_automated": false, "outcome": "", "health": nil}
+		hash, err := export.DigestCanonical(payload)
+		require.NoError(t, err)
+		items = append(items, FederationDelivery{RecordUID: id, SessionID: id, Hash: hash, State: "sent"})
+		records = append(records, map[string]any{"record_uid": id, "kind": "session_summary", "hash": hash, "payload": payload})
+	}
+	envelope, err := json.Marshal(map[string]any{"protocol": 2, "spoke_instance": "spoke", "share_uid": "share", "epoch": 1, "sequence": 1, "records": records})
+	require.NoError(t, err)
+	require.NoError(t, d.SaveFederationPending(ctx, "share", 1, string(envelope), items))
+	require.NoError(t, d.CommitFederationAcknowledgment(ctx, "share", 1, items))
+	for _, id := range []string{"deleted", "excluded", "restored"} {
+		require.NoError(t, d.UpsertSession(ctx, Session{ID: id, Project: "fixture", Machine: "fixture", Agent: "claude"}))
+	}
+	require.NoError(t, d.DeleteSession(ctx, "deleted"))
+	require.NoError(t, d.DeleteSession(ctx, "restored"))
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent) VALUES('restored','fixture','fixture','claude')`)
+		return err
+	}))
+	require.NoError(t, d.PutFederationExclusion(ctx, "excluded", "private"))
+	// Only the explicit exclusion and the current hard deletion may be sent;
+	// replacement absence and a reinserted row remain unproven.
+	ids, err := d.FederationRetainedRemovals(ctx, "share", "", 400)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"deleted", "excluded"}, ids)
+	evidence, err := d.FederationRetainedProven(ctx, "share", []string{"absent", "deleted", "excluded", "restored"})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{"deleted": true, "excluded": true}, evidence)
+	missing, err := d.FederationRetainedMissing(ctx, "share")
+	require.NoError(t, err)
+	assert.True(t, missing)
+}
 
 func TestFederationSelectionRequiresOwnSnapshotAndLocalProof(t *testing.T) {
 	database := testDB(t)

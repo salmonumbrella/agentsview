@@ -120,23 +120,23 @@ func (s *Service) Enroll(ctx context.Context, archive, member, name string) (db.
 func (s *Service) List(ctx context.Context) ([]db.FederationEnrollment, error) {
 	return s.db.ListFederationEnrollments(ctx)
 }
-func (s *Service) Revoke(ctx context.Context, uid string) error {
+func (s *Service) Revoke(ctx context.Context, uid string) (bool, error) {
 	var proof []db.FederationRetentionProof
 	if s.policy.Validate() == nil {
 		digest, err := export.DigestCanonical(s.policy)
 		if err != nil {
-			return err
+			return false, err
 		}
 		proof = append(proof, db.FederationRetentionProof{PolicyDigest: digest, Retention: s.policy.Retention})
 	}
-	err := s.db.RevokeFederationEnrollment(ctx, uid, proof...)
+	changed, err := s.db.RevokeFederationEnrollment(ctx, uid, proof...)
 	if errors.Is(err, db.ErrFederationCleanupPending) {
-		return inputError(err.Error())
+		return changed, inputError(err.Error())
 	}
 	if errors.Is(err, sql.ErrNoRows) {
-		return inputError("enrollment not found")
+		return false, inputError("enrollment not found")
 	}
-	return err
+	return changed, err
 }
 func (s *Service) Authenticate(ctx context.Context, token, archive string) (HandshakeResponse, error) {
 	return s.AuthenticatePeer(ctx, token, archive, true)
