@@ -128,7 +128,11 @@ func addReportingJointSupport(support reportingJointSupport, key reportingCellKe
 	contribution.unpriced = contribution.unpriced || !row.Priced
 	if row.ProofRef != 0 {
 		contribution.proofRefs = append(contribution.proofRefs, row.ProofRef)
-	} else {
+	}
+	// An input reference alone does not describe shared cost allocation.
+	// Until that native dependency is attached,
+	// a future admission owner must treat this contribution as unproved.
+	if row.ProofRef == 0 || row.CostAllocated {
 		contribution.proofIncomplete = true
 	}
 	return nil
