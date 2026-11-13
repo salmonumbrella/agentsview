@@ -47,3 +47,33 @@ func TestPulseAuthorityCorruptStateIsNeverReinitialized(t *testing.T) {
 	_, err = createPulseAuthority(t.Context(), home, "archive-a", archive)
 	require.Error(t, err)
 }
+
+func TestPulseAuthorityBindsArchiveMetadataAndRequiresRejoin(t *testing.T) {
+	ctx := t.Context()
+	home := t.TempDir()
+	d := testDB(t)
+	first, err := d.bindPulseAuthority(ctx, home, true)
+	require.NoError(t, err)
+	archiveID, err := d.GetArchiveID(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, archiveID, first.ArchiveID)
+	second, err := d.bindPulseAuthority(ctx, home, false)
+	require.NoError(t, err)
+	assert.Equal(t, first, second)
+	_, err = d.bindPulseAuthority(ctx, t.TempDir(), true)
+	require.Error(t, err, "a bound archive must not initialize a replacement authority")
+	third, err := d.bindPulseAuthority(ctx, home, false)
+	require.NoError(t, err)
+	assert.Equal(t, first, third)
+}
+
+func TestPulseAuthorityArchiveOnlyCannotCreateOriginal(t *testing.T) {
+	ctx := t.Context()
+	home := t.TempDir()
+	d := testDB(t)
+	require.NoError(t, d.EnableArchiveOnly(ctx))
+	_, err := d.bindPulseAuthority(ctx, home, true)
+	require.Error(t, err)
+	_, err = os.Stat(filepath.Join(home, ".agentsview-pulse-authority"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+}

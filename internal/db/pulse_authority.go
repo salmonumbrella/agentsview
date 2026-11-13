@@ -50,43 +50,48 @@ func createPulseAuthority(ctx context.Context, home, archiveID, original string)
 		return empty, err
 	}
 	return withPulseAuthorityLock(ctx, path, true, func() (pulseAuthorityBinding, error) {
-		authority, err := randomPulseIdentity()
-		if err != nil {
-			return empty, err
-		}
-		incarnation, err := randomPulseIdentity()
-		if err != nil {
-			return empty, err
-		}
-		binding := pulseAuthorityBinding{Version: 1, ArchiveID: archiveID, AuthorityID: authority, CanonicalOriginal: original, Incarnation: incarnation}
-		data, err := json.Marshal(binding)
-		if err != nil {
-			return empty, err
-		}
-		file, err := safefileio.CreatePrivateFile(path)
-		if err != nil {
-			return empty, fmt.Errorf("create pulse authority: %w", err)
-		}
-		if n, writeErr := file.Write(data); writeErr != nil {
-			err = writeErr
-		} else if n != len(data) {
-			err = io.ErrShortWrite
-		}
-		if err == nil {
-			err = file.Sync()
-		}
-		closeErr := file.Close()
-		if err == nil {
-			err = closeErr
-		}
-		if err == nil {
-			err = syncPulseAuthorityDir(filepath.Dir(path))
-		}
-		if err != nil {
-			return empty, fmt.Errorf("persist pulse authority: %w", err)
-		}
-		return binding, nil
+		return createPulseAuthorityLocked(path, archiveID, original)
 	})
+}
+
+func createPulseAuthorityLocked(path, archiveID, original string) (pulseAuthorityBinding, error) {
+	var empty pulseAuthorityBinding
+	authority, err := randomPulseIdentity()
+	if err != nil {
+		return empty, err
+	}
+	incarnation, err := randomPulseIdentity()
+	if err != nil {
+		return empty, err
+	}
+	binding := pulseAuthorityBinding{Version: 1, ArchiveID: archiveID, AuthorityID: authority, CanonicalOriginal: original, Incarnation: incarnation}
+	data, err := json.Marshal(binding)
+	if err != nil {
+		return empty, err
+	}
+	file, err := safefileio.CreatePrivateFile(path)
+	if err != nil {
+		return empty, fmt.Errorf("create pulse authority: %w", err)
+	}
+	if n, writeErr := file.Write(data); writeErr != nil {
+		err = writeErr
+	} else if n != len(data) {
+		err = io.ErrShortWrite
+	}
+	if err == nil {
+		err = file.Sync()
+	}
+	closeErr := file.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = syncPulseAuthorityDir(filepath.Dir(path))
+	}
+	if err != nil {
+		return empty, fmt.Errorf("persist pulse authority: %w", err)
+	}
+	return binding, nil
 }
 
 // rejoinPulseAuthority never creates the directory, lock or registry entry.
@@ -100,24 +105,33 @@ func rejoinPulseAuthority(ctx context.Context, home, archiveID, authorityID stri
 		return empty, errors.New("missing pulse authority identity")
 	}
 	return withPulseAuthorityLock(ctx, path, false, func() (pulseAuthorityBinding, error) {
-		file, err := safefileio.OpenCurrentUserFile(path)
-		if err != nil {
-			return empty, fmt.Errorf("read pulse authority: %w", err)
+		binding, err := readPulseAuthorityLocked(path, archiveID)
+		if err == nil && binding.AuthorityID != authorityID {
+			return empty, errors.New("invalid pulse authority identity")
 		}
-		defer file.Close()
-		if err := safefileio.ValidatePrivateCurrentUserFile(file); err != nil {
-			return empty, err
-		}
-		data, err := io.ReadAll(io.LimitReader(file, (64<<10)+1))
-		if err != nil || len(data) > 64<<10 {
-			return empty, errors.New("invalid pulse authority state")
-		}
-		var binding pulseAuthorityBinding
-		if json.Unmarshal(data, &binding) != nil || binding.Version != 1 || binding.ArchiveID != archiveID || binding.AuthorityID != authorityID || !validPulseIdentity(binding.AuthorityID) || !validPulseIdentity(binding.Incarnation) || !filepath.IsAbs(binding.CanonicalOriginal) {
-			return empty, errors.New("invalid pulse authority binding")
-		}
-		return binding, nil
+		return binding, err
 	})
+}
+
+func readPulseAuthorityLocked(path, archiveID string) (pulseAuthorityBinding, error) {
+	var empty pulseAuthorityBinding
+	file, err := safefileio.OpenCurrentUserFile(path)
+	if err != nil {
+		return empty, fmt.Errorf("read pulse authority: %w", err)
+	}
+	defer file.Close()
+	if err := safefileio.ValidatePrivateCurrentUserFile(file); err != nil {
+		return empty, err
+	}
+	data, err := io.ReadAll(io.LimitReader(file, (64<<10)+1))
+	if err != nil || len(data) > 64<<10 {
+		return empty, errors.New("invalid pulse authority state")
+	}
+	var binding pulseAuthorityBinding
+	if json.Unmarshal(data, &binding) != nil || binding.Version != 1 || binding.ArchiveID != archiveID || !validPulseIdentity(binding.AuthorityID) || !validPulseIdentity(binding.Incarnation) || !filepath.IsAbs(binding.CanonicalOriginal) {
+		return empty, errors.New("invalid pulse authority binding")
+	}
+	return binding, nil
 }
 
 func randomPulseIdentity() (string, error) {
