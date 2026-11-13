@@ -1546,40 +1546,58 @@ func TestFederationPulseVisitsDayWithOnlyIntervalSpill(t *testing.T) {
 
 // A valid tombstone changes the current export, but cannot erase an already
 // published four-member contribution from the comparison history.
-func TestFederationPulseProtectsPublishedHistoryAfterTombstone(t *testing.T) {
-	d := testDB(t)
-	ctx := t.Context()
-	started := "2026-07-29T09:00:00Z"
-	for i, name := range []string{"a", "b", "c", "d"} {
-		enrollment, spoke, share := "e-"+name, "s-"+name, "h-"+name
-		require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: name, CredentialSHA256: "digest-" + name}))
-		_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
-		require.NoError(t, err)
-		cost := money.Money{Microdollars: int64((i + 1) * 100)}
-		record := FederationHubRecord{UID: name, Hash: "initial", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: name, Project: "example/repo", Agent: "codex", StartedAt: &started}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: (i + 1) * 10, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: started, DedupKey: name}}}}
-		_, err = d.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "initial", []FederationHubRecord{record})
-		require.NoError(t, err)
+func TestFederationPulsePreservesWithdrawalAndRetentionHistory(t *testing.T) {
+	for _, scenario := range []string{"tombstone", "retained-stop"} {
+		t.Run(scenario, func(t *testing.T) {
+			d := testDB(t)
+			ctx := t.Context()
+			started := "2026-07-29T09:00:00Z"
+			retention := "member-controlled"
+			if scenario == "retained-stop" {
+				retention = "org-retained"
+			}
+			for i, name := range []string{"a", "b", "c", "d"} {
+				enrollment, spoke, share := "e-"+name, "s-"+name, "h-"+name
+				require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: name, CredentialSHA256: "digest-" + name}))
+				_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active", Retention: retention})
+				require.NoError(t, err)
+				cost := money.Money{Microdollars: int64((i + 1) * 100)}
+				record := FederationHubRecord{UID: name, Hash: "initial", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: name, Project: "example/repo", Agent: "codex", StartedAt: &started}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: (i + 1) * 10, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: started, DedupKey: name}}}}
+				_, err = d.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "initial", []FederationHubRecord{record})
+				require.NoError(t, err)
+			}
+			now := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
+			first, err := d.readFederationPulse(ctx, "2026-07-29", 3, now)
+			require.NoError(t, err)
+			assert.Equal(t, Ptr(int64(4)), first.Totals["sessions"].Value)
+			assert.Equal(t, Ptr(int64(100)), first.Totals["tokens"].Value)
+			assert.Equal(t, Ptr(int64(1000)), first.Totals["cost_microdollars"].Value)
+			if scenario == "retained-stop" {
+				_, err = d.PutFederationHubShare(ctx, "s-a", FederationHubShare{UID: "h-a", EnrollmentUID: "e-a", Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "stopped", Retention: "org-retained"})
+				require.NoError(t, err)
+				repeated, err := d.readFederationPulse(ctx, "2026-07-29", 3, now)
+				require.NoError(t, err)
+				assert.Equal(t, Ptr(int64(4)), repeated.Totals["sessions"].Value)
+				assert.Equal(t, Ptr(int64(100)), repeated.Totals["tokens"].Value)
+				assert.Equal(t, Ptr(int64(1000)), repeated.Totals["cost_microdollars"].Value)
+				return
+			}
+			_, err = d.CommitFederationBatch(ctx, "e-a", "s-a", "h-a", "policy", 1, 2, "tombstone", []FederationHubRecord{{UID: "a", Tombstone: true}})
+			require.NoError(t, err)
+			day, err := d.ExportReportingDay(ctx, ReportingExportOptions{Date: time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC), Now: now, SchemaVersion: export.ReportingJointSchemaVersion})
+			require.NoError(t, err)
+			assert.EqualValues(t, 90, day.Hours[9].Usage.Totals.InputTokens)
+			assert.EqualValues(t, 900, day.Hours[9].Usage.Totals.Cost.Microdollars)
+			later, err := d.readFederationPulse(ctx, "2026-07-29", 3, now)
+			require.NoError(t, err)
+			assert.True(t, later.Suppressed)
+			assert.Empty(t, later.Projects)
+			assert.Equal(t, "suppressed", later.Totals["sessions"].State)
+			assert.Nil(t, later.Totals["sessions"].Value)
+			assert.Nil(t, later.Totals["tokens"].Value)
+			assert.Nil(t, later.Totals["cost_microdollars"].Value)
+		})
 	}
-	now := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
-	first, err := d.readFederationPulse(ctx, "2026-07-29", 3, now)
-	require.NoError(t, err)
-	assert.Equal(t, Ptr(int64(4)), first.Totals["sessions"].Value)
-	assert.Equal(t, Ptr(int64(100)), first.Totals["tokens"].Value)
-	assert.Equal(t, Ptr(int64(1000)), first.Totals["cost_microdollars"].Value)
-	_, err = d.CommitFederationBatch(ctx, "e-a", "s-a", "h-a", "policy", 1, 2, "tombstone", []FederationHubRecord{{UID: "a", Tombstone: true}})
-	require.NoError(t, err)
-	day, err := d.ExportReportingDay(ctx, ReportingExportOptions{Date: time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC), Now: now, SchemaVersion: export.ReportingJointSchemaVersion})
-	require.NoError(t, err)
-	assert.EqualValues(t, 90, day.Hours[9].Usage.Totals.InputTokens)
-	assert.EqualValues(t, 900, day.Hours[9].Usage.Totals.Cost.Microdollars)
-	later, err := d.readFederationPulse(ctx, "2026-07-29", 3, now)
-	require.NoError(t, err)
-	assert.True(t, later.Suppressed)
-	assert.Empty(t, later.Projects)
-	assert.Equal(t, "suppressed", later.Totals["sessions"].State)
-	assert.Nil(t, later.Totals["sessions"].Value)
-	assert.Nil(t, later.Totals["tokens"].Value)
-	assert.Nil(t, later.Totals["cost_microdollars"].Value)
 }
 
 // Search fees are native message accounting, not federation summary ingress.
