@@ -147,3 +147,30 @@ func TestCanonicalPushScope(t *testing.T) {
 	assert.NotEqual(t, CanonicalPushScope([]string{"a"}, nil), CanonicalPushScope([]string{"a", "b"}, nil))
 	assert.NotEqual(t, CanonicalPushScope([]string{"a"}, nil), CanonicalPushScope(nil, []string{"a"}))
 }
+
+func TestIdentitySelectedByRemotes(t *testing.T) {
+	base := export.ProjectIdentityObservation{
+		RemoteResolution: export.ProjectResolutionResolved,
+		KeySource:        export.ProjectIdentityKeySourceGitRemote,
+		NormalizedRemote: "github.com/org/repo",
+	}
+	cases := []struct {
+		name string
+		item export.ProjectIdentityObservation
+		want bool
+	}{
+		{"selected", base, true},
+		{"ambiguous", export.ProjectIdentityObservation{RemoteResolution: export.ProjectResolutionAmbiguous, KeySource: base.KeySource, NormalizedRemote: base.NormalizedRemote}, false},
+		{"unknown", export.ProjectIdentityObservation{RemoteResolution: export.ProjectResolutionUnknown, KeySource: base.KeySource, NormalizedRemote: base.NormalizedRemote}, false},
+		{"root path", export.ProjectIdentityObservation{RemoteResolution: base.RemoteResolution, KeySource: export.ProjectIdentityKeySourceRootPath, NormalizedRemote: base.NormalizedRemote}, false},
+		{"other remote", export.ProjectIdentityObservation{RemoteResolution: base.RemoteResolution, KeySource: base.KeySource, NormalizedRemote: "github.com/org/other"}, false},
+		{"missing remote", export.ProjectIdentityObservation{RemoteResolution: base.RemoteResolution, KeySource: base.KeySource}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, IdentitySelectedByRemotes(tc.item, []string{"github.com/org/repo"}))
+		})
+	}
+	items := []export.ProjectIdentityObservation{base, cases[1].item, cases[4].item}
+	assert.Equal(t, []export.ProjectIdentityObservation{base}, FilterIdentityByRemotes(items, []string{"github.com/org/repo"}))
+}

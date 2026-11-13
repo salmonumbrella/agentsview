@@ -1218,3 +1218,18 @@ func marshalProjectJSON(t *testing.T, value any) string {
 	require.NoError(t, err)
 	return string(data)
 }
+
+func TestNormalizeProjectRemotes(t *testing.T) {
+	got, err := NormalizeProjectRemotes([]string{
+		"git@github.com:org/repo.git", "https://github.com/org/repo",
+		"github.com/other/repo", "ssh://git@github.com/org/repo",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"github.com/org/repo", "github.com/other/repo"}, got)
+	for _, raw := range []string{"", "/tmp/repo", "file:///tmp/repo", "github.com/org/*", "../repo"} {
+		t.Run(raw, func(t *testing.T) {
+			_, err := NormalizeProjectRemotes([]string{raw})
+			assert.Error(t, err)
+		})
+	}
+}

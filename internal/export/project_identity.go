@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -79,6 +80,27 @@ func NormalizeGitRemote(raw string) (string, bool) {
 		return "", false
 	}
 	return host + "/" + cleaned, true
+}
+
+// NormalizeProjectRemotes validates and canonicalizes a repository push scope.
+func NormalizeProjectRemotes(remotes []string) ([]string, error) {
+	result := make([]string, 0, len(remotes))
+	for _, raw := range remotes {
+		raw = strings.TrimSpace(raw)
+		if raw == "" || strings.ContainsAny(raw, "*?[]\\") || strings.HasPrefix(raw, ".") {
+			return nil, fmt.Errorf("invalid project remote %q", raw)
+		}
+		normalized, ok := NormalizeGitRemote(raw)
+		if !ok && !strings.Contains(raw, ":") && !strings.HasPrefix(raw, "/") {
+			normalized, ok = NormalizeGitRemote("https://" + raw)
+		}
+		if !ok {
+			return nil, fmt.Errorf("invalid project remote %q", raw)
+		}
+		result = append(result, normalized)
+	}
+	sort.Strings(result)
+	return slices.Compact(result), nil
 }
 
 func normalizeGitRemoteHost(host, scheme, port string) string {
