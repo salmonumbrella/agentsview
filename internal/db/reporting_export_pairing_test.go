@@ -22,7 +22,7 @@ func TestJointReportingUsageSupportFollowsPricedSurvivors(t *testing.T) {
 	rows := []activity.UsageRow{
 		{SessionID: "one", SourceSessionID: "one", Timestamp: "2026-07-28T09:05:00Z", Agent: "codex", Model: "m", InputTokens: 10, Priced: true, Cost: money.Money{Microdollars: 4}},
 		{SessionID: "two", SourceSessionID: "two", Timestamp: "2026-07-28T09:10:00Z", Agent: "codex", Model: "m", InputTokens: 20, Priced: true, Cost: money.Money{Microdollars: 6}},
-		{SessionID: "three", SourceSessionID: "three", Timestamp: "2026-07-28T09:15:00Z", Agent: "codex", Model: "m", InputTokens: 30},
+		{SessionID: "one", SourceSessionID: "three", Timestamp: "2026-07-28T09:15:00Z", Agent: "codex", Model: "m", InputTokens: 30},
 	}
 	sessions := map[string]activity.SessionMeta{
 		"one":   {SessionID: "one", Project: "fixture", Agent: "codex"},
@@ -39,12 +39,15 @@ func TestJointReportingUsageSupportFollowsPricedSurvivors(t *testing.T) {
 	require.Len(t, sidecar, 1)
 	for _, contributors := range sidecar {
 		require.Len(t, contributors, 3)
-		assert.EqualValues(t, 10, contributors["one"].usage.inputTokens)
-		assert.EqualValues(t, 20, contributors["two"].usage.inputTokens)
-		assert.EqualValues(t, 30, contributors["three"].usage.inputTokens)
-		assert.True(t, contributors["one"].costObserved)
-		assert.True(t, contributors["two"].costObserved)
-		assert.False(t, contributors["three"].costObserved)
+		require.Contains(t, contributors, reportingJointContributor{"one", "one"})
+		require.Contains(t, contributors, reportingJointContributor{"two", "two"})
+		require.Contains(t, contributors, reportingJointContributor{"three", "one"})
+		assert.EqualValues(t, 10, contributors[reportingJointContributor{"one", "one"}].usage.inputTokens)
+		assert.EqualValues(t, 20, contributors[reportingJointContributor{"two", "two"}].usage.inputTokens)
+		assert.EqualValues(t, 30, contributors[reportingJointContributor{"three", "one"}].usage.inputTokens)
+		assert.True(t, contributors[reportingJointContributor{"one", "one"}].costObserved)
+		assert.True(t, contributors[reportingJointContributor{"two", "two"}].costObserved)
+		assert.False(t, contributors[reportingJointContributor{"three", "one"}].costObserved)
 	}
 }
 

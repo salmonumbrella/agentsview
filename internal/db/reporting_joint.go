@@ -61,7 +61,8 @@ type reportingCellState struct {
 
 // reportingJointSupport stays private to the snapshot. It follows the same
 // surviving, priced and allocated rows used to build each joint cell.
-type reportingJointSupport map[reportingCellKey]map[string]*reportingJointContribution
+type reportingJointContributor struct{ source, attributed string }
+type reportingJointSupport map[reportingCellKey]map[reportingJointContributor]*reportingJointContribution
 
 type reportingJointContribution struct {
 	usage        reportingUsageAccum
@@ -139,18 +140,18 @@ func jointReportingHour(
 			if key.model == "" {
 				key.model = "unknown"
 			}
-			id := row.SourceSessionID
-			if id == "" {
-				id = row.SessionID
+			contributor := reportingJointContributor{source: row.SourceSessionID, attributed: row.SessionID}
+			if contributor.source == "" {
+				contributor.source = row.SessionID
 			}
 			cells := *support[0]
 			if cells[key] == nil {
-				cells[key] = map[string]*reportingJointContribution{}
+				cells[key] = map[reportingJointContributor]*reportingJointContribution{}
 			}
-			if cells[key][id] == nil {
-				cells[key][id] = &reportingJointContribution{}
+			if cells[key][contributor] == nil {
+				cells[key][contributor] = &reportingJointContribution{}
 			}
-			contribution := cells[key][id]
+			contribution := cells[key][contributor]
 			if err := contribution.usage.add(row); err != nil {
 				return nil, fmt.Errorf("sum joint contributor usage: %w", err)
 			}

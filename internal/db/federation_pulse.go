@@ -272,13 +272,14 @@ type federationPulseCell struct {
 	sessions map[string]struct{}
 }
 type federationPulseAccumulator struct {
-	owners   map[string]federationPulseOwner
-	projects map[string]map[federationPulseCellKey]*federationPulseCell
-	invalid  bool
+	owners         map[string]federationPulseOwner
+	projects       map[string]map[federationPulseCellKey]*federationPulseCell
+	unsafeProjects map[string]bool
+	invalid        bool
 }
 
 func newFederationPulseAccumulator(owners map[string]federationPulseOwner) *federationPulseAccumulator {
-	return &federationPulseAccumulator{owners: owners, projects: map[string]map[federationPulseCellKey]*federationPulseCell{}}
+	return &federationPulseAccumulator{owners: owners, projects: map[string]map[federationPulseCellKey]*federationPulseCell{}, unsafeProjects: map[string]bool{}}
 }
 
 func (a *federationPulseAccumulator) add(id, kind, key, metric string, value int64) {
@@ -383,6 +384,10 @@ func (a *federationPulseAccumulator) release(minimum int) FederationPulse {
 		}
 	}
 	hidden, suppressGlobal := federationPulseSuppression(support, a.owners, minimum)
+	for project := range a.unsafeProjects {
+		hidden[project] = true
+		suppressGlobal = true
+	}
 	suppressGlobal = suppressGlobal || a.invalid
 	global := map[federationPulseCellKey]*federationPulseCell{}
 	projects := make([]FederationPulseProject, 0, len(a.projects))
@@ -502,9 +507,17 @@ func (db *DB) readFederationPulse(ctx context.Context, since string, minimum int
 				return err
 			}
 			for key, contributors := range support {
-				for id, contribution := range contributors {
-					if _, ok := owners[id]; !ok {
+				for identity, contribution := range contributors {
+					id := identity.source
+					origin, ok := owners[id]
+					attributed, attributedOK := owners[identity.attributed]
+					if !ok || !attributedOK {
 						accumulator.invalid = true
+						continue
+					}
+					if origin != attributed {
+						accumulator.unsafeProjects[origin.project] = true
+						accumulator.unsafeProjects[attributed.project] = true
 						continue
 					}
 					usageSeen[id] = true
