@@ -1547,7 +1547,7 @@ func TestFederationPulseVisitsDayWithOnlyIntervalSpill(t *testing.T) {
 // A valid tombstone changes the current export, but cannot erase an already
 // published four-member contribution from the comparison history.
 func TestFederationPulsePreservesWithdrawalAndRetentionHistory(t *testing.T) {
-	for _, scenario := range []string{"tombstone", "retained-stop"} {
+	for _, scenario := range []string{"tombstone", "revoke", "retained-stop"} {
 		t.Run(scenario, func(t *testing.T) {
 			d := testDB(t)
 			ctx := t.Context()
@@ -1582,7 +1582,11 @@ func TestFederationPulsePreservesWithdrawalAndRetentionHistory(t *testing.T) {
 				assert.Equal(t, Ptr(int64(1000)), repeated.Totals["cost_microdollars"].Value)
 				return
 			}
-			_, err = d.CommitFederationBatch(ctx, "e-a", "s-a", "h-a", "policy", 1, 2, "tombstone", []FederationHubRecord{{UID: "a", Tombstone: true}})
+			if scenario == "revoke" {
+				_, err = d.RevokeFederationEnrollment(ctx, "e-a")
+			} else {
+				_, err = d.CommitFederationBatch(ctx, "e-a", "s-a", "h-a", "policy", 1, 2, "tombstone", []FederationHubRecord{{UID: "a", Tombstone: true}})
+			}
 			require.NoError(t, err)
 			day, err := d.ExportReportingDay(ctx, ReportingExportOptions{Date: time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC), Now: now, SchemaVersion: export.ReportingJointSchemaVersion})
 			require.NoError(t, err)
