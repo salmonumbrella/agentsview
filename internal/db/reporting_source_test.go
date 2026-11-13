@@ -336,3 +336,83 @@ func seedReportingLongRangeFixture(t *testing.T, d *DB) {
 		{Source: "long-source", Model: "long-model", OccurredAt: "2026-07-30T12:00:00Z", DedupKey: "second"},
 	}))
 }
+
+func TestReportingSourceScopesSessionsBeforeAccounting(t *testing.T) {
+	d := testDB(t)
+	for _, id := range []string{"owned", "unowned"} {
+		insertSession(t, d, id, "fixture-project", func(s *Session) {
+			s.Agent = "claude"
+			s.StartedAt = Ptr("2026-07-28T10:00:00Z")
+			s.EndedAt = Ptr("2026-07-28T10:02:00Z")
+		})
+		seedMessage(t, d, id, 1, "user", "2026-07-28T10:00:00Z", "")
+		seedMessage(t, d, id, 2, "assistant", "2026-07-28T10:02:00Z", "opus")
+	}
+	tx, err := d.getReader().BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	start := time.Date(2026, 7, 28, 0, 0, 0, 0, time.UTC)
+	end := start.Add(24 * time.Hour)
+	for _, tc := range []struct {
+		name  string
+		scope map[string]struct{}
+		want  []string
+	}{
+		{name: "ordinary export", want: []string{"owned", "unowned"}},
+		{name: "owned only", scope: map[string]struct{}{"owned": {}}, want: []string{"owned"}},
+		{name: "empty scope", scope: map[string]struct{}{}, want: []string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source, err := d.loadReportingExportSourceScoped(t.Context(), tx, start, end, export.ReportingSchemaVersion, tc.scope)
+			require.NoError(t, err)
+			ids := make([]string, 0, len(source.activitySessions))
+			for _, session := range source.activitySessions {
+				ids = append(ids, session.meta.SessionID)
+			}
+			assert.ElementsMatch(t, tc.want, ids)
+			for _, event := range source.activityEvents {
+				assert.Contains(t, tc.want, event.SessionID)
+			}
+			for _, session := range source.usageSessions {
+				assert.Contains(t, tc.want, session.SessionID)
+			}
+			if tc.scope != nil {
+				assert.Empty(t, source.standaloneUsage)
+			}
+		})
+	}
+}
+
+func TestReportingRangeScopeExcludesUnownedDates(t *testing.T) {
+	d := testDB(t)
+	for _, item := range []struct{ id, started string }{
+		{"unowned", "2026-07-01T10:00:00Z"},
+		{"owned", "2026-07-28T10:00:00Z"},
+	} {
+		insertSession(t, d, item.id, "fixture-project", func(s *Session) {
+			s.Agent = "claude"
+			s.StartedAt = &item.started
+		})
+		seedMessage(t, d, item.id, 1, "user", item.started, "")
+	}
+	tx, err := d.getReader().BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name  string
+		scope map[string]struct{}
+		want  *string
+	}{
+		{name: "ordinary", want: Ptr("2026-07-01")},
+		{name: "owned", scope: map[string]struct{}{"owned": {}}, want: Ptr("2026-07-28")},
+		{name: "empty", scope: map[string]struct{}{}, want: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := reportingRangeFrom(t.Context(), tx, now, tc.scope)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got.EarliestDate)
+			assert.Equal(t, "2026-08-01T12:00:00Z", got.ClosedThrough)
+		})
+	}
+}

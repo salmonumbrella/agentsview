@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -19,6 +20,10 @@ type ReportingRange struct {
 // closed-hour cutoff. It reads timestamp metadata in one SQLite statement;
 // discovery does not aggregate bodies, deduplicate usage, or promise completeness.
 func (db *DB) ExportReportingRange(ctx context.Context, now time.Time) (ReportingRange, error) {
+	return reportingRangeFrom(ctx, db.getReader(), now, nil)
+}
+
+func reportingRangeFrom(ctx context.Context, reader sessionExportQuerier, now time.Time, scope map[string]struct{}) (ReportingRange, error) {
 	if now.IsZero() {
 		now = time.Now()
 	}
@@ -30,7 +35,6 @@ func (db *DB) ExportReportingRange(ctx context.Context, now time.Time) (Reportin
 	// ponytail: scan timestamp metadata; index normalized bounds if discovery
 	// becomes a measured bottleneck on large archives.
 	activityWhere, _ := (AnalyticsFilter{IncludeSubagents: true, IncludeForks: true}).buildWhereWithDate("", false, "s.id")
-	reader := db.getReader()
 	var hasCursorUsage bool
 	err := reader.QueryRowContext(ctx, `SELECT EXISTS(
 		SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cursor_usage_events'
@@ -39,35 +43,49 @@ func (db *DB) ExportReportingRange(ctx context.Context, now time.Time) (Reportin
 		return ReportingRange{}, fmt.Errorf("checking standalone reporting usage table: %w", err)
 	}
 	standaloneUsage := ""
-	if hasCursorUsage {
+	if hasCursorUsage && scope == nil {
 		standaloneUsage = `UNION ALL
 			SELECT agentsview_timestamp_unix_micro(occurred_at)
 			FROM cursor_usage_events`
+	}
+	var args []any
+	scopeWhere := ""
+	if scope != nil {
+		ids := make([]string, 0, len(scope))
+		for id := range scope {
+			ids = append(ids, id)
+		}
+		encoded, err := json.Marshal(ids)
+		if err != nil {
+			return ReportingRange{}, fmt.Errorf("encode reporting scope: %w", err)
+		}
+		args = append(args, string(encoded))
+		scopeWhere = " AND s.id IN (SELECT value FROM json_each(?1))"
 	}
 	err = reader.QueryRowContext(ctx, `
 		WITH timestamps(ts) AS (
 			SELECT COALESCE(agentsview_timestamp_unix_micro(COALESCE(s.started_at, '')),
 				agentsview_timestamp_unix_micro(s.created_at))
-			FROM sessions s WHERE `+activityWhere+`
+			FROM sessions s WHERE (`+activityWhere+`)`+scopeWhere+`
 			UNION ALL
 			SELECT agentsview_timestamp_unix_micro(COALESCE(
 				NULLIF(m.timestamp, ''), NULLIF(s.started_at, ''), s.created_at))
 			FROM messages m JOIN sessions s ON s.id = m.session_id
-			WHERE (`+activityWhere+`) OR (`+usageMessageEligibility+`)
+			WHERE ((`+activityWhere+`) OR (`+usageMessageEligibility+`))`+scopeWhere+`
 			UNION ALL
 			SELECT agentsview_timestamp_unix_micro(COALESCE(
 				NULLIF(ue.occurred_at, ''), NULLIF(s.started_at, ''), s.created_at))
 			FROM usage_events ue JOIN sessions s ON s.id = ue.session_id
-			WHERE `+usageEventEligibility+`
+			WHERE (`+usageEventEligibility+`)`+scopeWhere+`
 			UNION ALL
 			SELECT agentsview_timestamp_unix_micro(COALESCE(
 				NULLIF(tre.timestamp, ''), NULLIF(s.started_at, ''), s.created_at))
 			FROM tool_result_events tre JOIN sessions s ON s.id = tre.session_id
 			WHERE `+activityWhere+` AND tre.source = 'tool_execution'
-				AND tre.status IN ('completed', 'errored')
+				AND tre.status IN ('completed', 'errored')`+scopeWhere+`
 			`+standaloneUsage+`
 		)
-		SELECT MIN(ts) FROM timestamps`).Scan(&earliest)
+		SELECT MIN(ts) FROM timestamps`, args...).Scan(&earliest)
 	if err != nil {
 		return ReportingRange{}, fmt.Errorf("query reporting range: %w", err)
 	}

@@ -63,6 +63,14 @@ func (db *DB) loadReportingExportSource(
 	start, end time.Time,
 	schemaVersion int,
 ) (reportingExportSource, error) {
+	return db.loadReportingExportSourceScoped(ctx, tx, start, end, schemaVersion, nil)
+}
+
+// A non-nil scope limits every candidate before survivor selection and allocation.
+func (db *DB) loadReportingExportSourceScoped(
+	ctx context.Context, tx *sql.Tx, start, end time.Time, schemaVersion int,
+	scope map[string]struct{},
+) (reportingExportSource, error) {
 	source := reportingExportSource{
 		activityEvents:  []activity.ActivityEvent{},
 		usageSessions:   []activity.SessionMeta{},
@@ -99,6 +107,7 @@ func (db *DB) loadReportingExportSource(
 	if err != nil {
 		return source, err
 	}
+	sessions, activityIDs = scopeReportingSessions(sessions, scope)
 	events, err := db.activityReportActivityFrom(ctx, tx, activityIDs)
 	if err != nil {
 		return source, err
@@ -122,17 +131,19 @@ func (db *DB) loadReportingExportSource(
 	if err != nil {
 		return source, err
 	}
+	usageSessions, usageIDs = scopeReportingSessions(usageSessions, scope)
 	usageCandidates, pricing, err := db.loadReportingUsageCandidates(
 		ctx, tx, usageIDs, lowerBound, upperBound,
 	)
 	if err != nil {
 		return source, err
 	}
-	standaloneUsage, err := db.reportingStandaloneUsageCandidatesFrom(
-		ctx, tx, query,
-	)
-	if err != nil {
-		return source, err
+	var standaloneUsage []activity.UsageRow
+	if scope == nil {
+		standaloneUsage, err = db.reportingStandaloneUsageCandidatesFrom(ctx, tx, query)
+		if err != nil {
+			return source, err
+		}
 	}
 
 	maxMessageTimestamp := make(map[string]string, len(activityIDs))
@@ -209,6 +220,22 @@ func (db *DB) loadReportingExportSource(
 		PaddedUsageRows:     len(usageCandidates) + len(standaloneUsage),
 	}
 	return source, nil
+}
+
+// nil means the ordinary unscoped export; an empty non-nil scope selects nothing.
+func scopeReportingSessions(sessions []activity.SessionMeta, scope map[string]struct{}) ([]activity.SessionMeta, []string) {
+	selected := make([]activity.SessionMeta, 0, len(sessions))
+	ids := make([]string, 0, len(sessions))
+	for _, session := range sessions {
+		if scope != nil {
+			if _, ok := scope[session.SessionID]; !ok {
+				continue
+			}
+		}
+		selected = append(selected, session)
+		ids = append(ids, session.SessionID)
+	}
+	return selected, ids
 }
 
 func (src reportingExportSource) forDate(
