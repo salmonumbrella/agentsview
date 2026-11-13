@@ -105,6 +105,9 @@ func TestShareConfirmationPostsOnlyOnYes(t *testing.T) {
 			var out bytes.Buffer
 			require.NoError(t, addFederationShare(t.Context(), daemon.URL, "", federation.ShareGrant{}, strings.NewReader(tc.input), &out))
 			assert.Equal(t, tc.posts, posts)
+			if tc.posts == 0 {
+				assert.Contains(t, out.String(), "Aborted; no share was created.")
+			}
 		})
 	}
 }
@@ -151,4 +154,15 @@ func TestFederationDryRunReturnsDaemonMessage(t *testing.T) {
 	t.Cleanup(daemon.Close)
 	var out bytes.Buffer
 	assert.ErrorContains(t, streamFederationDryRun(t.Context(), daemon.URL, "", &out), "hub policy unavailable")
+}
+
+func TestShareListSeparatesSuggestionsFromJSON(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	shares := federation.ShareList{Shares: []db.FederationShare{{UID: "share-a"}}, Suggestions: []string{"github.com/example/api"}}
+	require.NoError(t, printFederationShares(&stdout, &stderr, shares))
+	var listed []db.FederationShare
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &listed))
+	require.Len(t, listed, 1)
+	assert.Equal(t, "share-a", listed[0].UID)
+	assert.Equal(t, "Suggested: federation share add --project github.com/example/api --level summary\n", stderr.String())
 }

@@ -296,3 +296,27 @@ func TestFederationExclusionRequiresExistingSession(t *testing.T) {
 	require.NoError(t, d.Reader().QueryRow(ctx, `SELECT count(*) FROM pragma_table_info('federation_exclusions') WHERE name='share_uid'`).Scan(&count))
 	assert.Zero(t, count)
 }
+
+func TestFederationShareReconsentPreservesManualPause(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	share := FederationShare{UID: "share-a", LinkUID: "link-a", NormalizedRemote: "github.com/example/api", Level: "summary", Attribution: "pooled", Audience: "operators", State: "paused", ConsentJSON: `{}`, PolicyDigest: "old"}
+	require.NoError(t, d.PutFederationShare(ctx, share))
+	next := share
+	next.State, next.ConsentJSON = "active", `{"shown":2}`
+	require.ErrorIs(t, d.PutFederationShare(ctx, next), ErrFederationShareExists)
+	next.PolicyDigest = "new"
+	require.NoError(t, d.PutFederationShare(ctx, next))
+	got, err := d.GetFederationShare(ctx, "link-a", "share-a")
+	require.NoError(t, err)
+	assert.Equal(t, "paused", got.State)
+	assert.Equal(t, "new", got.PolicyDigest)
+	assert.Equal(t, `{"shown":2}`, got.ConsentJSON)
+	require.NoError(t, d.SetFederationShareState(ctx, "link-a", "share-a", "paused", "active"))
+	require.NoError(t, d.PauseFederationSharesForPolicy(ctx, "link-a", "later"))
+	next.PolicyDigest = "later"
+	require.NoError(t, d.PutFederationShare(ctx, next))
+	got, err = d.GetFederationShare(ctx, "link-a", "share-a")
+	require.NoError(t, err)
+	assert.Equal(t, "active", got.State)
+}

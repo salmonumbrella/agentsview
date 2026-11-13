@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+
+	"go.kenn.io/agentsview/internal/export"
 )
 
 // FederationSelection is a single archive snapshot, selected by each session's
@@ -17,8 +19,8 @@ type FederationSelection struct {
 	Outcomes    map[string]string
 	Health      map[string]*string
 	NotLocal    int
-	// NotIdentifiable counts sessions without repository identity anywhere in the
-	// archive and sessions whose identity for this repository is ambiguous.
+	// NotIdentifiable counts ambiguous identities for this repository in both paths.
+	// SelectFederationSessions also counts sessions without identity in the archive.
 	NotIdentifiable int
 	Excluded        int
 }
@@ -33,6 +35,11 @@ func (db *DB) SelectFederationSessions(ctx context.Context, remote, since string
 	if err != nil {
 		return out, err
 	}
+	var withoutIdentity int
+	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM sessions s WHERE s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM session_project_identity_snapshots i WHERE i.session_id=s.id)`).Scan(&withoutIdentity); err != nil {
+		return out, err
+	}
+	out.NotIdentifiable += withoutIdentity
 	err = QueryChunkedSize(out.IDs, maxSQLVars, func(ids []string) error {
 		placeholders, args := InPlaceholders(ids)
 		found, e := db.querySessionExportRowsFrom(ctx, tx, "sessions.id IN "+placeholders, args, 1e12, sessionExportCursorPayload{}, len(ids), sessionExportActivitySource{})
@@ -74,15 +81,8 @@ func (db *DB) SelectFederationSessionIDs(ctx context.Context, remote, since stri
 
 func (db *DB) selectFederationSessionIDs(ctx context.Context, tx *sql.Tx, remote, since string) (FederationSelection, error) {
 	out := FederationSelection{IDs: []string{}, ProjectKeys: map[string]string{}, ToolCounts: map[string]int{}, Outcomes: map[string]string{}, Health: map[string]*string{}}
-	ids, err := sessionIDsForProjectRemotes(ctx, tx, []string{remote})
-	if err != nil {
-		return out, err
-	}
-	selectedIDs := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		selectedIDs[id] = true
-	}
-	rows, err := tx.QueryContext(ctx, `SELECT s.id, snap.key,
+	remotes := []string{remote}
+	rows, err := tx.QueryContext(ctx, `SELECT s.id, snap.key, snap.remote_resolution, snap.key_source, snap.normalized_remote, snap.remote_candidate_count,
   (s.machine NOT IN ('', 'local') AND s.machine = COALESCE((SELECT value FROM pg_sync_state WHERE key='artifact_local_installation_id'),'')
    AND EXISTS (SELECT 1 FROM local_session_source_baselines b WHERE b.session_id=s.id AND b.machine=s.machine AND b.agent=s.agent AND b.file_path=s.file_path)
    AND NOT EXISTS (SELECT 1 FROM archive_session_provenance p WHERE p.session_id=s.id)
@@ -97,18 +97,20 @@ func (db *DB) selectFederationSessionIDs(ctx context.Context, tx *sql.Tx, remote
 	}
 	for rows.Next() {
 		var id, key, outcome string
+		var obs export.ProjectIdentityObservation
 		var local, excluded bool
 		var inRange sql.NullBool
 		var tools int
 		var health sql.NullString
-		if err = rows.Scan(&id, &key, &local, &excluded, &inRange, &tools, &outcome, &health); err != nil {
+		if err = rows.Scan(&id, &key, &obs.RemoteResolution, &obs.KeySource, &obs.NormalizedRemote, &obs.RemoteCandidateCount, &local, &excluded, &inRange, &tools, &outcome, &health); err != nil {
 			rows.Close()
 			return out, err
 		}
 		if !inRange.Valid || !inRange.Bool {
 			continue
 		}
-		if !selectedIDs[id] {
+		obs.SessionID = id
+		if !IdentitySelectedByRemotes(obs, remotes) {
 			out.NotIdentifiable++
 			continue
 		}
@@ -133,11 +135,6 @@ func (db *DB) selectFederationSessionIDs(ctx context.Context, tx *sql.Tx, remote
 	if err = rows.Close(); err != nil {
 		return out, err
 	}
-	var withoutIdentity int
-	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM sessions s WHERE s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM session_project_identity_snapshots i WHERE i.session_id=s.id)`).Scan(&withoutIdentity); err != nil {
-		return out, err
-	}
-	out.NotIdentifiable += withoutIdentity
 	return out, nil
 }
 

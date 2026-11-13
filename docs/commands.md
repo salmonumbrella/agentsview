@@ -2923,18 +2923,23 @@ placeholders rather than extracted text.
 
 A spoke member can preview a repository share with `agentsview federation share
 add --project github.com/example/api --level summary`. The command shows the
-counts, size, and terms, then asks for confirmation. Add `--since YYYY-MM-DD`
+counts, the size of the selected records as one JSON array
+(`records_array_bytes`, not the length of the `push --dry-run` output), and the
+full hub policy, then asks for confirmation. Declining creates nothing. Add `--since YYYY-MM-DD`
 to select sessions starting at or after midnight UTC on that date, or
 `--attribution member` to request member attribution in a later release. The
 default is pooled attribution. The audience is operators, and anyone holding
 the hub bearer token can read stored records.
 
 Use `federation share list`, `show`, `pause`, `resume`, or `remove` to manage
-shares. A changed hub policy pauses affected shares; run `share add` again to
-review and accept it. Resume works without the hub; add and push dry-run need a
-live hub policy. A share can be removed with no records sent.
-`federation exclude <session-id> [--reason text]` keeps a session out of all
-shares in this archive, including after removal or rejoining.
+shares. `share list` omits the stored preview and prints suggested projects on
+standard error; `share show` prints the stored preview. A changed hub policy
+pauses active shares. A share you paused stays paused; run `share add` again to
+replace its consent and `resume` to activate it. Resume works without the hub;
+add and push dry-run need a live hub policy. A share can be removed with no
+records sent. `federation exclude <session-id> [--reason text]` works before or
+after joining and keeps a session out of all shares in this archive, including
+after removal or rejoining.
 `federation push --dry-run` prints the selected summaries locally. This release
 records consent only and sends no session records.
 

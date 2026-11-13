@@ -20,8 +20,12 @@ import (
 	"go.kenn.io/agentsview/internal/requestsign"
 )
 
-func federationRequest(ctx context.Context, base, token, method, path string, body any, out any) error {
-	resp, err := federationResponse(ctx, base, token, method, path, body)
+func federationRequest(ctx context.Context, base, token, method, path string, body any, out any, timeout ...time.Duration) error {
+	duration := 30 * time.Second
+	if len(timeout) > 0 {
+		duration = timeout[0]
+	}
+	resp, err := federationResponse(ctx, base, token, method, path, body, duration)
 	if err != nil {
 		return err
 	}
@@ -32,7 +36,7 @@ func federationRequest(ctx context.Context, base, token, method, path string, bo
 	return nil
 }
 
-func federationResponse(ctx context.Context, base, token, method, path string, body any) (*http.Response, error) {
+func federationResponse(ctx context.Context, base, token, method, path string, body any, timeout time.Duration) (*http.Response, error) {
 	var input io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -52,7 +56,7 @@ func federationResponse(ctx context.Context, base, token, method, path string, b
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	client, err := requestsign.ClientFromEnvironment(base, &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }})
+	client, err := requestsign.ClientFromEnvironment(base, &http.Client{Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }})
 	if err != nil {
 		return nil, err
 	}
@@ -212,7 +216,7 @@ func newFederationCommand() *cobra.Command {
 
 func addFederationShare(ctx context.Context, base, token string, grant federation.ShareGrant, in io.Reader, out io.Writer) error {
 	var preview federation.SharePreview
-	if err := federationRequest(ctx, base, token, http.MethodPost, "/api/v1/federation/shares/preview", grant, &preview); err != nil {
+	if err := federationRequest(ctx, base, token, http.MethodPost, "/api/v1/federation/shares/preview", grant, &preview, 0); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(preview, "", "  ")
@@ -223,18 +227,30 @@ func addFederationShare(ctx context.Context, base, token string, grant federatio
 		return err
 	}
 	if !confirm(in, out, "Create this share?") {
-		return nil
+		_, err = fmt.Fprintln(out, "Aborted; no share was created.")
+		return err
 	}
 	return federationRequest(ctx, base, token, http.MethodPost, "/api/v1/federation/shares", preview, nil)
 }
 func streamFederationDryRun(ctx context.Context, base, token string, out io.Writer) error {
-	resp, err := federationResponse(ctx, base, token, http.MethodGet, "/api/v1/federation/dry-run", nil)
+	resp, err := federationResponse(ctx, base, token, http.MethodGet, "/api/v1/federation/dry-run", nil, 0)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	_, err = io.Copy(out, resp.Body)
 	return err
+}
+func printFederationShares(out, diagnostic io.Writer, shares federation.ShareList) error {
+	if err := json.NewEncoder(out).Encode(shares.Shares); err != nil {
+		return err
+	}
+	for _, remote := range shares.Suggestions {
+		if _, err := fmt.Fprintf(diagnostic, "Suggested: federation share add --project %s --level summary\n", remote); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func newFederationShareCommand() *cobra.Command {
 	root := &cobra.Command{Use: "share", Short: "Manage repository shares"}
@@ -262,13 +278,7 @@ func newFederationShareCommand() *cobra.Command {
 		if err = federationRequest(cmd.Context(), tr.URL, cfg.AuthToken, http.MethodGet, "/api/v1/federation/shares", nil, &shares); err != nil {
 			return err
 		}
-		if err = json.NewEncoder(cmd.OutOrStdout()).Encode(shares.Shares); err != nil {
-			return err
-		}
-		for _, remote := range shares.Suggestions {
-			fmt.Fprintf(cmd.OutOrStdout(), "Suggested: federation share add --project %s --level summary\n", remote)
-		}
-		return nil
+		return printFederationShares(cmd.OutOrStdout(), cmd.ErrOrStderr(), shares)
 	}}
 	root.AddCommand(list)
 	for _, action := range []string{"show", "pause", "resume", "remove"} {

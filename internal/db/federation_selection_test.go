@@ -87,6 +87,12 @@ func TestFederationSelectionRequiresOwnSnapshotAndLocalProof(t *testing.T) {
 	assert.Equal(t, 5, result.NotLocal)
 	assert.Equal(t, 1, result.Excluded)
 	assert.Equal(t, 3, result.NotIdentifiable)
+	idsOnly, err := database.SelectFederationSessionIDs(ctx, "github.com/example/api", "2026-01-02")
+	require.NoError(t, err)
+	assert.Equal(t, result.IDs, idsOnly.IDs)
+	assert.Equal(t, result.NotLocal, idsOnly.NotLocal)
+	assert.Equal(t, result.Excluded, idsOnly.Excluded)
+	assert.Equal(t, 2, idsOnly.NotIdentifiable)
 	assert.Equal(t, 1, result.ToolCounts["selected"])
 	for _, row := range result.Rows {
 		if row.ID == "selected" {

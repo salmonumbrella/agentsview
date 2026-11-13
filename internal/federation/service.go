@@ -274,7 +274,7 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 		return out, nil
 	}
 	for _, share := range shares {
-		if share.State != "policy_paused" && share.PolicyDigest != h.PolicyDigest {
+		if share.State == "active" && share.PolicyDigest != h.PolicyDigest {
 			if err := s.db.PauseFederationSharesForPolicy(ctx, link.UID, h.PolicyDigest); err != nil {
 				return out, err
 			}

@@ -2,6 +2,7 @@ package federation
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"path"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/money"
@@ -57,18 +59,19 @@ type SummaryUsage struct {
 	HasCost                  bool        `json:"has_cost"`
 }
 type SharePreview struct {
-	Grant             ShareGrant      `json:"grant"`
-	PolicyDigest      string          `json:"policy_digest"`
-	Retention         string          `json:"retention"`
-	Processing        string          `json:"processing"`
-	Audience          string          `json:"audience"`
-	Includes          string          `json:"includes"`
-	Omits             string          `json:"omits"`
-	Disclosure        string          `json:"disclosure"`
-	AttributionNotice string          `json:"attribution_notice"`
-	DeliveryNotice    string          `json:"delivery_notice"`
-	Selected          int             `json:"selected"`
-	Bytes             int             `json:"bytes"`
+	Grant             ShareGrant                 `json:"grant"`
+	PolicyDigest      string                     `json:"policy_digest"`
+	Policy            config.FederationHubConfig `json:"policy"`
+	Audience          string                     `json:"audience"`
+	Includes          string                     `json:"includes"`
+	Omits             string                     `json:"omits"`
+	Disclosure        string                     `json:"disclosure"`
+	AttributionNotice string                     `json:"attribution_notice"`
+	DeliveryNotice    string                     `json:"delivery_notice"`
+	Selected          int                        `json:"selected"`
+	// RecordsArrayBytes is the size of selected summaries as one canonical JSON array.
+	// The push --dry-run output has one JSON object per line and has a different size.
+	RecordsArrayBytes int             `json:"records_array_bytes"`
 	NotLocal          int             `json:"not_provably_local"`
 	NotIdentifiable   int             `json:"not_identifiable"`
 	Excluded          int             `json:"excluded"`
@@ -137,7 +140,7 @@ func (s *Service) previewWithPolicy(ctx context.Context, g ShareGrant, hub *HubS
 	if err != nil {
 		return p, err
 	}
-	p = SharePreview{Grant: g, PolicyDigest: hub.PolicyDigest, Retention: hub.Policy.Retention, Processing: hub.Policy.Processing, Audience: "operators", Includes: shareIncludes, Omits: shareOmits, Disclosure: shareDisclosure, AttributionNotice: shareAttributionNotice, DeliveryNotice: shareDeliveryNotice, Selected: len(selected.IDs), NotLocal: selected.NotLocal, NotIdentifiable: selected.NotIdentifiable, Excluded: selected.Excluded, Records: []SummaryRecord{}}
+	p = SharePreview{Grant: g, PolicyDigest: hub.PolicyDigest, Policy: *hub.Policy, Audience: "operators", Includes: shareIncludes, Omits: shareOmits, Disclosure: shareDisclosure, AttributionNotice: shareAttributionNotice, DeliveryNotice: shareDeliveryNotice, Selected: len(selected.IDs), NotLocal: selected.NotLocal, NotIdentifiable: selected.NotIdentifiable, Excluded: selected.Excluded, Records: []SummaryRecord{}}
 	agents, models := map[string]bool{}, map[string]bool{}
 	selectedIDs := make(map[string]bool, len(selected.IDs))
 	for _, id := range selected.IDs {
@@ -182,7 +185,7 @@ func (s *Service) previewWithPolicy(ctx context.Context, g ShareGrant, hub *HubS
 	if err != nil {
 		return p, err
 	}
-	p.Bytes = len(data)
+	p.RecordsArrayBytes = len(data)
 	return p, nil
 }
 func previewBoundary(current, candidate *string, earliest bool) *string {
@@ -211,7 +214,8 @@ func (s *Service) AddShare(ctx context.Context, p SharePreview) error {
 	if err != nil {
 		return err
 	}
-	if g != p.Grant || p.PolicyDigest != hub.PolicyDigest || p.Audience != "operators" || p.Retention != hub.Policy.Retention || p.Processing != hub.Policy.Processing || p.Includes != shareIncludes || p.Omits != shareOmits || p.Disclosure != shareDisclosure || p.AttributionNotice != shareAttributionNotice || p.DeliveryNotice != shareDeliveryNotice {
+	policyDigest, err := export.DigestCanonical(p.Policy)
+	if err != nil || g != p.Grant || policyDigest != hub.PolicyDigest || p.PolicyDigest != hub.PolicyDigest || p.Audience != "operators" || p.Includes != shareIncludes || p.Omits != shareOmits || p.Disclosure != shareDisclosure || p.AttributionNotice != shareAttributionNotice || p.DeliveryNotice != shareDeliveryNotice {
 		return inputError("policy or grant changed; preview again")
 	}
 	data, err := json.Marshal(p)
@@ -237,9 +241,17 @@ type ShareList struct {
 	Suggestions []string             `json:"suggestions"`
 }
 
+func (s *Service) currentLink(ctx context.Context) (db.FederationLink, error) {
+	link, err := s.db.GetFederationLink(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return link, inputError("join a hub first")
+	}
+	return link, err
+}
+
 func (s *Service) Shares(ctx context.Context) (ShareList, error) {
 	out := ShareList{Shares: []db.FederationShare{}, Suggestions: []string{}}
-	link, err := s.db.GetFederationLink(ctx)
+	link, err := s.currentLink(ctx)
 	if err != nil {
 		return out, err
 	}
@@ -251,6 +263,9 @@ func (s *Service) Shares(ctx context.Context) (ShareList, error) {
 	out.Shares, err = s.db.ListFederationShares(ctx, link.UID)
 	if err != nil {
 		return out, err
+	}
+	for i := range out.Shares {
+		out.Shares[i].ConsentJSON = ""
 	}
 	if status.Hub == nil || status.Hub.State != HubOK {
 		return out, nil
@@ -297,7 +312,7 @@ type ShareDetails struct {
 
 func (s *Service) Share(ctx context.Context, uid string) (ShareDetails, error) {
 	var out ShareDetails
-	link, err := s.db.GetFederationLink(ctx)
+	link, err := s.currentLink(ctx)
 	if err != nil {
 		return out, err
 	}
@@ -311,7 +326,7 @@ func (s *Service) Share(ctx context.Context, uid string) (ShareDetails, error) {
 const policyPausedMessage = "policy changed; run federation share add to review and accept"
 
 func (s *Service) PauseShare(ctx context.Context, uid string) error {
-	link, err := s.db.GetFederationLink(ctx)
+	link, err := s.currentLink(ctx)
 	if err != nil {
 		return err
 	}
@@ -328,7 +343,7 @@ func (s *Service) PauseShare(ctx context.Context, uid string) error {
 	return s.db.SetFederationShareState(ctx, link.UID, uid, "active", "paused")
 }
 func (s *Service) ResumeShare(ctx context.Context, uid string) error {
-	link, err := s.db.GetFederationLink(ctx)
+	link, err := s.currentLink(ctx)
 	if err != nil {
 		return err
 	}
@@ -345,7 +360,7 @@ func (s *Service) ResumeShare(ctx context.Context, uid string) error {
 	return s.db.SetFederationShareState(ctx, link.UID, uid, "paused", "active")
 }
 func (s *Service) RemoveShare(ctx context.Context, uid string) error {
-	link, err := s.db.GetFederationLink(ctx)
+	link, err := s.currentLink(ctx)
 	if err != nil {
 		return err
 	}
@@ -355,11 +370,7 @@ func (s *Service) Exclude(ctx context.Context, id, reason string) error {
 	if id == "" {
 		return inputError("session ID is required")
 	}
-	_, err := s.db.GetFederationLink(ctx)
-	if err != nil {
-		return err
-	}
-	err = s.db.PutFederationExclusion(ctx, id, reason)
+	err := s.db.PutFederationExclusion(ctx, id, reason)
 	if errors.Is(err, db.ErrFederationSessionNotFound) {
 		return inputError("session not found")
 	}
