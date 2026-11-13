@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"encoding/json/jsontext"
+	"errors"
 	"math"
 	"testing"
 	"time"
@@ -377,7 +378,7 @@ func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T)
 // These regressions describe the accepted cross-release privacy requirement.
 // The publication policy is still open; no admission bypass is used here.
 func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
-	for _, scenario := range []string{"window", "reverse-window", "update", "copy-before-publication", "copy-after-publication", "cancel-before-admission", "concurrent", "purge-regrant", "untraced-write", "reopen", "second-handle", "closed-writer", "untraced-session", "untraced-record", "untraced-message", "untraced-tool-result", "untraced-exclusion"} {
+	for _, scenario := range []string{"window", "reverse-window", "update", "rolled-back-update", "copy-before-publication", "copy-after-publication", "cancel-before-admission", "concurrent", "purge-regrant", "untraced-write", "reopen", "second-handle", "closed-writer", "untraced-session", "untraced-record", "untraced-message", "untraced-tool-result", "untraced-exclusion"} {
 		t.Run(scenario, func(t *testing.T) {
 			d := testDB(t)
 			ctx := t.Context()
@@ -484,6 +485,32 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 				count, err := copied.CopyOrphanedDataFrom(ctx, d.Path())
 				require.NoError(t, err)
 				assert.Equal(t, 4, count)
+			}
+			if scenario == "rolled-back-update" {
+				abort := errors.New("synthetic transaction failure")
+				err := d.Update(ctx, func(tx *sql.Tx) error {
+					_, err := tx.ExecContext(ctx, `UPDATE usage_events SET input_tokens=17,cost_microdollars=170 WHERE session_id='a'`)
+					if err != nil {
+						return err
+					}
+					return abort
+				})
+				require.ErrorIs(t, err, abort)
+				repeated, err := d.readFederationPulse(ctx, "2026-07-29", 3, now)
+				require.NoError(t, err)
+				assert.Equal(t, Ptr(int64(60)), repeated.Totals["tokens"].Value)
+				assert.Equal(t, Ptr(int64(600)), repeated.Totals["cost_microdollars"].Value)
+				cost := money.Money{Microdollars: 170}
+				record := FederationHubRecord{UID: "a", Hash: "committed", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: "a", Project: "example/repo", Agent: "codex", StartedAt: &start}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: 17, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: start, DedupKey: "a"}}}}
+				_, err = d.CommitFederationBatch(ctx, "e-a", "s-a", "h-a", "policy", 1, 2, "committed", []FederationHubRecord{record})
+				require.NoError(t, err)
+				later, err := d.readFederationPulse(ctx, "2026-07-29", 3, now)
+				require.NoError(t, err)
+				assert.True(t, later.Suppressed)
+				assert.Empty(t, later.Projects)
+				assert.Nil(t, later.Totals["tokens"].Value)
+				assert.Nil(t, later.Totals["cost_microdollars"].Value)
+				return
 			}
 			if scenario == "purge-regrant" {
 				share := FederationHubShare{UID: "h-a", EnrollmentUID: "e-a", Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 2, State: "stopped", Retention: "member-controlled"}
