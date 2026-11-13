@@ -308,6 +308,11 @@ func TestFederationControlInputMessages(t *testing.T) {
 		require.NoError(t, resp.Body.Close())
 		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 		assert.Contains(t, string(data), tc.message)
+		var decoded struct {
+			Error string `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(data, &decoded))
+		assert.Equal(t, tc.message, decoded.Error)
 		assert.NotContains(t, string(data), secret)
 	}
 	// Route registration is role-specific; change the synthetic service role after
@@ -398,6 +403,11 @@ func TestFederationJoinControlMessages(t *testing.T) {
 			require.NoError(t, resp.Body.Close())
 			assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 			assert.Contains(t, string(data), tc.message)
+			var decoded struct {
+				Error string `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(data, &decoded))
+			assert.Equal(t, tc.message, decoded.Error)
 			assert.NotContains(t, string(data), credential)
 			assert.NotContains(t, string(data), revoked)
 			assert.NotContains(t, string(data), tc.path)

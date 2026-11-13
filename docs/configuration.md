@@ -2808,7 +2808,8 @@ shared SQLite daemon or `"spoke"` on a member's installation, then restart the
 daemon. Joining does not share any sessions or projects. The hub role adds the
 enrollment and handshake routes only; local session discovery continues, and
 anyone holding the hub's bearer token can read everything in its archive. Use a
-dedicated data directory for the hub and start it with `agentsview serve --no-sync`.
+dedicated data directory for the hub and start it with
+`agentsview serve --no-sync`.
 
 ```toml
 [federation]
