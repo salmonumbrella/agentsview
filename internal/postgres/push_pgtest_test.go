@@ -135,6 +135,7 @@ func TestFullPushReconcilesRowsAfterSameGenerationRestore(t *testing.T) {
 			dbtest.SeedPricingMeta(t, local)
 			if keep {
 				require.NoError(t, local.UpsertSession(ctx, db.Session{ID: "kept", Project: "project", Machine: "machine", Agent: "claude", MessageCount: 1}))
+				require.NoError(t, local.UpsertSession(ctx, db.Session{ID: "out-of-scope", Project: "other", Machine: "machine", Agent: "claude", MessageCount: 1}))
 			}
 			syncer := &Sync{pg: pg, local: local, machine: "machine", schema: schema, schemaDone: true}
 			_, err = syncer.PushWithOptions(ctx, storage.PushOptions{Full: true}, nil)
@@ -152,13 +153,15 @@ func TestFullPushReconcilesRowsAfterSameGenerationRestore(t *testing.T) {
 			require.NoError(t, err)
 			_, err = pg.ExecContext(ctx, `INSERT INTO vector_documents(doc_key,session_id,source_uuid,ordinal,ordinal_end,subordinate,offsets,content,content_hash) VALUES('later-doc','later','',0,0,FALSE,'','fixture','hash')`)
 			require.NoError(t, err)
+			_, err = pg.ExecContext(ctx, `INSERT INTO sessions(id,machine,project,agent,owner_marker) VALUES('foreign','foreign','project','claude','other-archive')`)
+			require.NoError(t, err)
 			var beforeUsage int
 			require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM usage_events WHERE session_id='later'`).Scan(&beforeUsage))
 			require.Equal(t, 1, beforeUsage)
 			restored, err := db.OpenIsolated(ctx, snapshot)
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, restored.Close()) })
-			resync := &Sync{pg: pg, local: restored, machine: "machine", schema: schema, schemaDone: true}
+			resync := &Sync{pg: pg, local: restored, machine: "machine", schema: schema, schemaDone: true, projects: []string{"project"}}
 			_, err = resync.PushWithOptions(ctx, storage.PushOptions{Full: true}, nil)
 			require.NoError(t, err)
 			var sessions, vectors, usage int
@@ -166,8 +169,12 @@ func TestFullPushReconcilesRowsAfterSameGenerationRestore(t *testing.T) {
 			assert.Zero(t, sessions)
 			assert.Zero(t, vectors)
 			assert.Zero(t, usage)
+			require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE id='foreign' AND owner_marker='other-archive'`).Scan(&sessions))
+			assert.Equal(t, 1, sessions)
 			if keep {
 				require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE id='kept'`).Scan(&sessions))
+				assert.Equal(t, 1, sessions)
+				require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE id='out-of-scope'`).Scan(&sessions))
 				assert.Equal(t, 1, sessions)
 			}
 		})
