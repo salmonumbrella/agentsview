@@ -270,7 +270,7 @@ func (db *DB) CopyFederationStateFrom(ctx context.Context, sourcePath string) er
 		return err
 	}
 	defer tx.Rollback()
-	for table, columns := range map[string]string{"federation_enrollments": "enrollment_uid,spoke_archive_id,member,spoke_name,credential_sha256,created_at,last_handshake_at,revoked_at", "federation_links": "link_uid,hub_origin,hub_archive_id,enrollment_uid,member,token_file,protocol_version,state,created_at", "federation_shares": "share_uid,link_uid,normalized_remote,level,attribution,since,audience,state,consent_json,policy_digest,created_at,epoch,sequence,source_generation,sync_cursor,usage_cursor,deletion_cursor,pending_batch,stop_intent,stop_receipt", "federation_exclusions": "session_id,reason,created_at", "federation_deliveries": "share_uid,record_uid,session_id,hash,state,attempt_hash,hub_origin,hub_archive_id,normalized_remote", "federation_quarantine": "share_uid,error,sequence", "federation_hub_shares": "share_uid,enrollment_uid,normalized_remote,project_key,level,attribution,audience,policy_digest,epoch,sequence,last_batch_digest,last_refused,state,retention,reconcile_round,reconcile_boundary,completed_epoch", "federation_records": "share_uid,record_uid,session_id,hash,assistant_count,epoch"} {
+	for table, columns := range map[string]string{"federation_enrollments": "enrollment_uid,spoke_archive_id,member,spoke_name,credential_sha256,created_at,last_handshake_at,last_delivery_at,revoked_at", "federation_links": "link_uid,hub_origin,hub_archive_id,enrollment_uid,member,token_file,protocol_version,state,created_at", "federation_shares": "share_uid,link_uid,normalized_remote,level,attribution,since,audience,state,consent_json,policy_digest,created_at,epoch,sequence,source_generation,sync_cursor,usage_cursor,deletion_cursor,pending_batch,stop_intent,stop_receipt", "federation_exclusions": "session_id,reason,created_at", "federation_deliveries": "share_uid,record_uid,session_id,hash,state,attempt_hash,hub_origin,hub_archive_id,normalized_remote", "federation_quarantine": "share_uid,error,sequence", "federation_hub_shares": "share_uid,enrollment_uid,normalized_remote,project_key,level,attribution,audience,policy_digest,epoch,sequence,last_batch_digest,last_refused,state,retention,reconcile_round,reconcile_boundary,completed_epoch", "federation_records": "share_uid,record_uid,session_id,hash,assistant_count,epoch"} {
 		var present int
 		if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM federation_old.sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&present); err != nil {
 			return err
@@ -292,6 +292,8 @@ func (db *DB) CopyFederationStateFrom(ctx context.Context, sourcePath string) er
 				expressions = append(expressions, "CASE state WHEN 'paused' THEN 'pause' WHEN 'policy_paused' THEN 'policy' ELSE '' END")
 			} else if table == "federation_shares" && column == "stop_receipt" {
 				expressions = append(expressions, "CASE WHEN state IN ('paused','policy_paused') THEN 'pending' ELSE '' END")
+			} else if table == "federation_enrollments" && column == "last_delivery_at" {
+				expressions = append(expressions, "NULL")
 			} else if column == "epoch" {
 				expressions = append(expressions, "1")
 			} else if column == "sequence" || column == "usage_cursor" || column == "deletion_cursor" || column == "completed_epoch" {

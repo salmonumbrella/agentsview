@@ -2565,6 +2565,7 @@ func legacySchemaColumnMigrations() []schemaColumnMigration {
 
 func schemaColumnMigrations() []schemaColumnMigration {
 	return []schemaColumnMigration{
+		{"federation_enrollments", "last_delivery_at", "ALTER TABLE federation_enrollments ADD COLUMN last_delivery_at TEXT"},
 		{"federation_shares", "epoch", "ALTER TABLE federation_shares ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1"},
 		{"federation_shares", "sequence", "ALTER TABLE federation_shares ADD COLUMN sequence INTEGER NOT NULL DEFAULT 0"},
 		{"federation_shares", "source_generation", "ALTER TABLE federation_shares ADD COLUMN source_generation TEXT NOT NULL DEFAULT ''"},

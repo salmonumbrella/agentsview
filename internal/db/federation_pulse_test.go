@@ -90,7 +90,7 @@ func TestFederationPulseSnapshotScopesAndVisitsDays(t *testing.T) {
 		return err
 	}))
 	var dates []string
-	rng, err := d.readFederationPulseSnapshot(ctx, "", time.Date(2026, 7, 29, 12, 30, 0, 0, time.UTC), func(tx *sql.Tx, date, end time.Time, owners map[string]federationPulseOwner, source reportingDaySource) error {
+	rng, err := d.readFederationPulseSnapshot(ctx, "", time.Date(2026, 7, 29, 12, 30, 0, 0, time.UTC), nil, func(tx *sql.Tx, date, end time.Time, owners map[string]federationPulseOwner, source reportingDaySource) error {
 		dates = append(dates, date.Format(time.DateOnly))
 		assert.Equal(t, "alice", owners["owned"].member)
 		assert.NotContains(t, owners, "local")
@@ -259,4 +259,35 @@ func TestFederationPulseReleaseRatiosAndGlobalDistributions(t *testing.T) {
 	require.Len(t, got.Outcomes, 1)
 	assert.Equal(t, "unknown", got.Outcomes[0].Key)
 	assert.Equal(t, Ptr(int64(3)), got.Outcomes[0].Metrics["sessions"].Value)
+}
+
+func TestFederationPulseLinkFactsDoNotExposeRefusalDetails(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enrollment-private", SpokeArchiveID: "archive-private", Member: "member-private", SpokeName: "fixture-spoke", CredentialSHA256: "digest"}))
+	_, err := d.PutFederationHubShare(ctx, "archive-private", FederationHubShare{UID: "share-private", EnrollmentUID: "enrollment-private", Remote: "example/private", ProjectKey: "private-project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+	require.NoError(t, err)
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE federation_enrollments SET last_handshake_at='2026-07-28T10:00:00Z', last_delivery_at='2026-07-28T09:00:00Z'`); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `UPDATE federation_hub_shares SET last_refused='{"record-private":"session ID unavailable","other-private":"unrecognized detail"}'`)
+		return err
+	}))
+	got, err := d.readFederationPulse(ctx, "", 3, time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	require.Len(t, got.Links, 1)
+	link := got.Links[0]
+	assert.Equal(t, "fixture-spoke", link.SpokeName)
+	assert.Equal(t, "contacted", link.State)
+	assert.Equal(t, Ptr("2026-07-28T10:00:00Z"), link.LastContactAt)
+	assert.Equal(t, Ptr("2026-07-28T09:00:00Z"), link.LastDeliveryAt)
+	assert.Nil(t, link.BacklogLagSeconds.Value)
+	assert.Equal(t, "unavailable", link.BacklogLagSeconds.State)
+	assert.Equal(t, []string{"collision", "other"}, link.LatestBatchRefusals)
+	encoded, err := json.Marshal(got)
+	require.NoError(t, err)
+	for _, secret := range []string{"enrollment-private", "archive-private", "member-private", "share-private", "private-project", "record-private", "unrecognized detail"} {
+		assert.NotContains(t, string(encoded), secret)
+	}
 }

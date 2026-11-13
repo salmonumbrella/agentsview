@@ -747,3 +747,63 @@ func TestFederationSameHashAttachesLaterOwnedParent(t *testing.T) {
 	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT sync_marker FROM sessions WHERE id='a-child'`).Scan(&afterRepeat))
 	assert.Equal(t, "2999-01-01T00:00:00.000Z", afterRepeat)
 }
+
+func TestFederationDeliveryObservationTracksAcceptedCommits(t *testing.T) {
+	d, copy := testDB(t), testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "e", SpokeArchiveID: "spoke", Member: "member", CredentialSHA256: "digest"}))
+	_, err := d.PutFederationHubShare(ctx, "spoke", FederationHubShare{UID: "share", EnrollmentUID: "e", Remote: "example/repo", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+	require.NoError(t, err)
+	observe := func() sql.NullString {
+		var at sql.NullString
+		require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT last_delivery_at FROM federation_enrollments WHERE enrollment_uid='e'`).Scan(&at))
+		return at
+	}
+	assert.False(t, observe().Valid)
+	record := FederationHubRecord{UID: "record", Hash: "hash", Remote: "example/repo", ProjectKey: "key", Write: SessionBatchWrite{Session: Session{ID: "session", Project: "example/repo", Agent: "codex"}}}
+	_, err = d.CommitFederationBatch(ctx, "e", "spoke", "share", "policy", 1, 1, "first", []FederationHubRecord{record})
+	require.NoError(t, err)
+	assert.True(t, observe().Valid)
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE federation_enrollments SET last_delivery_at='2001-01-01T00:00:00Z' WHERE enrollment_uid='e'`)
+		return err
+	}))
+	_, err = d.CommitFederationBatch(ctx, "e", "spoke", "share", "policy", 1, 1, "first", []FederationHubRecord{record})
+	require.NoError(t, err)
+	assert.Equal(t, "2001-01-01T00:00:00Z", observe().String)
+	insertSession(t, d, "local", "fixture")
+	collision := FederationHubRecord{UID: "collision", Hash: "h", Remote: "example/repo", ProjectKey: "key", Write: SessionBatchWrite{Session: Session{ID: "local", Project: "fixture", Agent: "codex"}}}
+	result, err := d.CommitFederationBatch(ctx, "e", "spoke", "share", "policy", 1, 2, "refused", []FederationHubRecord{collision})
+	require.NoError(t, err)
+	assert.NotEmpty(t, result.Refused)
+	assert.Equal(t, "2001-01-01T00:00:00Z", observe().String)
+	_, err = d.AuthenticateFederationCredential(ctx, "digest", "spoke")
+	require.NoError(t, err)
+	assert.Equal(t, "2001-01-01T00:00:00Z", observe().String)
+	bad := record
+	bad.Remote = "example/other"
+	_, err = d.CommitFederationBatch(ctx, "e", "spoke", "share", "policy", 1, 3, "rollback", []FederationHubRecord{record, bad})
+	require.ErrorIs(t, err, ErrFederationInvalidBatch)
+	assert.Equal(t, "2001-01-01T00:00:00Z", observe().String)
+	_, err = d.CommitFederationBatch(ctx, "e", "spoke", "share", "policy", 1, 3, "tombstone", []FederationHubRecord{{UID: "record", Tombstone: true}})
+	require.NoError(t, err)
+	assert.NotEqual(t, "2001-01-01T00:00:00Z", observe().String)
+	require.NoError(t, copy.CopyFederationStateFrom(ctx, d.Path()))
+	var copied sql.NullString
+	require.NoError(t, copy.rawReader().QueryRowContext(ctx, `SELECT last_delivery_at FROM federation_enrollments WHERE enrollment_uid='e'`).Scan(&copied))
+	assert.Equal(t, observe(), copied)
+}
+
+func TestFederationCopyLegacyDeliveryObservationIsNull(t *testing.T) {
+	source, target := testDB(t), testDB(t)
+	ctx := t.Context()
+	require.NoError(t, source.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "e", SpokeArchiveID: "spoke", Member: "member", CredentialSHA256: "digest"}))
+	require.NoError(t, source.Update(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `ALTER TABLE federation_enrollments DROP COLUMN last_delivery_at`)
+		return err
+	}))
+	require.NoError(t, target.CopyFederationStateFrom(ctx, source.Path()))
+	var at sql.NullString
+	require.NoError(t, target.rawReader().QueryRowContext(ctx, `SELECT last_delivery_at FROM federation_enrollments WHERE enrollment_uid='e'`).Scan(&at))
+	assert.False(t, at.Valid)
+}

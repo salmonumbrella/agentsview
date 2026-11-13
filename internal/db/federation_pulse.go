@@ -74,6 +74,7 @@ func parseFederationPulseSince(value string, now time.Time) (*time.Time, error) 
 // range and daily inputs. The callback must not retain daily source graphs.
 func (db *DB) readFederationPulseSnapshot(
 	ctx context.Context, since string, now time.Time,
+	observe func(*sql.Tx) error,
 	visit func(*sql.Tx, time.Time, time.Time, map[string]federationPulseOwner, reportingDaySource) error,
 ) (ReportingRange, error) {
 	if now.IsZero() {
@@ -93,6 +94,11 @@ func (db *DB) readFederationPulseSnapshot(
 		return ReportingRange{}, fmt.Errorf("begin federation pulse snapshot: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if observe != nil {
+		if err := observe(tx); err != nil {
+			return ReportingRange{}, err
+		}
+	}
 	owners, err := federationPulseScope(ctx, tx)
 	if err != nil {
 		return ReportingRange{}, err
@@ -236,6 +242,15 @@ type FederationPulseProject struct {
 	Categories []FederationPulseGroup           `json:"categories"`
 }
 
+type FederationPulseLink struct {
+	SpokeName           string                `json:"spoke_name"`
+	State               string                `json:"state"`
+	LastContactAt       *string               `json:"last_contact_at"`
+	LastDeliveryAt      *string               `json:"last_delivery_at"`
+	BacklogLagSeconds   FederationPulseMetric `json:"backlog_lag_seconds"`
+	LatestBatchRefusals []string              `json:"latest_batch_refusals"`
+}
+
 type FederationPulse struct {
 	Since         *string                          `json:"since"`
 	ClosedThrough string                           `json:"closed_through"`
@@ -247,6 +262,7 @@ type FederationPulse struct {
 	Outcomes      []FederationPulseGroup           `json:"outcomes"`
 	Grades        []FederationPulseGroup           `json:"grades"`
 	Categories    []FederationPulseGroup           `json:"categories"`
+	Links         []FederationPulseLink            `json:"links"`
 	Suppressed    bool                             `json:"suppressed"`
 }
 
@@ -434,7 +450,12 @@ func (db *DB) readFederationPulse(ctx context.Context, since string, minimum int
 		modelsSeen[id][model] = true
 	}
 	var windowStart *string
-	rng, err := db.readFederationPulseSnapshot(ctx, since, now, func(tx *sql.Tx, start, end time.Time, owners map[string]federationPulseOwner, source reportingDaySource) error {
+	var links []FederationPulseLink
+	rng, err := db.readFederationPulseSnapshot(ctx, since, now, func(tx *sql.Tx) error {
+		var err error
+		links, err = federationPulseLinks(ctx, tx)
+		return err
+	}, func(tx *sql.Tx, start, end time.Time, owners map[string]federationPulseOwner, source reportingDaySource) error {
 		if accumulator == nil {
 			accumulator = newFederationPulseAccumulator(owners)
 		}
@@ -585,5 +606,69 @@ func (db *DB) readFederationPulse(ctx context.Context, since string, minimum int
 		result.Since = &since
 	}
 	result.ClosedThrough = rng.ClosedThrough
+	result.Links = links
 	return result, nil
+}
+
+// federationPulseLinks exposes only contact and sanitized stored refusal facts.
+func federationPulseLinks(ctx context.Context, tx *sql.Tx) ([]FederationPulseLink, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT e.enrollment_uid,e.spoke_name,e.last_handshake_at,e.last_delivery_at,e.revoked_at,h.last_refused
+		FROM federation_enrollments e LEFT JOIN federation_hub_shares h ON h.enrollment_uid=e.enrollment_uid
+		ORDER BY e.created_at,e.enrollment_uid,h.share_uid`)
+	if err != nil {
+		return nil, fmt.Errorf("query pulse links: %w", err)
+	}
+	defer rows.Close()
+	links := []FederationPulseLink{}
+	indices := map[string]int{}
+	categories := map[string]map[string]bool{}
+	for rows.Next() {
+		var uid, name, contact, revoked string
+		var delivery, refused sql.NullString
+		if err := rows.Scan(&uid, &name, &contact, &delivery, &revoked, &refused); err != nil {
+			return nil, fmt.Errorf("scan pulse link: %w", err)
+		}
+		index, found := indices[uid]
+		if !found {
+			link := FederationPulseLink{SpokeName: name, State: "enrolled", BacklogLagSeconds: FederationPulseMetric{State: "unavailable"}, LatestBatchRefusals: []string{}}
+			if contact != "" {
+				link.LastContactAt = &contact
+				link.State = "contacted"
+			}
+			if revoked != "" {
+				link.State = "revoked"
+			}
+			if delivery.Valid {
+				value := delivery.String
+				link.LastDeliveryAt = &value
+			}
+			index = len(links)
+			indices[uid] = index
+			links = append(links, link)
+			categories[uid] = map[string]bool{}
+		}
+		if refused.Valid && refused.String != "" {
+			var values map[string]string
+			if err := json.Unmarshal([]byte(refused.String), &values); err != nil {
+				return nil, fmt.Errorf("decode stored pulse refusals: %w", err)
+			}
+			for _, value := range values {
+				category := "other"
+				if value == FederationCollision {
+					category = "collision"
+				}
+				categories[uid][category] = true
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read pulse links: %w", err)
+	}
+	for uid, index := range indices {
+		for category := range categories[uid] {
+			links[index].LatestBatchRefusals = append(links[index].LatestBatchRefusals, category)
+		}
+		slices.Sort(links[index].LatestBatchRefusals)
+	}
+	return links, nil
 }

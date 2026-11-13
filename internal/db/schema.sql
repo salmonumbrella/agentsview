@@ -1849,6 +1849,7 @@ CREATE TABLE IF NOT EXISTS federation_enrollments (
     credential_sha256 TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     last_handshake_at TEXT NOT NULL DEFAULT '',
+    last_delivery_at TEXT,
     revoked_at TEXT NOT NULL DEFAULT ''
 );
 CREATE UNIQUE INDEX IF NOT EXISTS federation_enrollments_active

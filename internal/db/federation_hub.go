@@ -154,11 +154,13 @@ func (db *DB) CommitFederationBatch(ctx context.Context, enrollment, spoke, shar
 		return result, ErrFederationSequence
 	}
 	var writes []SessionBatchWrite
+	accepted := false
 	var purged []string
 	var relationshipChanges []string
 	var pending recallEvidenceRevocationEvents
 	for _, record := range records {
 		if record.Tombstone {
+			accepted = true
 			ids, e := purgeFederationRecordsTx(ctx, tx, share, []string{record.UID}, &pending)
 			if e != nil {
 				return result, e
@@ -189,6 +191,7 @@ func (db *DB) CommitFederationBatch(ctx context.Context, enrollment, spoke, shar
 			result.Refused[record.UID] = FederationCollision
 			continue
 		}
+		accepted = true
 		if record.Write.Session.ParentSessionID != nil {
 			parent := *record.Write.Session.ParentSessionID
 			var owned, cycle bool
@@ -243,6 +246,11 @@ func (db *DB) CommitFederationBatch(ctx context.Context, enrollment, spoke, shar
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE federation_hub_shares SET sequence=?,last_batch_digest=?,last_refused=? WHERE share_uid=?`, sequence, digest, string(refused), share); err != nil {
 		return result, err
+	}
+	if accepted {
+		if _, err = tx.ExecContext(ctx, `UPDATE federation_enrollments SET last_delivery_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE enrollment_uid=?`, enrollment); err != nil {
+			return result, err
+		}
 	}
 	if err = stampFederationVersion(ctx, tx); err != nil {
 		return result, err
