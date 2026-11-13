@@ -122,6 +122,27 @@ the hub is offline, cleanup remains pending and is retried when the spoke can
 reach it. Keep the spoke role enabled until cleanup is confirmed.
 The credential file remains in place for that retry.
 
+### Read the hub pulse
+
+On a hub, `agentsview federation pulse` reads aggregate reporting evidence from
+the daemon. Use `--since YYYY-MM-DD` for an inclusive UTC start date, and
+`--json` for the same released data in JSON. The response gives its exclusive
+last-closed-hour cutoff. Without a start date it begins at the earliest retained
+owned dated evidence. A session can count even if it started before the window.
+
+The pulse reports sessions, projects, usage, known cost, automation, stored
+outcomes and session-health grades. Values with too little distinct-member
+support are withheld along with totals that could reveal them by subtraction;
+missing evidence is unavailable. There are no per-member usage figures. See
+[reporting export](reporting-export.md#federation-pulse) for the scope and
+evidence limits.
+
+Spoke observations are separate from session health. Last contact records an
+authenticated contact; last delivery is the last newly committed batch that
+accepted a record or tombstone. It does not mean every offered record arrived.
+Historical delivery time and backlog lag can be unavailable. Refusal categories
+describe the latest stored batch refusals, not network error history.
+
 ### Find a command by task
 
 Describe a task to get up to five matching commands:

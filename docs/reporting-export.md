@@ -560,3 +560,28 @@ timestamps independently of the session activity window.
 
 The checked-in fixtures under `cmd/agentsview/testdata/reporting/` freeze v3
 bytes and their SHA-256 manifest for portable contract tests.
+
+## Federation pulse
+
+The hub's `agentsview federation pulse` command and ordinary
+`GET /api/v1/federation/pulse` endpoint use one SQLite snapshot of owned,
+permitted federation records. The optional `since` date is inclusive in UTC;
+the response's `closed_through` is the exclusive last-closed-hour cutoff.
+Without `since`, the window starts at the earliest retained owned dated
+evidence. Sessions are counted once across the window, including sessions
+started earlier with evidence in the window. Stopped or revoked shares retained
+under their accepted policy remain eligible; purged and excluded records do not.
+
+Usage follows the reporting export's survivor and pricing rules for the same
+owned sessions. A cost can be unavailable even when tokens are present. Stored
+outcome `unknown` is distinct from a missing outcome, and missing session health
+is not a healthy grade. Subagent classification takes precedence over automation.
+Neither message-less sessions nor missing usage imply measured activity time.
+
+Each released metric needs the hub policy's minimum number of distinct member
+handles. A project and spanning totals are withheld if the combination of
+released cells could expose a smaller group. Withheld values are null with a
+`suppressed` state; unavailable values have a separate state. Hidden project
+and dimension keys, support counts and member usage are not returned. Spoke
+contact and delivery observations describe the link separately from session
+health; backlog and earlier delivery history may be unavailable.
