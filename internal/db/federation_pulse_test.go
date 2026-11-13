@@ -368,6 +368,135 @@ func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T)
 	assert.Equal(t, exported, *got.Totals["tokens"].Value)
 }
 
+// These regressions describe the accepted cross-release privacy requirement.
+// The publication policy is still open; no admission bypass is used here.
+func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
+	for _, scenario := range []string{"window", "update"} {
+		t.Run(scenario, func(t *testing.T) {
+			d := testDB(t)
+			ctx := t.Context()
+			start := "2026-07-29T09:00:00Z"
+			for i, name := range []string{"a", "b", "c"} {
+				enrollment, spoke, share := "e-"+name, "s-"+name, "h-"+name
+				require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: name, CredentialSHA256: "digest-" + name}))
+				_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+				require.NoError(t, err)
+				cost := money.Money{Microdollars: int64((i + 1) * 100)}
+				record := FederationHubRecord{UID: name, Hash: "initial", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: name, Project: "example/repo", Agent: "codex", StartedAt: &start}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: (i + 1) * 10, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: start, DedupKey: name}}}}
+				_, err = d.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch-1", []FederationHubRecord{record})
+				require.NoError(t, err)
+			}
+			now := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
+			if scenario == "window" {
+				older := "2026-07-28T09:00:00Z"
+				cost := money.Money{Microdollars: 70}
+				record := FederationHubRecord{UID: "a-older", Hash: "initial", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: "a-older", Project: "example/repo", Agent: "codex", StartedAt: &older}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: 7, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: older, DedupKey: "a-older"}}}}
+				_, err := d.CommitFederationBatch(ctx, "e-a", "s-a", "h-a", "policy", 1, 2, "batch-2", []FederationHubRecord{record})
+				require.NoError(t, err)
+			}
+			first, err := d.readFederationPulse(ctx, "2026-07-29", 3, now)
+			require.NoError(t, err)
+			assert.Equal(t, Ptr(int64(3)), first.Totals["sessions"].Value)
+			assert.Equal(t, Ptr(int64(60)), first.Totals["tokens"].Value)
+			assert.Equal(t, Ptr(int64(600)), first.Totals["cost_microdollars"].Value)
+			if scenario == "update" {
+				cost := money.Money{Microdollars: 170}
+				record := FederationHubRecord{UID: "a", Hash: "changed", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: "a", Project: "example/repo", Agent: "codex", StartedAt: &start}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: 17, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: start, DedupKey: "a"}}}}
+				_, err = d.CommitFederationBatch(ctx, "e-a", "s-a", "h-a", "policy", 1, 2, "batch-2", []FederationHubRecord{record})
+				require.NoError(t, err)
+			}
+			date := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+			if scenario == "window" {
+				date = date.AddDate(0, 0, -1)
+			}
+			day, err := d.ExportReportingDay(ctx, ReportingExportOptions{Date: date, Now: now, SchemaVersion: export.ReportingJointSchemaVersion})
+			require.NoError(t, err)
+			if scenario == "window" {
+				assert.EqualValues(t, 7, day.Hours[9].Usage.Totals.InputTokens)
+				assert.EqualValues(t, 70, day.Hours[9].Usage.Totals.Cost.Microdollars)
+			} else {
+				assert.EqualValues(t, 67, day.Hours[9].Usage.Totals.InputTokens)
+				assert.EqualValues(t, 670, day.Hours[9].Usage.Totals.Cost.Microdollars)
+			}
+			since := "2026-07-29"
+			if scenario == "window" {
+				since = "2026-07-28"
+			}
+			later, err := d.readFederationPulse(ctx, since, 3, now)
+			require.NoError(t, err)
+			assert.True(t, later.Suppressed)
+			assert.Empty(t, later.Projects)
+			assert.Equal(t, "suppressed", later.Totals["tokens"].State)
+			assert.Nil(t, later.Totals["tokens"].Value)
+			assert.Nil(t, later.Totals["cost_microdollars"].Value)
+			assert.Equal(t, Ptr(since), later.Since)
+		})
+	}
+}
+
+func TestFederationPulseVisitsSparseEvidenceDays(t *testing.T) {
+	for _, tc := range []struct {
+		name, since string
+		newer       bool
+		dates       []string
+		sessions    int64
+		tokens      int64
+		cost        int64
+	}{
+		{"old default", "", false, []string{"2016-07-28"}, 3, 60, 600},
+		{"both default", "", true, []string{"2016-07-28", "2026-07-28"}, 6, 66, 660},
+		{"recent", "2026-07-28", true, []string{"2026-07-28"}, 3, 6, 60},
+		{"ancient", "0001-01-01", true, []string{"2016-07-28", "2026-07-28"}, 6, 66, 660},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := testDB(t)
+			ctx := t.Context()
+			for i, name := range []string{"a", "b", "c"} {
+				enrollment, spoke, share := "e-"+name, "s-"+name, "h-"+name
+				require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: name, CredentialSHA256: "digest-" + name}))
+				_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+				require.NoError(t, err)
+				var records []FederationHubRecord
+				for _, item := range []struct {
+					id, start  string
+					multiplier int
+				}{{name + "-old", "2016-07-28T09:00:00Z", 10}, {name + "-new", "2026-07-28T09:00:00Z", 1}} {
+					if !tc.newer && item.multiplier == 1 {
+						continue
+					}
+					cost := money.Money{Microdollars: int64((i + 1) * item.multiplier * 10)}
+					records = append(records, FederationHubRecord{UID: item.id, Hash: "hash", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: item.id, Project: "example/repo", Agent: "codex", StartedAt: &item.start}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: (i + 1) * item.multiplier, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: item.start, DedupKey: item.id}}}})
+				}
+				_, err = d.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", records)
+				require.NoError(t, err)
+			}
+			now := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
+			var dates []string
+			_, err := d.readFederationPulseSnapshot(ctx, tc.since, now, nil, func(_ *sql.Tx, date, _ time.Time, _ map[string]federationPulseOwner, _ reportingDaySource) error {
+				dates = append(dates, date.Format(time.DateOnly))
+				return nil
+			})
+			require.NoError(t, err)
+			assert.Equal(t, tc.dates, dates)
+			pulse, err := d.readFederationPulse(ctx, tc.since, 3, now)
+			require.NoError(t, err)
+			assert.False(t, pulse.Suppressed)
+			assert.Equal(t, Ptr(tc.sessions), pulse.Totals["sessions"].Value)
+			assert.Equal(t, Ptr(int64(1)), pulse.Totals["active_projects"].Value)
+			assert.Equal(t, Ptr(tc.tokens), pulse.Totals["tokens"].Value)
+			assert.Equal(t, Ptr(tc.cost), pulse.Totals["cost_microdollars"].Value)
+			assert.Equal(t, "available", pulse.Totals["cost_microdollars"].State)
+			assert.Equal(t, "unavailable", pulse.Totals["health_observed_sessions"].State)
+			assert.Equal(t, "2026-07-30T00:00:00Z", pulse.ClosedThrough)
+			if tc.since == "" {
+				assert.Nil(t, pulse.Since)
+			} else {
+				assert.Equal(t, Ptr(tc.since), pulse.Since)
+			}
+		})
+	}
+}
+
 func TestFederationPulseCrossProjectScopedExportParity(t *testing.T) {
 	d := testDB(t)
 	ctx := t.Context()
