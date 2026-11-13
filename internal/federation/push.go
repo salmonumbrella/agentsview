@@ -702,8 +702,23 @@ func (s *Service) processRetainedNarrowing(ctx context.Context, link db.Federati
 		if err != nil {
 			return err
 		}
-		if share.SourceGeneration == "" || share.SourceGeneration != generation {
-			return inputError("retained share archive generation changed; fresh consent is required before further delivery")
+		generationChanged := share.SourceGeneration == "" || share.SourceGeneration != generation
+		var explicit []string
+		if generationChanged {
+			explicit, err = s.db.FederationRetainedExclusions(ctx, share.UID, "", 400)
+			if err != nil {
+				return err
+			}
+			if len(explicit) == 0 && share.PendingBatch == "" {
+				missing, err := s.db.FederationRetainedMissing(ctx, share.UID)
+				if err != nil {
+					return err
+				}
+				if missing {
+					return inputError("retained share archive generation changed; unproven absence remains pending")
+				}
+				continue
+			}
 		}
 		token, err := readCredential(ctx, link.TokenFile)
 		if err != nil {
@@ -715,6 +730,9 @@ func (s *Service) processRetainedNarrowing(ctx context.Context, link db.Federati
 		}
 		if err = validateHandshake(handshake, link.HubArchiveID); err != nil {
 			return err
+		}
+		if handshake.EnrollmentUID != link.EnrollmentUID || handshake.Member != link.Member {
+			return inputError("federation hub identity mismatch")
 		}
 		view := ShareView{Committed: share.Sequence, Epoch: share.Epoch}
 		if share.PendingBatch != "" {
@@ -731,19 +749,58 @@ func (s *Service) processRetainedNarrowing(ctx context.Context, link db.Federati
 			for _, record := range batch.Records {
 				ids = append(ids, record.RecordUID)
 			}
-			allowed, _, e := s.federationEligibility(ctx, share, ids)
-			if e != nil {
-				return e
-			}
-			for _, id := range ids {
-				if allowed[id] {
-					return inputError("retained share has unresolved deletion after restore")
+			if generationChanged {
+				excluded, e := s.db.FederationExplicitExclusions(ctx, share.UID, ids)
+				if e != nil {
+					return e
+				}
+				for _, id := range ids {
+					if !excluded[id] {
+						return inputError("retained share has unresolved deletion after restore")
+					}
+				}
+			} else {
+				allowed, _, e := s.federationEligibility(ctx, share, ids)
+				if e != nil {
+					return e
+				}
+				for _, id := range ids {
+					if allowed[id] {
+						return inputError("retained share has unresolved deletion after restore")
+					}
 				}
 			}
 			if err = s.deliverPending(ctx, link, token, batch, out); err != nil {
 				return err
 			}
 			view.Committed = batch.Sequence
+		}
+		if generationChanged {
+			explicit, err = s.db.FederationRetainedExclusions(ctx, share.UID, "", 400)
+			if err != nil {
+				return err
+			}
+			for len(explicit) > 0 {
+				var tombstones []BatchRecord
+				for _, id := range explicit {
+					tombstones = append(tombstones, BatchRecord{RecordUID: id, Kind: "tombstone"})
+				}
+				if err = s.postFederationRecords(ctx, link, token, share, &view, tombstones, out); err != nil {
+					return err
+				}
+				explicit, err = s.db.FederationRetainedExclusions(ctx, share.UID, explicit[len(explicit)-1], 400)
+				if err != nil {
+					return err
+				}
+			}
+			missing, err := s.db.FederationRetainedMissing(ctx, share.UID)
+			if err != nil {
+				return err
+			}
+			if missing {
+				return inputError("retained share archive generation changed; unproven absence remains pending")
+			}
+			continue
 		}
 		cutoff, err := s.db.MirrorPushCutoff(ctx)
 		if err != nil {

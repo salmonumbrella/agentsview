@@ -464,8 +464,56 @@ func TestRetainedNarrowingDoesNotInferDeletionAfterArchiveReplacement(t *testing
 	_, err = archive.GetDatabaseID(t.Context())
 	require.NoError(t, err)
 	err = service.processRetainedNarrowing(t.Context(), db.FederationLink{TokenFile: "/missing"}, []db.FederationShare{share}, &PushResult{})
-	require.Error(t, err)
-	assert.ErrorContains(t, err, "retained share archive generation changed")
+	require.NoError(t, err) // No delivered rows need cleanup or a credential.
+}
+
+func TestRetainedRestoreHonorsExplicitExclusionButNotMissingRows(t *testing.T) {
+	ctx := t.Context()
+	archive, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "archive.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, archive.Close()) })
+	policy := config.FederationHubConfig{Retention: "org-retained", AllowedLevels: []string{"summary"}, MinGroupSize: 3, SuggestedProjects: []string{}, Processing: "none"}
+	digest, err := export.DigestCanonical(policy)
+	require.NoError(t, err)
+	consent, err := json.Marshal(SharePreview{DeliveryNotice: shareDeliveryNotice, Policy: policy})
+	require.NoError(t, err)
+	var records []BatchRecord
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub", ProtocolVersions: []int{ProtocolVersion}, EnrollmentUID: "enr", Member: "member", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
+			return
+		}
+		var batch Batch
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&batch))
+		records = append(records, batch.Records...)
+		_ = json.NewEncoder(w).Encode(BatchAck{Committed: batch.Sequence, Refused: map[string]string{}})
+	}))
+	t.Cleanup(hub.Close)
+	file := filepath.Join(testutil.PrivateTempDir(t), "credential")
+	require.NoError(t, os.WriteFile(file, []byte("avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), 0600))
+	link := db.FederationLink{UID: "link", HubOrigin: hub.URL, HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: file, ProtocolVersion: ProtocolVersion, State: "active"}
+	require.NoError(t, archive.PutFederationLink(ctx, link))
+	require.NoError(t, archive.PutFederationShare(ctx, db.FederationShare{UID: "share", LinkUID: link.UID, NormalizedRemote: "github.com/example/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: string(consent), PolicyDigest: digest}))
+	_, err = archive.SetFederationGeneration(ctx, link.UID, "share", "old-generation")
+	require.NoError(t, err)
+	require.NoError(t, archive.RecordFederationDelivery(ctx, "share", []db.FederationDelivery{{RecordUID: "absent", SessionID: "absent", Hash: "a", State: "sent"}, {RecordUID: "excluded", SessionID: "excluded", Hash: "b", State: "sent"}}))
+	require.NoError(t, archive.UpsertSession(ctx, db.Session{ID: "excluded", Project: "fixture", Machine: "install", Agent: "claude"}))
+	require.NoError(t, archive.PutFederationExclusion(ctx, "excluded", "private"))
+	require.NoError(t, archive.StopFederationShare(ctx, link.UID, "share", "remove"))
+	require.NoError(t, archive.ReceiptFederationStop(ctx, link.UID, "share", "retained", 1, 0))
+	share, err := archive.GetFederationShare(ctx, link.UID, "share")
+	require.NoError(t, err)
+	svc := NewService("spoke", "spoke", policy, archive)
+	err = svc.processRetainedNarrowing(ctx, link, []db.FederationShare{share}, &PushResult{})
+	require.ErrorContains(t, err, "retained share archive generation changed")
+	require.Len(t, records, 1)
+	assert.Equal(t, "excluded", records[0].RecordUID)
+	assert.Equal(t, "tombstone", records[0].Kind)
+	assert.Nil(t, records[0].Payload)
+	ledger, err := archive.FederationLedger(ctx, "share")
+	require.NoError(t, err)
+	assert.Equal(t, "sent", ledger["absent"].State)
+	assert.Equal(t, "tombstoned", ledger["excluded"].State)
 }
 
 func TestRetainedPendingTombstoneIsNotReplayedAfterRestore(t *testing.T) {
@@ -509,7 +557,7 @@ func TestRetainedPendingTombstoneIsNotReplayedAfterRestore(t *testing.T) {
 	require.NoError(t, err)
 	share := db.FederationShare{UID: "share", State: "paused", NormalizedRemote: remote, StopReceipt: "retained", SourceGeneration: generation, Epoch: 1, PendingBatch: string(batch)}
 	svc := NewService("spoke", "spoke", policy, archive)
-	err = svc.processRetainedNarrowing(ctx, db.FederationLink{HubOrigin: hub.URL, HubArchiveID: "hub", TokenFile: file}, []db.FederationShare{share}, &PushResult{})
+	err = svc.processRetainedNarrowing(ctx, db.FederationLink{HubOrigin: hub.URL, HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: file}, []db.FederationShare{share}, &PushResult{})
 	require.ErrorContains(t, err, "unresolved deletion after restore")
 	assert.Zero(t, batches)
 }

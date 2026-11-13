@@ -1529,4 +1529,6 @@ purge covers its owned records, not a stale live mirror or reader-made copy.
 Incremental PostgreSQL pushes consume the deletion journal and verify local
 absence and target ownership; a successful refresh is needed to remove stale
 mirror rows. Stopped shares retain local accounting and destination context.
+After a source generation changes, retained shares may send explicit
+exclusions as tombstones; missing rows alone do not prove deletion.
 The additive `1 << 24` archive bit protects withdrawal state from older writers.

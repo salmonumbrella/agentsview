@@ -272,3 +272,51 @@ func (db *DB) FederationChangedCandidates(ctx context.Context, share, marker str
 	}
 	return ids, rows.Err()
 }
+
+// FederationRetainedExclusions returns a bounded page of explicit exclusions
+// with outstanding delivery evidence for a stopped share.
+func (db *DB) FederationRetainedExclusions(ctx context.Context, share, after string, limit int) ([]string, error) {
+	rows, err := db.getReader().QueryContext(ctx, `SELECT d.record_uid FROM federation_deliveries d JOIN federation_exclusions e ON e.session_id=d.session_id WHERE d.share_uid=? AND d.state NOT IN ('refused','tombstoned') AND d.record_uid>? ORDER BY d.record_uid LIMIT ?`, share, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// FederationRetainedMissing reports unproven absence after a restore.
+func (db *DB) FederationRetainedMissing(ctx context.Context, share string) (bool, error) {
+	var missing bool
+	err := db.getReader().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM federation_deliveries d WHERE d.share_uid=? AND d.state NOT IN ('refused','tombstoned') AND NOT EXISTS(SELECT 1 FROM sessions s WHERE s.id=d.session_id) AND NOT EXISTS(SELECT 1 FROM federation_exclusions e WHERE e.session_id=d.session_id))`, share).Scan(&missing)
+	return missing, err
+}
+
+func (db *DB) FederationExplicitExclusions(ctx context.Context, share string, ids []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(ids))
+	err := QueryChunkedSize(ids, 400, func(chunk []string) error {
+		placeholders, args := InPlaceholders(chunk)
+		args = append([]any{share}, args...)
+		rows, err := db.getReader().QueryContext(ctx, `SELECT d.record_uid FROM federation_deliveries d JOIN federation_exclusions e ON e.session_id=d.session_id WHERE d.share_uid=? AND d.record_uid IN `+placeholders, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			out[id] = true
+		}
+		return rows.Err()
+	})
+	return out, err
+}

@@ -2943,9 +2943,9 @@ delivery and queues cleanup; run `federation push` and check status or
 `share show` for the receipt. A member-controlled hub purges its records; an
 organization-retained hub keeps them and reports retention. An offline hub
 leaves cleanup pending for retry. A push can deliver to the current hub while
-reporting that cleanup for an earlier hub remains pending. If a retained share's source archive is
-replaced, deletion narrowing waits for fresh consent rather than treating
-missing records in the replacement as deletions.
+reporting that cleanup for an earlier hub remains pending. After a retained
+share's source archive is replaced, explicit exclusions can still narrow its
+records. A missing record alone does not prove deletion and remains pending.
 `federation exclude <session-id> [--reason text]` works before or after joining
 and keeps a session out of all shares in this archive, including after removal
 or rejoining. `federation push --dry-run` prints selected summaries locally. Run
