@@ -821,3 +821,62 @@ func TestFederationPulseAndPublicExportShareMessageLessExistence(t *testing.T) {
 	assert.Equal(t, Ptr(int64(3)), pulse.Outcomes[0].Metrics["sessions"].Value)
 	assert.Equal(t, int64(hour.Activity.Totals.NewSessions), *pulse.Totals["sessions"].Value)
 }
+
+func TestFederationPulsePartialCostRespectsCompletenessSupport(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		unpriced   int
+		wantState  string
+		wantValue  *int64
+		suppressed bool
+	}{
+		{"all members", 3, "partial", Ptr(int64(600)), false},
+		{"one member", 1, "suppressed", nil, true},
+		{"fully priced", 0, "available", Ptr(int64(600)), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := testDB(t)
+			ctx := t.Context()
+			start := "2026-07-28T09:00:00Z"
+			for i, name := range []string{"a", "b", "c"} {
+				enrollment, spoke, share := "e-"+name, "s-"+name, "h-"+name
+				require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: name, CredentialSHA256: "digest-" + name}))
+				_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+				require.NoError(t, err)
+				cost := money.Money{Microdollars: int64((i + 1) * 100)}
+				rows := []UsageEvent{{Source: "fixture", Model: "known", InputTokens: 10, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: start, DedupKey: name + "-known"}}
+				if i < tc.unpriced {
+					rows = append(rows, UsageEvent{Source: "fixture", Model: "synthetic-unpriced-model", InputTokens: 20, OccurredAt: start, DedupKey: name + "-unknown"})
+				}
+				record := FederationHubRecord{UID: name, Hash: "hash", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: name, Project: "example/repo", Agent: "codex", StartedAt: &start}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: rows}}
+				_, err = d.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", []FederationHubRecord{record})
+				require.NoError(t, err)
+			}
+			now := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+			day, err := d.ExportReportingDay(ctx, ReportingExportOptions{Date: now.AddDate(0, 0, -1), Now: now, SchemaVersion: export.ReportingJointSchemaVersion})
+			require.NoError(t, err)
+			var unpriced int64
+			for _, cell := range day.Hours[9].Joint.Cells {
+				unpriced += cell.Pricing.UnpricedRows
+			}
+			assert.Equal(t, int64(tc.unpriced), unpriced)
+			assert.EqualValues(t, 600, day.Hours[9].Usage.Totals.Cost.Microdollars)
+			pulse, err := d.readFederationPulse(ctx, "2026-07-28", 3, now)
+			require.NoError(t, err)
+			assert.Equal(t, tc.suppressed, pulse.Suppressed)
+			assert.Equal(t, tc.wantState, pulse.Totals["cost_microdollars"].State)
+			assert.Equal(t, tc.wantValue, pulse.Totals["cost_microdollars"].Value)
+			if !tc.suppressed {
+				require.Len(t, pulse.Projects, 1)
+				assert.Equal(t, tc.wantState, pulse.Projects[0].Totals["cost_microdollars"].State)
+				if tc.unpriced == 3 {
+					for _, model := range pulse.Models {
+						if model.Key == "synthetic-unpriced-model" {
+							assert.Equal(t, "unavailable", model.Metrics["cost_microdollars"].State)
+						}
+					}
+				}
+			}
+		})
+	}
+}

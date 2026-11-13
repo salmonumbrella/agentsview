@@ -328,14 +328,18 @@ func federationPulseMetrics(cells map[federationPulseCellKey]*federationPulseCel
 		out[metric] = FederationPulseMetric{State: state}
 	}
 	for k, cell := range cells {
-		if k.kind != kind || k.key != key {
+		if k.kind != kind || k.key != key || k.metric == "cost_unpriced_support" {
 			continue
 		}
 		if suppressed {
 			out[k.metric] = FederationPulseMetric{State: "suppressed"}
 		} else {
 			value := cell.value
-			out[k.metric] = FederationPulseMetric{Value: &value, State: "available"}
+			state := "available"
+			if k.metric == "cost_microdollars" && cells[federationPulseCellKey{kind, key, "cost_unpriced_support"}] != nil {
+				state = "partial"
+			}
+			out[k.metric] = FederationPulseMetric{Value: &value, State: state}
 		}
 	}
 	return out
@@ -354,8 +358,12 @@ func federationPulseGroups(cells map[federationPulseCellKey]*federationPulseCell
 	}
 	slices.Sort(ordered)
 	out := make([]FederationPulseGroup, 0, len(ordered))
+	var defaults []string
+	if kind == "agent" || kind == "model" {
+		defaults = []string{"tokens", "cost_microdollars"}
+	}
 	for _, key := range ordered {
-		out = append(out, FederationPulseGroup{Key: key, Metrics: federationPulseMetrics(cells, kind, key, nil, false)})
+		out = append(out, FederationPulseGroup{Key: key, Metrics: federationPulseMetrics(cells, kind, key, defaults, false)})
 	}
 	return out
 }
@@ -531,9 +539,12 @@ func (db *DB) readFederationPulse(ctx context.Context, since string, minimum int
 							accumulator.add(id, group[0], group[1], "tokens", amount)
 						}
 					}
-					if contribution.costObserved {
-						for _, group := range [][2]string{{"total", ""}, {"agent", key.agent}, {"model", key.model}} {
+					for _, group := range [][2]string{{"total", ""}, {"agent", key.agent}, {"model", key.model}} {
+						if contribution.costObserved {
 							accumulator.add(id, group[0], group[1], "cost_microdollars", contribution.usage.cost.Microdollars)
+						}
+						if contribution.unpriced {
+							accumulator.add(id, group[0], group[1], "cost_unpriced_support", 0)
 						}
 					}
 				}

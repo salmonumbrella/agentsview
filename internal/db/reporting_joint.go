@@ -67,6 +67,7 @@ type reportingJointSupport map[reportingCellKey]map[reportingJointContributor]*r
 type reportingJointContribution struct {
 	usage        reportingUsageAccum
 	costObserved bool
+	unpriced     bool
 }
 
 func jointReportingHour(
@@ -156,6 +157,7 @@ func jointReportingHour(
 				return nil, fmt.Errorf("sum joint contributor usage: %w", err)
 			}
 			contribution.costObserved = contribution.costObserved || row.Priced || row.Cost.Microdollars != 0
+			contribution.unpriced = contribution.unpriced || !row.Priced
 		}
 		if !row.Priced {
 			state.cell.Pricing.UnpricedRows++

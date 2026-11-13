@@ -287,7 +287,11 @@ func printFederationPulse(out io.Writer, pulse db.FederationPulse) error {
 		for _, key := range keys {
 			value := values[key]
 			if value.Value != nil {
-				fmt.Fprintf(&b, "  %s: %d\n", key, *value.Value)
+				if value.State == "partial" {
+					fmt.Fprintf(&b, "  %s: %d (partial)\n", key, *value.Value)
+				} else {
+					fmt.Fprintf(&b, "  %s: %d\n", key, *value.Value)
+				}
 			} else {
 				fmt.Fprintf(&b, "  %s: %s\n", key, value.State)
 			}

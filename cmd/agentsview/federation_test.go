@@ -302,3 +302,9 @@ func TestFederationStatusPrintsStopReceipts(t *testing.T) {
 	assert.Contains(t, string(encoded), `"stop_receipt":"purged"`)
 	assert.Contains(t, string(encoded), `"stop_receipt":"retained"`)
 }
+
+func TestFederationPulseTextQualifiesPartialCost(t *testing.T) {
+	var out bytes.Buffer
+	require.NoError(t, printFederationPulse(&out, db.FederationPulse{Totals: map[string]db.FederationPulseMetric{"cost_microdollars": {Value: new(int64(600)), State: "partial"}}}))
+	assert.Contains(t, out.String(), "cost_microdollars: 600 (partial)")
+}

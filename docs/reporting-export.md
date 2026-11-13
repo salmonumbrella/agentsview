@@ -576,9 +576,11 @@ window. Stopped or revoked shares retained under their accepted policy remain
 eligible; purged and excluded records do not.
 
 Usage follows the reporting export's survivor and pricing rules for the same
-owned sessions. A cost can be unavailable even when tokens are present. Stored
-outcome `unknown` is distinct from a missing outcome, and missing session health
-is not a healthy grade. Subagent classification takes precedence over automation.
+owned sessions. A partial cost is the known amount; it excludes amounts that
+could not be priced. A cost can be unavailable even when tokens are present.
+Stored outcome `unknown` is distinct from a missing outcome, and missing session
+health is not a healthy grade. Subagent classification takes precedence over
+automation.
 Neither message-less sessions nor missing usage imply measured activity time.
 
 Each released metric needs the hub policy's minimum number of distinct member
