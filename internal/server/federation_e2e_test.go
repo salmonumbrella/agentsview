@@ -784,6 +784,7 @@ func TestFederationExclusionBetweenBatches(t *testing.T) {
 	var exclusionErr error
 	var childPayload string
 	var parentAfterTrash bool
+	var excludedBeforeRepair bool
 	var wire bytes.Buffer
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
@@ -809,6 +810,26 @@ func TestFederationExclusionBetweenBatches(t *testing.T) {
 			srv.Handler().ServeHTTP(buffered, r)
 			if batches == 1 && buffered.Code == http.StatusOK {
 				exclusionErr = spokeDB.SoftDeleteSession(r.Context(), "s1000")
+			}
+			for key, values := range buffered.Header() {
+				for _, value := range values {
+					w.Header().Add(key, value)
+				}
+			}
+			w.WriteHeader(buffered.Code)
+			_, _ = w.Write(buffered.Body.Bytes())
+			return
+		}
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/reconcile") && !excludedBeforeRepair {
+			buffered := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(buffered, r)
+			var response db.FederationInventoryResult
+			if buffered.Code == http.StatusOK {
+				require.NoError(t, json.Unmarshal(buffered.Body.Bytes(), &response))
+				if response.Complete {
+					require.NoError(t, spokeDB.PutFederationExclusion(r.Context(), "s0999", "private"))
+					excludedBeforeRepair = true
+				}
 			}
 			for key, values := range buffered.Header() {
 				for _, value := range values {
@@ -849,6 +870,9 @@ func TestFederationExclusionBetweenBatches(t *testing.T) {
 		if _, e := tx.ExecContext(ctx, `INSERT INTO usage_events(session_id,source,model,input_tokens,output_tokens,cost_status,occurred_at,dedup_key) VALUES('s0000','fixture','model-a',100,20,'unknown','2026-01-02T00:00:00Z','page-child')`); e != nil {
 			return e
 		}
+		if _, e := tx.ExecContext(ctx, `UPDATE sessions SET parent_session_id='s0999', relationship_type='subagent' WHERE id='s0001'`); e != nil {
+			return e
+		}
 		_, e := tx.ExecContext(ctx, `UPDATE sessions SET parent_session_id='s1001', relationship_type='subagent' WHERE id='s0000'`)
 		return e
 	}))
@@ -863,6 +887,7 @@ func TestFederationExclusionBetweenBatches(t *testing.T) {
 	assert.Equal(t, 4, batches)
 	assert.Contains(t, childPayload, "s1001")
 	assert.False(t, parentAfterTrash)
+	assert.True(t, excludedBeforeRepair)
 	assert.NotContains(t, wire.String(), "CANARY")
 	var count, excluded int
 	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*),coalesce(sum(id='s1000'),0) FROM sessions`).Scan(&count, &excluded))
@@ -872,6 +897,9 @@ func TestFederationExclusionBetweenBatches(t *testing.T) {
 	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT coalesce(parent_session_id,''),relationship_type FROM sessions WHERE id='s0000'`).Scan(&parent, &relationship))
 	assert.Equal(t, "s1001", parent)
 	assert.Equal(t, "subagent", relationship)
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT coalesce(parent_session_id,''),relationship_type FROM sessions WHERE id='s0001'`).Scan(&parent, &relationship))
+	assert.Empty(t, parent)
+	assert.Empty(t, relationship)
 	var usageRows, inputTokens int
 	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*),coalesce(sum(input_tokens),0) FROM usage_events WHERE session_id='s0000'`).Scan(&usageRows, &inputTokens))
 	assert.Equal(t, 1, usageRows)
@@ -879,7 +907,7 @@ func TestFederationExclusionBetweenBatches(t *testing.T) {
 	_, err = spoke.Push(ctx)
 	require.NoError(t, err)
 	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions`).Scan(&count))
-	assert.Equal(t, 1001, count)
+	assert.Equal(t, 1000, count)
 	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*),coalesce(sum(input_tokens),0) FROM usage_events WHERE session_id='s0000'`).Scan(&usageRows, &inputTokens))
 	assert.Equal(t, 1, usageRows)
 	assert.Equal(t, 100, inputTokens)

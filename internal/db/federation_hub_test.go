@@ -633,4 +633,34 @@ func TestFederationSameHashAttachesLaterOwnedParent(t *testing.T) {
 	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT coalesce(parent_session_id,''),relationship_type FROM sessions WHERE id='z-parent'`).Scan(&gotParent, &relationship))
 	assert.Empty(t, gotParent)
 	assert.Empty(t, relationship)
+	foreign := share
+	foreign.UID = "foreign-share"
+	_, err = d.PutFederationHubShare(ctx, "spoke", foreign)
+	require.NoError(t, err)
+	foreignParent := FederationHubRecord{UID: "foreign-parent", Hash: "foreign", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: SessionBatchWrite{Session: Session{ID: "foreign-parent", Project: "p", Machine: "federated", Agent: "claude"}}}
+	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", foreign.UID, "policy", 1, 1, "foreign", []FederationHubRecord{foreignParent})
+	require.NoError(t, err)
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		if _, e := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent) VALUES('local-parent','local','host','claude')`); e != nil {
+			return e
+		}
+		_, e := tx.ExecContext(ctx, `INSERT INTO messages(session_id,ordinal,role,content) VALUES('local-parent',0,'user','original')`)
+		return e
+	}))
+	localParent := FederationHubRecord{UID: "local-parent", Hash: "local", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: SessionBatchWrite{Session: Session{ID: "local-parent", Project: "p", Machine: "federated", Agent: "claude"}}}
+	result, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 6, "refusal", []FederationHubRecord{localParent})
+	require.NoError(t, err)
+	assert.Equal(t, FederationCollision, result.Refused["local-parent"])
+	for i, parentID := range []string{"foreign-parent", "local-parent"} {
+		childID := "child-" + parentID
+		candidate := FederationHubRecord{UID: childID, Hash: "child", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: SessionBatchWrite{Session: Session{ID: childID, Project: "p", Machine: "federated", Agent: "claude", ParentSessionID: &parentID, RelationshipType: "subagent"}}}
+		_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, int64(7+i), childID, []FederationHubRecord{candidate})
+		require.NoError(t, err)
+		require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT coalesce(parent_session_id,''),relationship_type FROM sessions WHERE id=?`, childID).Scan(&gotParent, &relationship))
+		assert.Empty(t, gotParent)
+		assert.Empty(t, relationship)
+	}
+	var messages int
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT count(*) FROM messages WHERE session_id='local-parent' AND content='original'`).Scan(&messages))
+	assert.Equal(t, 1, messages)
 }
