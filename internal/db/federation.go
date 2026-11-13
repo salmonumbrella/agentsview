@@ -472,6 +472,28 @@ func (db *DB) ReceiptFederationStop(ctx context.Context, linkUID, uid, receipt s
 	})
 }
 
+// AdvanceFederationStopEpoch fences a durable stop after an authenticated hub
+// reports a newer grant. Pending delivery evidence remains in the ledger.
+func (db *DB) AdvanceFederationStopEpoch(ctx context.Context, linkUID, uid string, oldEpoch, nextEpoch int64) error {
+	if nextEpoch <= oldEpoch {
+		return ErrFederationSequence
+	}
+	return db.Update(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE federation_shares SET epoch=?,sequence=0,pending_batch='' WHERE link_uid=? AND share_uid=? AND epoch=? AND state<>'active' AND stop_receipt='pending' AND stop_intent IN ('pause','remove','leave','policy')`, nextEpoch, linkUID, uid, oldEpoch)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return ErrFederationSequence
+		}
+		return stampFederationVersion(ctx, tx)
+	})
+}
+
 // Resume requires a completed stop receipt and uses a new epoch so a stale
 // active registration cannot reopen the preceding grant.
 func (db *DB) ResumeFederationShare(ctx context.Context, linkUID, uid string) error {

@@ -417,6 +417,25 @@ func TestRetainedStoppedShareAllowsOnlyTombstoneNarrowing(t *testing.T) {
 	assert.Zero(t, count)
 }
 
+func TestStopKeepsHubAcceptedRetentionWhenNewConsentWasNotRegistered(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr", SpokeArchiveID: "spoke", Member: "member", CredentialSHA256: "digest"}))
+	share := FederationHubShare{UID: "share", EnrollmentUID: "enr", Remote: "example.org/repo", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "accepted", Epoch: 1, State: "active", Retention: "org-retained"}
+	_, err := d.PutFederationHubShare(ctx, "spoke", share)
+	require.NoError(t, err)
+	record := FederationHubRecord{UID: "owned", Hash: "hash", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: SessionBatchWrite{Session: Session{ID: "owned", Project: "p", Machine: "federated", Agent: "claude"}}}
+	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "accepted", 1, 1, "batch", []FederationHubRecord{record})
+	require.NoError(t, err)
+	share.State, share.Epoch, share.PolicyDigest, share.Retention = "stopped", 2, "new-policy", "member-controlled"
+	stopped, err := d.PutFederationHubShare(ctx, "spoke", share)
+	require.NoError(t, err)
+	assert.Equal(t, "org-retained", stopped.Retention)
+	var count int
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE id='owned'`).Scan(&count))
+	assert.Equal(t, 1, count)
+}
+
 func TestFederationRebuildKeepsOldRowsUntilAllRangesRepaired(t *testing.T) {
 	d := testDB(t)
 	ctx := t.Context()

@@ -22,6 +22,49 @@ import (
 	"go.kenn.io/agentsview/internal/testutil"
 )
 
+func TestStopRetriesAfterHubEpochAhead(t *testing.T) {
+	ctx := t.Context()
+	archive, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "archive.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, archive.Close()) })
+	policy := config.FederationHubConfig{Retention: "member-controlled", AllowedLevels: []string{"summary"}, MinGroupSize: 3, SuggestedProjects: []string{}, Processing: "none"}
+	digest, err := export.DigestCanonical(policy)
+	require.NoError(t, err)
+	consent, err := json.Marshal(SharePreview{DeliveryNotice: shareDeliveryNotice, Policy: policy})
+	require.NoError(t, err)
+	var epochs []int64
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub", SpokeArchiveID: "spoke", ProtocolVersions: []int{ProtocolVersion}, EnrollmentUID: "enr", Member: "member", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
+			return
+		}
+		var manifest ShareManifest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&manifest))
+		assert.Equal(t, "stop", manifest.Action)
+		epochs = append(epochs, manifest.Epoch)
+		view := ShareView{State: "accepted", Epoch: 5, Committed: 2, Retention: "org-retained"}
+		if manifest.Epoch == 6 {
+			view.State, view.Epoch, view.Committed = "stopped", 6, 0
+		}
+		_ = json.NewEncoder(w).Encode(view)
+	}))
+	t.Cleanup(hub.Close)
+	file := filepath.Join(testutil.PrivateTempDir(t), "credential")
+	require.NoError(t, os.WriteFile(file, []byte("avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), 0600))
+	link := db.FederationLink{UID: "link", HubOrigin: hub.URL, HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: file, ProtocolVersion: ProtocolVersion, State: "active"}
+	require.NoError(t, archive.PutFederationLink(ctx, link))
+	require.NoError(t, archive.PutFederationShare(ctx, db.FederationShare{UID: "share", LinkUID: link.UID, NormalizedRemote: "github.com/example/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: string(consent), PolicyDigest: digest}))
+	require.NoError(t, archive.StopFederationShare(ctx, link.UID, "share", "remove"))
+	svc := NewService("spoke", "spoke", policy, archive)
+	_, err = svc.Push(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, []int64{1, 6}, epochs)
+	share, err := archive.GetFederationShare(ctx, link.UID, "share")
+	require.NoError(t, err)
+	assert.EqualValues(t, 6, share.Epoch)
+	assert.Equal(t, "retained", share.StopReceipt)
+}
+
 func TestPushOldConsentDoesNotDeliver(t *testing.T) {
 	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
 	require.NoError(t, err)

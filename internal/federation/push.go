@@ -210,11 +210,28 @@ func (s *Service) processFederationStops(ctx context.Context, link db.Federation
 		if e = validateHandshake(handshake, link.HubArchiveID); e != nil {
 			return e
 		}
+		if handshake.EnrollmentUID != link.EnrollmentUID || handshake.Member != link.Member {
+			return inputError("federation hub identity mismatch")
+		}
 		key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: share.NormalizedRemote}).Key
 		manifest := ShareManifest{Protocol: ProtocolVersion, SpokeInstance: s.archiveID, ShareUID: share.UID, Epoch: share.Epoch, Remote: share.NormalizedRemote, ProjectKey: key, Level: share.Level, Attribution: share.Attribution, Audience: share.Audience, PolicyDigest: share.PolicyDigest, Action: "stop", Policy: &consent.Policy}
 		view, e := PutShare(ctx, link.HubOrigin, token, s.archiveID, manifest)
 		if e != nil {
 			return e
+		}
+		if view.Epoch > share.Epoch {
+			next := view.Epoch + 1
+			if next <= view.Epoch {
+				return inputError("invalid federation stop receipt")
+			}
+			if e = s.db.AdvanceFederationStopEpoch(ctx, link.UID, share.UID, share.Epoch, next); e != nil {
+				return e
+			}
+			share.Epoch, manifest.Epoch = next, next
+			view, e = PutShare(ctx, link.HubOrigin, token, s.archiveID, manifest)
+			if e != nil {
+				return e
+			}
 		}
 		if view.State != "stopped" || view.Epoch != share.Epoch || (view.Retention != "member-controlled" && view.Retention != "org-retained") {
 			return inputError("invalid federation stop receipt")
