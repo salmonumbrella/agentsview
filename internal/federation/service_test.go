@@ -560,6 +560,70 @@ func TestShareOperationsWithoutLink(t *testing.T) {
 	require.NoError(t, svc.Exclude(t.Context(), "session-a", "private"))
 }
 
+func TestLegacyPausedSharesCompleteStopBeforeResume(t *testing.T) {
+	ctx := t.Context()
+	policy := config.FederationHubConfig{Retention: "member-controlled", AllowedLevels: []string{"summary"}, MinGroupSize: 3, SuggestedProjects: []string{}, Processing: "none"}
+	digest, err := export.DigestCanonical(policy)
+	require.NoError(t, err)
+	consent, err := json.Marshal(SharePreview{DeliveryNotice: shareDeliveryNotice, Policy: policy})
+	require.NoError(t, err)
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub", SpokeArchiveID: "spoke", ProtocolVersions: []int{ProtocolVersion}, EnrollmentUID: "enr", Member: "member", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
+			return
+		}
+		var manifest ShareManifest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&manifest))
+		assert.Equal(t, "stop", manifest.Action)
+		_ = json.NewEncoder(w).Encode(ShareView{State: "stopped", Epoch: manifest.Epoch, Retention: "member-controlled"})
+	}))
+	t.Cleanup(hub.Close)
+	file := filepath.Join(testutil.PrivateTempDir(t), "credential")
+	require.NoError(t, os.WriteFile(file, []byte("avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), 0600))
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	old, err := db.OpenIsolated(ctx, path)
+	require.NoError(t, err)
+	require.NoError(t, old.PutFederationLink(ctx, db.FederationLink{UID: "link", HubOrigin: hub.URL, HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: file, ProtocolVersion: ProtocolVersion, State: "active"}))
+	for _, uid := range []string{"manual", "policy"} {
+		require.NoError(t, old.PutFederationShare(ctx, db.FederationShare{UID: uid, LinkUID: "link", NormalizedRemote: "github.com/example/" + uid, Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: string(consent), PolicyDigest: digest}))
+	}
+	require.NoError(t, old.Update(ctx, func(tx *sql.Tx) error {
+		_, e := tx.ExecContext(ctx, `UPDATE federation_shares SET state=CASE share_uid WHEN 'manual' THEN 'paused' ELSE 'policy_paused' END`)
+		return e
+	}))
+	require.NoError(t, old.Close())
+	legacy, err := sql.Open("sqlite3", path)
+	require.NoError(t, err)
+	_, err = legacy.ExecContext(ctx, `ALTER TABLE federation_shares DROP COLUMN stop_intent; ALTER TABLE federation_shares DROP COLUMN stop_receipt`)
+	require.NoError(t, err)
+	require.NoError(t, legacy.Close())
+	copied, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "copy.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, copied.Close()) })
+	require.NoError(t, copied.CopyFederationStateFrom(ctx, path))
+	upgraded, err := db.OpenIsolated(ctx, path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, upgraded.Close()) })
+	for _, archive := range []*db.DB{copied, upgraded} {
+		svc := NewService("spoke", "spoke", policy, archive)
+		assert.ErrorContains(t, svc.ResumeShare(ctx, "manual"), "cleanup pending")
+		_, err = svc.Push(ctx)
+		require.NoError(t, err)
+		manual, err := archive.GetFederationShare(ctx, "link", "manual")
+		require.NoError(t, err)
+		assert.Equal(t, "paused", manual.State)
+		assert.Equal(t, "purged", manual.StopReceipt)
+		policyShare, err := archive.GetFederationShare(ctx, "link", "policy")
+		require.NoError(t, err)
+		assert.Equal(t, "policy_paused", policyShare.State)
+		assert.Equal(t, "purged", policyShare.StopReceipt)
+		require.NoError(t, svc.ResumeShare(ctx, "manual"))
+		manual, err = archive.GetFederationShare(ctx, "link", "manual")
+		require.NoError(t, err)
+		assert.Equal(t, "active", manual.State)
+	}
+}
+
 func TestLegacyRevokeRequiresMatchingRetentionProof(t *testing.T) {
 	for _, retention := range []string{"member-controlled", "org-retained"} {
 		t.Run(retention, func(t *testing.T) {

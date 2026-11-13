@@ -1018,15 +1018,17 @@ func TestFederationIndividualWithdrawalKeepsOtherSession(t *testing.T) {
 			require.NoError(t, spoke.Join(ctx, hubServer.URL, "hub-a", file))
 			remote := "github.com/example/repo"
 			key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
+			sourceDir := t.TempDir()
 			require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
 				if _, e := tx.ExecContext(ctx, `INSERT INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install')`); e != nil {
 					return e
 				}
 				for _, id := range []string{"a", "b"} {
-					if _, e := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES(?,'fixture','install','claude',?,'2026-01-02T00:00:00Z',1)`, id, id); e != nil {
+					path := filepath.Join(sourceDir, id)
+					if _, e := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES(?,'fixture','install','claude',?,'2026-01-02T00:00:00Z',1)`, id, path); e != nil {
 						return e
 					}
-					if _, e := tx.ExecContext(ctx, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES(?,'install','claude',?)`, id, id); e != nil {
+					if _, e := tx.ExecContext(ctx, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES(?,'install','claude',?)`, id, path); e != nil {
 						return e
 					}
 					if _, e := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES(?,'fixture','install','2026-01-01','resolved',1,?,'git_remote',?)`, id, remote, key); e != nil {
@@ -1048,6 +1050,17 @@ func TestFederationIndividualWithdrawalKeepsOtherSession(t *testing.T) {
 			require.Equal(t, 1, b)
 			require.Greater(t, usage, 0)
 			require.Equal(t, 1, owned)
+			shares, err := spoke.Shares(ctx)
+			require.NoError(t, err)
+			require.Len(t, shares.Shares, 1)
+			before, err := spoke.Share(ctx, shares.Shares[0].UID)
+			require.NoError(t, err)
+			require.NotEmpty(t, before.Records["a"].Hash)
+			_, err = os.Stat(filepath.Join(sourceDir, "a"))
+			require.ErrorIs(t, err, os.ErrNotExist)
+			request(http.MethodPost, "/api/v1/federation/push", nil)
+			require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='a'`).Scan(&a))
+			assert.Equal(t, 1, a)
 			if operation == "exclude" {
 				request(http.MethodPost, "/api/v1/federation/exclusions", map[string]string{"session_id": "a", "reason": "private"})
 			} else {
@@ -1068,6 +1081,14 @@ func TestFederationIndividualWithdrawalKeepsOtherSession(t *testing.T) {
 				assert.Zero(t, usage)
 				assert.Zero(t, owned)
 			}
+			page, err := hubDB.ListSessions(ctx, db.SessionFilter{IDs: []string{"a", "b"}, IncludeChildren: true})
+			require.NoError(t, err)
+			require.Len(t, page.Sessions, 1)
+			assert.Equal(t, "b", page.Sessions[0].ID)
+			after, err := spoke.Share(ctx, shares.Shares[0].UID)
+			require.NoError(t, err)
+			assert.Equal(t, "tombstoned", after.Records["a"].State)
+			assert.Equal(t, before.Records["a"].Hash, after.Records["a"].Hash)
 			var localA int
 			require.NoError(t, spokeDB.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='a'`).Scan(&localA))
 			if operation == "exclude" {
@@ -1075,7 +1096,7 @@ func TestFederationIndividualWithdrawalKeepsOtherSession(t *testing.T) {
 			} else {
 				assert.Zero(t, localA)
 			}
-			shares, err := spoke.Shares(ctx)
+			shares, err = spoke.Shares(ctx)
 			require.NoError(t, err)
 			require.Len(t, shares.Shares, 1)
 			assert.Equal(t, "active", shares.Shares[0].State)
@@ -1122,8 +1143,13 @@ func TestFederationRestoreReconcilesAndContinuesDeletion(t *testing.T) {
 					return nil
 				}))
 			}
-			seed(old, "a", "c")
+			seed(old, "a")
 			require.NoError(t, old.ReplaceSessionUsageEvents(ctx, "a", []db.UsageEvent{{SessionID: "a", Source: "fixture", Model: "model", InputTokens: 42, OccurredAt: "2026-01-02T00:00:00Z", DedupKey: "a-usage"}}))
+			// Preserve an earlier same-identity archive before federation state is
+			// copied back from the newer archive after its journals advance.
+			snapshot := filepath.Join(t.TempDir(), "snapshot.db")
+			require.NoError(t, old.SnapshotTo(ctx, snapshot))
+			seed(old, "c")
 			spoke := federation.NewService("spoke", "spoke-a", cfg.Federation.Hub, old)
 			require.NoError(t, spoke.Join(ctx, peer.URL, "hub-a", file))
 			preview, err := spoke.PreviewShare(ctx, federation.ShareGrant{Project: remote, Level: "summary", Attribution: "pooled"})
@@ -1131,8 +1157,6 @@ func TestFederationRestoreReconcilesAndContinuesDeletion(t *testing.T) {
 			require.NoError(t, spoke.AddShare(ctx, preview))
 			_, err = spoke.Push(ctx)
 			require.NoError(t, err)
-			snapshot := filepath.Join(t.TempDir(), "snapshot.db")
-			require.NoError(t, old.SnapshotTo(ctx, snapshot))
 			seed(old, "b")
 			_, err = spoke.Push(ctx)
 			require.NoError(t, err)
@@ -1152,7 +1176,7 @@ func TestFederationRestoreReconcilesAndContinuesDeletion(t *testing.T) {
 			} else {
 				restored, err = db.OpenIsolated(ctx, snapshot)
 				require.NoError(t, err)
-				require.NoError(t, restored.DeleteSession(ctx, "c"))
+				require.NoError(t, restored.CopyFederationStateFrom(ctx, old.Path()))
 			}
 			t.Cleanup(func() { require.NoError(t, restored.Close()) })
 			recovered := federation.NewService("spoke", "spoke-a", cfg.Federation.Hub, restored)
