@@ -67,7 +67,7 @@ func TestStopRetriesAfterHubEpochAhead(t *testing.T) {
 }
 
 func TestRetiredCleanupFailureDoesNotBlockCurrentShare(t *testing.T) {
-	for _, fault := range []string{"missing credential", "offline", "revoked", "identity mismatch", "retained generation"} {
+	for _, fault := range []string{"missing credential", "offline", "revoked", "identity mismatch", "retained generation", "current error"} {
 		t.Run(fault, func(t *testing.T) {
 			ctx := t.Context()
 			archive, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "archive.db"))
@@ -83,6 +83,10 @@ func TestRetiredCleanupFailureDoesNotBlockCurrentShare(t *testing.T) {
 			hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.Method == http.MethodGet:
+					if fault == "current error" {
+						http.Error(w, "unavailable", http.StatusServiceUnavailable)
+						return
+					}
 					_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub-b", ProtocolVersions: []int{ProtocolVersion}, EnrollmentUID: "enr-b", Member: "member", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
 				case r.Method == http.MethodPut:
 					_ = json.NewEncoder(w).Encode(ShareView{State: "accepted", Epoch: 1, Committed: sequence})
@@ -106,6 +110,12 @@ func TestRetiredCleanupFailureDoesNotBlockCurrentShare(t *testing.T) {
 			file := filepath.Join(testutil.PrivateTempDir(t), "credential")
 			require.NoError(t, os.WriteFile(file, []byte("avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), 0600))
 			oldHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPut {
+					var manifest ShareManifest
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&manifest))
+					_ = json.NewEncoder(w).Encode(ShareView{State: "stopped", Epoch: manifest.Epoch, Retention: "member-controlled"})
+					return
+				}
 				assert.Equal(t, http.MethodGet, r.Method)
 				state, hubID := "enrolled", "hub-a"
 				if fault == "revoked" {
@@ -151,11 +161,19 @@ func TestRetiredCleanupFailureDoesNotBlockCurrentShare(t *testing.T) {
 			svc := NewService("spoke", "spoke", policy, archive)
 			result, pushErr := svc.Push(ctx)
 			require.Error(t, pushErr)
-			assert.Equal(t, 1, result.Sent)
-			assert.Equal(t, []string{"selected"}, delivered)
+			if fault == "current error" {
+				assert.Zero(t, result.Sent)
+				assert.Empty(t, delivered)
+				assert.ErrorContains(t, pushErr, "HTTP 503")
+			} else {
+				assert.Equal(t, 1, result.Sent)
+				assert.Equal(t, []string{"selected"}, delivered)
+			}
 			pending, err := archive.GetFederationShare(ctx, old.UID, "old-share")
 			require.NoError(t, err)
-			if fault == "retained generation" {
+			if fault == "current error" {
+				assert.Equal(t, "purged", pending.StopReceipt)
+			} else if fault == "retained generation" {
 				assert.Equal(t, "retained", pending.StopReceipt)
 				assert.ErrorContains(t, pushErr, "generation changed")
 			} else {
