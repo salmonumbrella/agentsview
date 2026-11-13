@@ -1,9 +1,9 @@
 package config
 
 import (
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestFederationConfigDefaultsAndValidation(t *testing.T) {
@@ -13,8 +13,6 @@ func TestFederationConfigDefaultsAndValidation(t *testing.T) {
 	assert.Equal(t, []string{"summary"}, cfg.Federation.Hub.AllowedLevels)
 	assert.Equal(t, 3, cfg.Federation.Hub.MinGroupSize)
 	assert.Equal(t, "none", cfg.Federation.Hub.Processing)
-	err := loadMinimalErrWithConfig(t, map[string]any{"federation": map[string]any{"role": "unknown"}})
-	require.Error(t, err)
 }
 
 func TestFederationHubPolicyOnlyValidatedForHub(t *testing.T) {
@@ -23,6 +21,8 @@ func TestFederationHubPolicyOnlyValidatedForHub(t *testing.T) {
 		err := loadMinimalErrWithConfig(t, cfg)
 		if role == "off" || role == "spoke" {
 			assert.NoError(t, err)
+		} else if role == "unknown" {
+			assert.ErrorContains(t, err, "[federation] role must be off, spoke or hub")
 		} else {
 			assert.Error(t, err)
 		}

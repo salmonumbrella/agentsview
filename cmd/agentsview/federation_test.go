@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -18,29 +17,6 @@ import (
 	"go.kenn.io/agentsview/internal/federation"
 	"go.kenn.io/agentsview/internal/testutil"
 )
-
-func TestFederationJoinResolvesCredentialBeforeHandoff(t *testing.T) {
-	file := filepath.Join(testutil.PrivateTempDir(t), "credential")
-	require.NoError(t, os.WriteFile(file, []byte("avfc_fixture"), 0600))
-	t.Chdir(filepath.Dir(file))
-	relative := "credential"
-	var got struct {
-		CredentialFile string `json:"credential_file"`
-		Hub            string `json:"hub"`
-		HubArchive     string `json:"hub_archive"`
-	}
-	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/api/v1/federation/link", r.URL.Path)
-		assert.NoError(t, json.NewDecoder(r.Body).Decode(&got))
-		_, _ = w.Write([]byte(`{"joined":true}`))
-	}))
-	t.Cleanup(daemon.Close)
-	err := joinFederation(t.Context(), daemon.URL, "", "https://hub.example/av", "hub-a", relative)
-	require.NoError(t, err)
-	assert.Equal(t, file, got.CredentialFile)
-	assert.Equal(t, "https://hub.example/av", got.Hub)
-	assert.Equal(t, "hub-a", got.HubArchive)
-}
 
 func TestFederationRelativeCredentialRemainsUsableAfterDaemonDirectoryChanges(t *testing.T) {
 	database, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
@@ -56,6 +32,7 @@ func TestFederationRelativeCredentialRemainsUsableAfterDaemonDirectoryChanges(t 
 	t.Cleanup(hub.Close)
 	svc := federation.NewService("spoke", "spoke-a", policy, database)
 	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/federation/link", r.URL.Path)
 		var input struct {
 			Hub            string `json:"hub"`
 			HubArchive     string `json:"hub_archive"`
@@ -89,7 +66,6 @@ func TestFederationEnrollmentShowsCredentialOnlyOnce(t *testing.T) {
 	credential := "avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	require.NoError(t, printFederationEnrollment(&stdout, &stderr, credential, "enr-a", "hub-a"))
 	assert.Equal(t, credential+"\n", stdout.String())
-	assert.Equal(t, 1, strings.Count(stdout.String(), credential))
 	assert.NotContains(t, stderr.String(), credential)
 	assert.Contains(t, stderr.String(), "hub-a")
 }

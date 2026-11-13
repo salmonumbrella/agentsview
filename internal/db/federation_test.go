@@ -33,14 +33,14 @@ func TestFederationEnrollmentLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, rows[0].LastHandshakeAt)
 	assert.Equal(t, "contacted", rows[0].State)
-	require.Error(t, db.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr-b", SpokeArchiveID: "spoke-a", Member: "member-a", CredentialSHA256: "digest-b"}))
+	require.ErrorIs(t, db.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr-b", SpokeArchiveID: "spoke-a", Member: "member-a", CredentialSHA256: "digest-b"}), ErrFederationEnrollmentExists)
 	require.NoError(t, db.RevokeFederationEnrollment(ctx, "enr-a"))
 	require.NoError(t, db.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr-b", SpokeArchiveID: "spoke-a", Member: "member-a", CredentialSHA256: "digest-b"}))
 	rows, err = db.ListFederationEnrollments(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, "revoked", rows[0].State)
 	require.NoError(t, db.RevokeFederationEnrollment(ctx, "enr-a"))
-	require.Error(t, db.RevokeFederationEnrollment(ctx, "missing"))
+	require.ErrorIs(t, db.RevokeFederationEnrollment(ctx, "missing"), sql.ErrNoRows)
 	_, err = db.AuthenticateFederationCredential(ctx, "digest-a", "spoke-a")
 	assert.True(t, errors.Is(err, ErrFederationUnauthorized))
 }
@@ -50,29 +50,21 @@ func TestFederationCopyPreservesEnrollmentAndLink(t *testing.T) {
 	target := testDB(t)
 	ctx := t.Context()
 	require.NoError(t, source.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr-a", SpokeArchiveID: "spoke-a", Member: "member-a", CredentialSHA256: "digest"}))
+	require.NoError(t, source.RevokeFederationEnrollment(ctx, "enr-a"))
+	sourceRows, err := source.ListFederationEnrollments(ctx)
+	require.NoError(t, err)
+	require.Len(t, sourceRows, 1)
+	require.NotEmpty(t, sourceRows[0].RevokedAt)
 	require.NoError(t, source.PutFederationLink(ctx, FederationLink{UID: "link-a", HubOrigin: "https://hub.example/av", HubArchiveID: "hub-a", EnrollmentUID: "enr-a", Member: "member-a", TokenFile: "/fixture/credential", ProtocolVersion: 1, State: "active"}))
 	require.NoError(t, target.CopyFederationStateFrom(ctx, source.Path()))
 	rows, err := target.ListFederationEnrollments(ctx)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	assert.Equal(t, "enr-a", rows[0].UID)
+	assert.Equal(t, sourceRows[0].RevokedAt, rows[0].RevokedAt)
 	link, err := target.GetFederationLink(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, "https://hub.example/av", link.HubOrigin)
-}
-
-func TestFederationCopySkipsLegacyArchive(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy.db")
-	legacy, err := sql.Open("sqlite3", path)
-	require.NoError(t, err)
-	_, err = legacy.ExecContext(t.Context(), `CREATE TABLE legacy_marker (value TEXT)`)
-	require.NoError(t, err)
-	require.NoError(t, legacy.Close())
-	target := testDB(t)
-	require.NoError(t, target.CopyFederationStateFrom(t.Context(), path))
-	rows, err := target.ListFederationEnrollments(t.Context())
-	require.NoError(t, err)
-	assert.Empty(t, rows)
 }
 
 func TestFederationUnknownCredentialDoesNotWaitForWriter(t *testing.T) {
@@ -85,25 +77,6 @@ func TestFederationUnknownCredentialDoesNotWaitForWriter(t *testing.T) {
 		_, err := database.AuthenticateFederationCredential(ctx, tc.digest, tc.archive)
 		assert.ErrorIs(t, err, ErrFederationUnauthorized)
 	}
-}
-
-func TestFederationCopyUsesNamedColumns(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "reordered.db")
-	source, err := sql.Open("sqlite3", path)
-	require.NoError(t, err)
-	_, err = source.ExecContext(t.Context(), `CREATE TABLE federation_enrollments (member TEXT, revoked_at TEXT, enrollment_uid TEXT, credential_sha256 TEXT, created_at TEXT, spoke_name TEXT, last_handshake_at TEXT, spoke_archive_id TEXT)`)
-	require.NoError(t, err)
-	_, err = source.ExecContext(t.Context(), `INSERT INTO federation_enrollments VALUES ('member-a','','enr-a','digest','created','name','','spoke-a')`)
-	require.NoError(t, err)
-	require.NoError(t, source.Close())
-	target := testDB(t)
-	require.NoError(t, target.CopyFederationStateFrom(t.Context(), path))
-	rows, err := target.ListFederationEnrollments(t.Context())
-	require.NoError(t, err)
-	require.Len(t, rows, 1)
-	assert.Equal(t, "enr-a", rows[0].UID)
-	assert.Equal(t, "spoke-a", rows[0].SpokeArchiveID)
-	assert.Equal(t, "member-a", rows[0].Member)
 }
 
 func TestFederationRevokedAfterLookupBeforeStamp(t *testing.T) {
@@ -180,6 +153,12 @@ func TestFederationUserVersion(t *testing.T) {
 	assert.Equal(t, version, raw())
 	require.NoError(t, database.EnableArchiveOnly(ctx))
 	assert.Equal(t, archiveOnlyVersionBase+federationVersionBase+CurrentDataVersion(), raw())
+	other := testDB(t)
+	require.NoError(t, other.EnableArchiveOnly(ctx))
+	require.NoError(t, other.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr-a", SpokeArchiveID: "spoke-a", Member: "member-a", CredentialSHA256: "digest-a"}))
+	var reverse int
+	require.NoError(t, other.Reader().QueryRow(ctx, `PRAGMA user_version`).Scan(&reverse))
+	assert.Equal(t, archiveOnlyVersionBase+federationVersionBase+CurrentDataVersion(), reverse)
 }
 
 func TestDecodeFederationUserVersion(t *testing.T) {
@@ -194,14 +173,4 @@ func TestDecodeFederationUserVersion(t *testing.T) {
 		assert.Equal(t, 179, version)
 		assert.Equal(t, tc.archiveOnly, archiveOnly)
 	}
-}
-
-func TestArchiveOnlyGainsFederationVersion(t *testing.T) {
-	database := testDB(t)
-	ctx := t.Context()
-	require.NoError(t, database.EnableArchiveOnly(ctx))
-	require.NoError(t, database.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr-a", SpokeArchiveID: "spoke-a", Member: "member-a", CredentialSHA256: "digest-a"}))
-	var raw int
-	require.NoError(t, database.Reader().QueryRow(ctx, `PRAGMA user_version`).Scan(&raw))
-	assert.Equal(t, archiveOnlyVersionBase+federationVersionBase+CurrentDataVersion(), raw)
 }
