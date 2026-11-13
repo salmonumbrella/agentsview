@@ -18,7 +18,7 @@ type FederationHubShare struct {
 }
 type FederationHubRecord struct {
 	UID, Hash, Remote, ProjectKey string
-	AssistantCount, ToolCount     int
+	AssistantCount                int
 	Write                         SessionBatchWrite
 }
 type FederationBatchResult struct {
@@ -125,7 +125,7 @@ func (db *DB) CommitFederationBatch(ctx context.Context, enrollment, spoke, shar
 			}
 		}
 		writes = append(writes, record.Write)
-		if _, err = tx.ExecContext(ctx, `INSERT INTO federation_records(share_uid,record_uid,session_id,hash,assistant_count,tool_count) VALUES(?,?,?,?,?,?) ON CONFLICT(share_uid,record_uid) DO UPDATE SET hash=excluded.hash,assistant_count=excluded.assistant_count,tool_count=excluded.tool_count`, share, record.UID, id, record.Hash, record.AssistantCount, record.ToolCount); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO federation_records(share_uid,record_uid,session_id,hash,assistant_count) VALUES(?,?,?,?,?) ON CONFLICT(share_uid,record_uid) DO UPDATE SET hash=excluded.hash,assistant_count=excluded.assistant_count`, share, record.UID, id, record.Hash, record.AssistantCount); err != nil {
 			return result, err
 		}
 	}

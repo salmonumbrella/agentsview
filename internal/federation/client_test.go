@@ -1,6 +1,8 @@
 package federation
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -73,4 +75,18 @@ func TestHandshakeRefusesRedirect(t *testing.T) {
 			assert.False(t, reached)
 		})
 	}
+}
+
+func TestPostBatchAcceptsLargeRefusalAcknowledgment(t *testing.T) {
+	refusals := make(map[string]string, 1000)
+	for i := 0; i < 1000; i++ {
+		refusals[fmt.Sprintf("%080d", i)] = "collision"
+	}
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewEncoder(w).Encode(BatchAck{Committed: 1, Refused: refusals}))
+	}))
+	t.Cleanup(peer.Close)
+	ack, err := PostBatch(t.Context(), peer.URL, "token", "archive", Batch{ShareUID: "share"})
+	require.NoError(t, err)
+	assert.Len(t, ack.Refused, 1000)
 }

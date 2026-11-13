@@ -230,6 +230,11 @@ func (s *Service) AddShare(ctx context.Context, p SharePreview) error {
 	if err != nil {
 		return err
 	}
+	release, err := s.acquirePush(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	err = s.db.PutFederationShare(ctx, db.FederationShare{UID: uid, LinkUID: link.UID, NormalizedRemote: g.Project, Level: g.Level, Attribution: g.Attribution, Since: g.Since, Audience: p.Audience, State: "active", ConsentJSON: string(data), PolicyDigest: p.PolicyDigest})
 	if errors.Is(err, db.ErrFederationShareExists) {
 		return inputError("share already exists")
@@ -308,8 +313,9 @@ func (s *Service) Shares(ctx context.Context) (ShareList, error) {
 }
 
 type DeliveryCounts struct {
-	Sent    int `json:"sent"`
-	Refused int `json:"refused"`
+	Sent        int `json:"sent"`
+	Refused     int `json:"refused"`
+	Unconfirmed int `json:"unconfirmed"`
 }
 type ShareDetails struct {
 	Share      db.FederationShare       `json:"share"`
@@ -332,6 +338,9 @@ func (s *Service) Share(ctx context.Context, uid string) (ShareDetails, error) {
 		return out, err
 	}
 	for _, d := range ledger {
+		if d.AttemptHash != "" {
+			out.Delivery.Unconfirmed++
+		}
 		if d.State == "sent" {
 			out.Delivery.Sent++
 		} else if d.State == "refused" {
@@ -355,6 +364,11 @@ func (s *Service) Share(ctx context.Context, uid string) (ShareDetails, error) {
 const policyPausedMessage = "policy changed; run federation share add to review and accept"
 
 func (s *Service) PauseShare(ctx context.Context, uid string) error {
+	release, err := s.acquirePush(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	link, err := s.currentLink(ctx)
 	if err != nil {
 		return err
@@ -389,6 +403,11 @@ func (s *Service) ResumeShare(ctx context.Context, uid string) error {
 	return s.db.SetFederationShareState(ctx, link.UID, uid, "paused", "active")
 }
 func (s *Service) RemoveShare(ctx context.Context, uid string) error {
+	release, err := s.acquirePush(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	link, err := s.currentLink(ctx)
 	if err != nil {
 		return err
@@ -396,10 +415,15 @@ func (s *Service) RemoveShare(ctx context.Context, uid string) error {
 	return s.db.DeleteFederationShare(ctx, link.UID, uid)
 }
 func (s *Service) Exclude(ctx context.Context, id, reason string) error {
+	release, err := s.acquirePush(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if id == "" {
 		return inputError("session ID is required")
 	}
-	err := s.db.PutFederationExclusion(ctx, id, reason)
+	err = s.db.PutFederationExclusion(ctx, id, reason)
 	if errors.Is(err, db.ErrFederationSessionNotFound) {
 		return inputError("session not found")
 	}

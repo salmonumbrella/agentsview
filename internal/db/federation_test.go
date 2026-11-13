@@ -314,7 +314,7 @@ func TestFederationDeliveryStateSurvivesCopyAndMarksVersion(t *testing.T) {
 	ctx := t.Context()
 	require.NoError(t, source.Update(ctx, func(tx *sql.Tx) error {
 		for _, q := range []string{
-			`INSERT INTO federation_deliveries VALUES ('share','record','session','hash','sent')`,
+			`INSERT INTO federation_deliveries (share_uid,record_uid,session_id,hash,state) VALUES ('share','record','session','hash','sent')`,
 			`INSERT INTO federation_quarantine VALUES ('share','invalid batch',1)`,
 			`INSERT INTO federation_hub_shares VALUES ('share','enrollment','example.org/repo','key','summary','pooled','operators','digest',1,1,'batch','{}','active')`,
 			`INSERT INTO federation_records (share_uid,record_uid,session_id,hash) VALUES ('share','record','session','hash')`,
@@ -334,4 +334,78 @@ func TestFederationDeliveryStateSurvivesCopyAndMarksVersion(t *testing.T) {
 		require.NoError(t, target.rawReader().QueryRowContext(ctx, `SELECT count(*) FROM `+table).Scan(&count))
 		assert.Equal(t, 1, count, table)
 	}
+}
+
+func TestFederationAttemptPreservesAcknowledgmentAndQuarantine(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.RecordFederationDelivery(ctx, "share", []FederationDelivery{{RecordUID: "old", SessionID: "old", Hash: "confirmed", State: "sent"}}))
+	require.NoError(t, d.PutFederationQuarantine(ctx, FederationQuarantine{ShareUID: "share", Error: FederationCollision, Sequence: 3}))
+	require.NoError(t, d.RecordFederationAttempt(ctx, "share", []FederationDelivery{{RecordUID: "old", SessionID: "old", Hash: "changed"}, {RecordUID: "new", SessionID: "new", Hash: "first"}}))
+	ledger, err := d.FederationLedger(ctx, "share")
+	require.NoError(t, err)
+	assert.Equal(t, "sent", ledger["old"].State)
+	assert.Equal(t, "confirmed", ledger["old"].Hash)
+	assert.Equal(t, "changed", ledger["old"].AttemptHash)
+	assert.Equal(t, "unconfirmed", ledger["new"].State)
+	assert.Empty(t, ledger["new"].Hash)
+	assert.Equal(t, "first", ledger["new"].AttemptHash)
+	require.NoError(t, d.RecordFederationDelivery(ctx, "share", []FederationDelivery{{RecordUID: "old", SessionID: "old", Hash: "changed", State: "sent"}}))
+	ledger, err = d.FederationLedger(ctx, "share")
+	require.NoError(t, err)
+	assert.Equal(t, "changed", ledger["old"].Hash)
+	assert.Empty(t, ledger["old"].AttemptHash)
+	q, err := d.FederationQuarantines(ctx)
+	require.NoError(t, err)
+	require.Len(t, q, 1)
+	assert.Equal(t, int64(3), q[0].Sequence)
+	require.NoError(t, d.PutFederationQuarantine(ctx, FederationQuarantine{ShareUID: "share", Error: FederationCollision, Sequence: 4}))
+	q, err = d.FederationQuarantines(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), q[0].Sequence)
+}
+
+func TestFederationShareReplacementAndRemovalKeepLedger(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	s := FederationShare{UID: "share", LinkUID: "link", NormalizedRemote: "example.org/repo", State: "active", Since: "2026-01-01", ConsentJSON: `{"delivery_notice":"old"}`}
+	require.NoError(t, d.PutFederationShare(ctx, s))
+	require.NoError(t, d.RecordFederationDelivery(ctx, s.UID, []FederationDelivery{{RecordUID: "record", SessionID: "session", Hash: "hash", State: "sent"}}))
+	s.UID, s.Since = "replacement", "2026-02-01"
+	require.NoError(t, d.PutFederationShare(ctx, s))
+	got, err := d.GetFederationShare(ctx, "link", "share")
+	require.NoError(t, err)
+	assert.Equal(t, s.Since, got.Since)
+	require.ErrorIs(t, d.PutFederationShare(ctx, s), ErrFederationShareExists)
+	require.NoError(t, d.PutFederationQuarantine(ctx, FederationQuarantine{ShareUID: "share", Error: FederationCollision, Sequence: 1}))
+	require.NoError(t, d.DeleteFederationShare(ctx, "link", "share"))
+	q, err := d.FederationQuarantines(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, q)
+	ledger, err := d.FederationLedger(ctx, "share")
+	require.NoError(t, err)
+	assert.Equal(t, "hash", ledger["record"].Hash)
+}
+
+func TestFederationAttemptColumnUpgradesAndCopiesOldLedger(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "old.db")
+	old, err := sql.Open("sqlite3", path)
+	require.NoError(t, err)
+	_, err = old.ExecContext(ctx, `CREATE TABLE federation_deliveries (share_uid TEXT NOT NULL, record_uid TEXT NOT NULL, session_id TEXT NOT NULL, hash TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY(share_uid,record_uid)); INSERT INTO federation_deliveries VALUES('share','record','session','confirmed','sent')`)
+	require.NoError(t, err)
+	require.NoError(t, old.Close())
+	target := testDB(t)
+	require.NoError(t, target.CopyFederationStateFrom(ctx, path))
+	copied, err := target.FederationLedger(ctx, "share")
+	require.NoError(t, err)
+	assert.Equal(t, "confirmed", copied["record"].Hash)
+	assert.Empty(t, copied["record"].AttemptHash)
+	upgraded, err := OpenIsolated(ctx, path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, upgraded.Close()) })
+	ledger, err := upgraded.FederationLedger(ctx, "share")
+	require.NoError(t, err)
+	assert.Equal(t, "sent", ledger["record"].State)
+	assert.Empty(t, ledger["record"].AttemptHash)
 }

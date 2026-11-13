@@ -2549,6 +2549,8 @@ func legacySchemaColumnMigrations() []schemaColumnMigration {
 
 func schemaColumnMigrations() []schemaColumnMigration {
 	return []schemaColumnMigration{
+		{"federation_deliveries", "attempt_hash", "ALTER TABLE federation_deliveries ADD COLUMN attempt_hash TEXT NOT NULL DEFAULT ''"},
+
 		{"sessions", "usage_generation", "ALTER TABLE sessions ADD COLUMN usage_generation TEXT;" +
 			" UPDATE sessions SET usage_generation=lower(hex(randomblob(8)))"},
 		{

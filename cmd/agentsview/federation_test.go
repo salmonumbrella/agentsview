@@ -181,3 +181,21 @@ func TestShareListSeparatesSuggestionsFromJSON(t *testing.T) {
 	assert.Equal(t, "share-a", listed[0].UID)
 	assert.Equal(t, "Suggested: federation share add --project github.com/example/api --level summary\n", stderr.String())
 }
+
+func TestFederationHubDisablesLocalDiscovery(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Federation.Role = "hub"
+	backend := &localArchiveWriteBackend{appCfg: cfg}
+	for _, tc := range []struct {
+		name string
+		run  func() error
+	}{
+		{"sync", func() error {
+			_, _, err := coordinateLocalSync(t.Context(), cfg, nil, false, nil, false, nil, nil)
+			return err
+		}},
+		{"watch", func() error { _, err := backend.startWatchEngine(t.Context(), nil); return err }},
+	} {
+		t.Run(tc.name, func(t *testing.T) { require.EqualError(t, tc.run(), "local discovery is disabled on a federation hub") })
+	}
+}

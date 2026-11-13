@@ -31,7 +31,7 @@ type peerHTTPError struct {
 
 func (e *peerHTTPError) Error() string { return fmt.Sprintf("hub returned HTTP %d", e.Status) }
 
-func peerRequest(ctx context.Context, base, credential, archive, method, path string, body any, result any) error {
+func peerRequest(ctx context.Context, base, credential, archive, method, path string, body any, result any, limit int64) error {
 	origin, err := ParseHubOrigin(base)
 	if err != nil {
 		return err
@@ -62,8 +62,8 @@ func peerRequest(ctx context.Context, base, credential, archive, method, path st
 		return inputError("cannot reach hub")
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 65537))
-	if err != nil || len(data) > 65536 {
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil || int64(len(data)) > limit {
 		return inputError("invalid federation response")
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
@@ -79,17 +79,17 @@ func peerRequest(ctx context.Context, base, credential, archive, method, path st
 }
 func Handshake(ctx context.Context, base, credential, archive string) (HandshakeResponse, error) {
 	var result HandshakeResponse
-	err := peerRequest(ctx, base, credential, archive, http.MethodGet, "/api/v1/federation/handshake", nil, &result)
+	err := peerRequest(ctx, base, credential, archive, http.MethodGet, "/api/v1/federation/handshake", nil, &result, 64<<10)
 	return result, err
 }
 func PutShare(ctx context.Context, base, credential, archive string, m ShareManifest) (ShareView, error) {
 	var result ShareView
-	err := peerRequest(ctx, base, credential, archive, http.MethodPut, "/api/v1/federation/shares/"+url.PathEscape(m.ShareUID), m, &result)
+	err := peerRequest(ctx, base, credential, archive, http.MethodPut, "/api/v1/federation/shares/"+url.PathEscape(m.ShareUID), m, &result, 64<<10)
 	return result, err
 }
 func PostBatch(ctx context.Context, base, credential, archive string, b Batch) (BatchAck, error) {
 	var result BatchAck
-	err := peerRequest(ctx, base, credential, archive, http.MethodPost, "/api/v1/federation/shares/"+url.PathEscape(b.ShareUID)+"/batches", b, &result)
+	err := peerRequest(ctx, base, credential, archive, http.MethodPost, "/api/v1/federation/shares/"+url.PathEscape(b.ShareUID)+"/batches", b, &result, (16<<20)+(64<<10))
 	if e, ok := err.(*peerHTTPError); ok && e.Status == http.StatusConflict {
 		_ = json.Unmarshal(e.Body, &result)
 	}

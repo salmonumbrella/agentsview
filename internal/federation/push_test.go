@@ -1,13 +1,18 @@
 package federation
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -76,4 +81,189 @@ func TestPushWithNoActiveShareAvoidsHub(t *testing.T) {
 	result, err := svc.Push(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, PushResult{}, result)
+}
+
+func TestGrantChangesWaitForPush(t *testing.T) {
+	for _, operation := range []string{"pause", "exclude"} {
+		t.Run(operation, func(t *testing.T) {
+			ctx := t.Context()
+			archive, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "archive.db"))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, archive.Close()) })
+			policy := config.FederationHubConfig{Retention: "member-controlled", AllowedLevels: []string{"summary"}, MinGroupSize: 3, SuggestedProjects: []string{}, Processing: "none"}
+			digest, err := export.DigestCanonical(policy)
+			require.NoError(t, err)
+			entered, release := make(chan struct{}), make(chan struct{})
+			batches := 0
+			hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet:
+					_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub", ProtocolVersions: []int{1}, EnrollmentUID: "enr", Member: "member", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
+				case r.Method == http.MethodPut:
+					_ = json.NewEncoder(w).Encode(ShareView{State: "accepted", Epoch: 1})
+				default:
+					batches++
+					if batches == 1 {
+						close(entered)
+						<-release
+					}
+					_ = json.NewEncoder(w).Encode(BatchAck{Committed: 1, Refused: map[string]string{}})
+				}
+			}))
+			t.Cleanup(hub.Close)
+			file := filepath.Join(testutil.PrivateTempDir(t), "credential")
+			require.NoError(t, os.WriteFile(file, []byte("avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), 0600))
+			svc := NewService("spoke", "spoke", policy, archive)
+			require.NoError(t, svc.Join(ctx, hub.URL, "hub", file))
+			remote := "github.com/example/api"
+			key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
+			require.NoError(t, archive.Update(ctx, func(tx *sql.Tx) error {
+				for _, q := range []string{
+					`INSERT INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install')`,
+					`INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES('s','fixture','install','claude','s','2026-01-02T00:00:00Z',1)`,
+					`INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES('s','install','claude','s')`,
+				} {
+					if _, e := tx.ExecContext(ctx, q); e != nil {
+						return e
+					}
+				}
+				_, e := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES('s','fixture','install','2026-01-01T00:00:00Z','resolved',1,?,'git_remote',?)`, remote, key)
+				return e
+			}))
+			preview, err := svc.PreviewShare(ctx, ShareGrant{Project: remote, Level: "summary", Attribution: "pooled"})
+			require.NoError(t, err)
+			require.NoError(t, svc.AddShare(ctx, preview))
+			link, err := archive.GetFederationLink(ctx)
+			require.NoError(t, err)
+			shares, err := archive.ListFederationShares(ctx, link.UID)
+			require.NoError(t, err)
+			require.Len(t, shares, 1)
+			require.NoError(t, archive.Update(ctx, func(tx *sql.Tx) error {
+				_, e := tx.ExecContext(ctx, `UPDATE federation_shares SET consent_json=? WHERE share_uid=?`, `{"delivery_notice":"old"}`, shares[0].UID)
+				return e
+			}))
+			require.NoError(t, svc.AddShare(ctx, preview))
+			same, err := archive.GetFederationShare(ctx, link.UID, shares[0].UID)
+			require.NoError(t, err)
+			assert.Contains(t, same.ConsentJSON, shareDeliveryNotice)
+			done := make(chan error, 1)
+			go func() { _, e := svc.Push(ctx); done <- e }()
+			<-entered
+			timed, cancel := context.WithTimeout(ctx, 20*time.Millisecond) //nolint:kennlint // deadlinetest: push holds the semaphore until the deadline
+			defer cancel()
+			mutate := func(c context.Context) error {
+				if operation == "pause" {
+					return svc.PauseShare(c, shares[0].UID)
+				}
+				return svc.Exclude(c, "s", "private")
+			}
+			require.ErrorIs(t, mutate(timed), context.DeadlineExceeded)
+			current, err := archive.GetFederationShare(ctx, link.UID, shares[0].UID)
+			require.NoError(t, err)
+			assert.Equal(t, "active", current.State)
+			close(release)
+			require.NoError(t, <-done)
+			require.NoError(t, mutate(ctx))
+			_, err = svc.Push(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, 1, batches)
+		})
+	}
+}
+
+func TestPushLargeAcknowledgmentAndBatchLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		count, modelBytes int
+		refused           bool
+	}{
+		{"large acknowledgment", 1000, 0, true},
+		{"large records split", 2, 4 << 20, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			archive, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "archive.db"))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, archive.Close()) })
+			policy := config.FederationHubConfig{Retention: "member-controlled", AllowedLevels: []string{"summary"}, MinGroupSize: 3, SuggestedProjects: []string{}, Processing: "none"}
+			digest, err := export.DigestCanonical(policy)
+			require.NoError(t, err)
+			var sizes []int
+			var committed int64
+			hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodGet:
+					_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub", ProtocolVersions: []int{1}, EnrollmentUID: "enr", Member: "member", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
+				case http.MethodPut:
+					_ = json.NewEncoder(w).Encode(ShareView{State: "accepted", Epoch: 1, Committed: committed})
+				default:
+					data, e := io.ReadAll(r.Body)
+					require.NoError(t, e)
+					sizes = append(sizes, len(data))
+					var batch Batch
+					require.NoError(t, json.Unmarshal(data, &batch))
+					committed = batch.Sequence
+					refused := map[string]string{}
+					if tc.refused {
+						for _, record := range batch.Records {
+							refused[record.RecordUID] = db.FederationCollision
+						}
+					}
+					_ = json.NewEncoder(w).Encode(BatchAck{Committed: committed, Refused: refused})
+				}
+			}))
+			t.Cleanup(hub.Close)
+			file := filepath.Join(testutil.PrivateTempDir(t), "credential")
+			require.NoError(t, os.WriteFile(file, []byte("avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), 0600))
+			svc := NewService("spoke", "spoke", policy, archive)
+			require.NoError(t, svc.Join(ctx, hub.URL, "hub", file))
+			link, err := archive.GetFederationLink(ctx)
+			require.NoError(t, err)
+			remote := "github.com/example/api"
+			key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
+			require.NoError(t, archive.Update(ctx, func(tx *sql.Tx) error {
+				if _, e := tx.ExecContext(ctx, `INSERT INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install')`); e != nil {
+					return e
+				}
+				for i := 0; i < tc.count; i++ {
+					id := fmt.Sprintf("%080d", i)
+					if _, e := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES(?,'fixture','install','claude',?,'2026-01-02T00:00:00Z',1)`, id, id); e != nil {
+						return e
+					}
+					if _, e := tx.ExecContext(ctx, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES(?,'install','claude',?)`, id, id); e != nil {
+						return e
+					}
+					if _, e := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES(?,'fixture','install','2026-01-01T00:00:00Z','resolved',1,?,'git_remote',?)`, id, remote, key); e != nil {
+						return e
+					}
+					if tc.modelBytes > 0 {
+						if _, e := tx.ExecContext(ctx, `INSERT INTO usage_events(session_id,source,model,input_tokens,occurred_at,dedup_key) VALUES(?,'fixture',?,1,'2026-01-02T00:00:00Z',?)`, id, strings.Repeat("m", tc.modelBytes), id); e != nil {
+							return e
+						}
+					}
+				}
+				return nil
+			}))
+			consent, err := json.Marshal(SharePreview{DeliveryNotice: shareDeliveryNotice})
+			require.NoError(t, err)
+			require.NoError(t, archive.PutFederationShare(ctx, db.FederationShare{UID: "share", LinkUID: link.UID, NormalizedRemote: remote, Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: string(consent), PolicyDigest: digest}))
+			result, err := svc.Push(ctx)
+			require.NoError(t, err)
+			if tc.refused {
+				assert.Equal(t, 1000, result.Refused)
+				ledger, e := archive.FederationLedger(ctx, "share")
+				require.NoError(t, e)
+				require.Len(t, ledger, 1000)
+				for _, row := range ledger {
+					assert.Equal(t, "refused", row.State)
+				}
+			} else {
+				assert.Equal(t, 2, result.Sent)
+				require.Len(t, sizes, 2)
+				for _, size := range sizes {
+					assert.LessOrEqual(t, size, 16<<20)
+				}
+			}
+		})
+	}
 }

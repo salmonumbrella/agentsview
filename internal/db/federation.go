@@ -190,7 +190,7 @@ func (db *DB) CopyFederationStateFrom(ctx context.Context, sourcePath string) er
 		return err
 	}
 	defer tx.Rollback()
-	for table, columns := range map[string]string{"federation_enrollments": "enrollment_uid,spoke_archive_id,member,spoke_name,credential_sha256,created_at,last_handshake_at,revoked_at", "federation_links": "link_uid,hub_origin,hub_archive_id,enrollment_uid,member,token_file,protocol_version,state,created_at", "federation_shares": "share_uid,link_uid,normalized_remote,level,attribution,since,audience,state,consent_json,policy_digest,created_at", "federation_exclusions": "session_id,reason,created_at", "federation_deliveries": "share_uid,record_uid,session_id,hash,state", "federation_quarantine": "share_uid,error,sequence", "federation_hub_shares": "share_uid,enrollment_uid,normalized_remote,project_key,level,attribution,audience,policy_digest,epoch,sequence,last_batch_digest,last_refused,state", "federation_records": "share_uid,record_uid,session_id,hash,assistant_count,tool_count"} {
+	for table, columns := range map[string]string{"federation_enrollments": "enrollment_uid,spoke_archive_id,member,spoke_name,credential_sha256,created_at,last_handshake_at,revoked_at", "federation_links": "link_uid,hub_origin,hub_archive_id,enrollment_uid,member,token_file,protocol_version,state,created_at", "federation_shares": "share_uid,link_uid,normalized_remote,level,attribution,since,audience,state,consent_json,policy_digest,created_at", "federation_exclusions": "session_id,reason,created_at", "federation_deliveries": "share_uid,record_uid,session_id,hash,state,attempt_hash", "federation_quarantine": "share_uid,error,sequence", "federation_hub_shares": "share_uid,enrollment_uid,normalized_remote,project_key,level,attribution,audience,policy_digest,epoch,sequence,last_batch_digest,last_refused,state", "federation_records": "share_uid,record_uid,session_id,hash,assistant_count"} {
 		var present int
 		if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM federation_old.sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&present); err != nil {
 			return err
@@ -198,7 +198,17 @@ func (db *DB) CopyFederationStateFrom(ctx context.Context, sourcePath string) er
 		if present == 0 {
 			continue
 		}
-		if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO `+table+` (`+columns+`) SELECT `+columns+` FROM federation_old.`+table); err != nil {
+		selectColumns := columns
+		if table == "federation_deliveries" {
+			var hasAttempt int
+			if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('federation_deliveries','federation_old') WHERE name='attempt_hash'`).Scan(&hasAttempt); err != nil {
+				return err
+			}
+			if hasAttempt == 0 {
+				selectColumns = "share_uid,record_uid,session_id,hash,state,''"
+			}
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO `+table+` (`+columns+`) SELECT `+selectColumns+` FROM federation_old.`+table); err != nil {
 			return fmt.Errorf("copying federation state: %w", err)
 		}
 	}
@@ -225,7 +235,7 @@ type FederationShare struct {
 
 func (db *DB) PutFederationShare(ctx context.Context, s FederationShare) error {
 	return db.Update(ctx, func(tx *sql.Tx) error {
-		result, err := tx.ExecContext(ctx, `INSERT INTO federation_shares (share_uid,link_uid,normalized_remote,level,attribution,since,audience,state,consent_json,policy_digest) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(link_uid,normalized_remote) DO UPDATE SET level=excluded.level,attribution=excluded.attribution,since=excluded.since,audience=excluded.audience,state=CASE WHEN federation_shares.state='paused' THEN 'paused' ELSE excluded.state END,consent_json=excluded.consent_json,policy_digest=excluded.policy_digest WHERE federation_shares.state='policy_paused' OR (federation_shares.state='paused' AND federation_shares.policy_digest<>excluded.policy_digest)`, s.UID, s.LinkUID, s.NormalizedRemote, s.Level, s.Attribution, s.Since, s.Audience, s.State, s.ConsentJSON, s.PolicyDigest)
+		result, err := tx.ExecContext(ctx, `INSERT INTO federation_shares (share_uid,link_uid,normalized_remote,level,attribution,since,audience,state,consent_json,policy_digest) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(link_uid,normalized_remote) DO UPDATE SET level=excluded.level,attribution=excluded.attribution,since=excluded.since,audience=excluded.audience,state=CASE WHEN federation_shares.state='paused' THEN 'paused' ELSE excluded.state END,consent_json=excluded.consent_json,policy_digest=excluded.policy_digest WHERE federation_shares.state='policy_paused' OR (federation_shares.state='active' AND (federation_shares.since<>excluded.since OR federation_shares.attribution<>excluded.attribution OR federation_shares.level<>excluded.level OR COALESCE(json_extract(federation_shares.consent_json,'$.delivery_notice'),'')<>COALESCE(json_extract(excluded.consent_json,'$.delivery_notice'),''))) OR (federation_shares.state='paused' AND federation_shares.policy_digest<>excluded.policy_digest)`, s.UID, s.LinkUID, s.NormalizedRemote, s.Level, s.Attribution, s.Since, s.Audience, s.State, s.ConsentJSON, s.PolicyDigest)
 		if err != nil {
 			return err
 		}
@@ -320,16 +330,20 @@ func (db *DB) DeleteFederationShare(ctx context.Context, linkUID, uid string) er
 		if n == 0 {
 			return sql.ErrNoRows
 		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM federation_quarantine WHERE share_uid=?`, uid); err != nil {
+			return err
+		}
 		return stampFederationVersion(ctx, tx)
 	})
 }
 
 type FederationDelivery struct {
-	ShareUID  string `json:"share_uid"`
-	RecordUID string `json:"record_uid"`
-	SessionID string `json:"session_id"`
-	Hash      string `json:"hash"`
-	State     string `json:"state"`
+	ShareUID    string `json:"share_uid"`
+	RecordUID   string `json:"record_uid"`
+	SessionID   string `json:"session_id"`
+	Hash        string `json:"hash"`
+	State       string `json:"state"`
+	AttemptHash string `json:"attempt_hash"`
 }
 type FederationQuarantine struct {
 	ShareUID string `json:"share_uid"`
@@ -338,7 +352,7 @@ type FederationQuarantine struct {
 }
 
 func (db *DB) FederationLedger(ctx context.Context, share string) (map[string]FederationDelivery, error) {
-	rows, err := db.getReader().QueryContext(ctx, `SELECT share_uid,record_uid,session_id,hash,state FROM federation_deliveries WHERE share_uid=?`, share)
+	rows, err := db.getReader().QueryContext(ctx, `SELECT share_uid,record_uid,session_id,hash,state,attempt_hash FROM federation_deliveries WHERE share_uid=?`, share)
 	if err != nil {
 		return nil, err
 	}
@@ -346,21 +360,31 @@ func (db *DB) FederationLedger(ctx context.Context, share string) (map[string]Fe
 	out := map[string]FederationDelivery{}
 	for rows.Next() {
 		var d FederationDelivery
-		if err = rows.Scan(&d.ShareUID, &d.RecordUID, &d.SessionID, &d.Hash, &d.State); err != nil {
+		if err = rows.Scan(&d.ShareUID, &d.RecordUID, &d.SessionID, &d.Hash, &d.State, &d.AttemptHash); err != nil {
 			return nil, err
 		}
 		out[d.RecordUID] = d
 	}
 	return out, rows.Err()
 }
-func (db *DB) RecordFederationDelivery(ctx context.Context, share string, deliveries []FederationDelivery) error {
+func (db *DB) RecordFederationAttempt(ctx context.Context, share string, deliveries []FederationDelivery) error {
 	return db.Update(ctx, func(tx *sql.Tx) error {
 		for _, d := range deliveries {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO federation_deliveries(share_uid,record_uid,session_id,hash,state) VALUES(?,?,?,?,?) ON CONFLICT(share_uid,record_uid) DO UPDATE SET session_id=excluded.session_id,hash=excluded.hash,state=excluded.state`, share, d.RecordUID, d.SessionID, d.Hash, d.State); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO federation_deliveries(share_uid,record_uid,session_id,hash,state,attempt_hash) VALUES(?,?,?,'','unconfirmed',?) ON CONFLICT(share_uid,record_uid) DO UPDATE SET session_id=excluded.session_id,attempt_hash=excluded.attempt_hash`, share, d.RecordUID, d.SessionID, d.Hash); err != nil {
 				return err
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM federation_quarantine WHERE share_uid=?`, share); err != nil {
+		return stampFederationVersion(ctx, tx)
+	})
+}
+func (db *DB) RecordFederationDelivery(ctx context.Context, share string, deliveries []FederationDelivery) error {
+	return db.Update(ctx, func(tx *sql.Tx) error {
+		for _, d := range deliveries {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO federation_deliveries(share_uid,record_uid,session_id,hash,state) VALUES(?,?,?,?,?) ON CONFLICT(share_uid,record_uid) DO UPDATE SET session_id=excluded.session_id,hash=excluded.hash,state=excluded.state,attempt_hash=''`, share, d.RecordUID, d.SessionID, d.Hash, d.State); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM federation_quarantine WHERE share_uid=? AND error<>?`, share, FederationCollision); err != nil {
 			return err
 		}
 		return stampFederationVersion(ctx, tx)
@@ -368,7 +392,7 @@ func (db *DB) RecordFederationDelivery(ctx context.Context, share string, delive
 }
 func (db *DB) PutFederationQuarantine(ctx context.Context, q FederationQuarantine) error {
 	return db.Update(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO federation_quarantine(share_uid,error,sequence) VALUES(?,?,?) ON CONFLICT(share_uid) DO UPDATE SET error=excluded.error,sequence=excluded.sequence`, q.ShareUID, q.Error, q.Sequence); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO federation_quarantine(share_uid,error,sequence) VALUES(?,?,?) ON CONFLICT(share_uid) DO UPDATE SET sequence=CASE WHEN federation_quarantine.error=excluded.error THEN federation_quarantine.sequence ELSE excluded.sequence END,error=excluded.error`, q.ShareUID, q.Error, q.Sequence); err != nil {
 			return err
 		}
 		return stampFederationVersion(ctx, tx)

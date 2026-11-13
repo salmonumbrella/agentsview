@@ -252,6 +252,9 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 			return out, e
 		}
 		for _, d := range ledger {
+			if d.AttemptHash != "" {
+				out.Delivery.Unconfirmed++
+			}
 			if d.State == "sent" {
 				out.Delivery.Sent++
 			} else if d.State == "refused" {
@@ -313,6 +316,19 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	out.Hub.State, out.Hub.Policy, out.Hub.PolicyDigest = HubOK, &h.Policy, h.PolicyDigest
 	return out, nil
 }
+func (s *Service) acquirePush(ctx context.Context) (func(), error) {
+	select {
+	case s.pushSem <- struct{}{}:
+		return func() { <-s.pushSem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
 func (s *Service) Leave(ctx context.Context) error {
+	release, err := s.acquirePush(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	return s.db.DeleteFederationLink(ctx)
 }

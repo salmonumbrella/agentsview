@@ -179,7 +179,7 @@ func newFederationCommand() *cobra.Command {
 		if asJSON {
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(value)
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Archive: %s\nShares: %d\nSent: %d\nRefused: %d\nQuarantined: %d\n", value.ArchiveID, value.Shares, value.Delivery.Sent, value.Delivery.Refused, len(value.Quarantine))
+		fmt.Fprintf(cmd.OutOrStdout(), "Archive: %s\nShares: %d\nSent: %d\nRefused: %d\nUnconfirmed: %d\nQuarantined: %d\n", value.ArchiveID, value.Shares, value.Delivery.Sent, value.Delivery.Refused, value.Delivery.Unconfirmed, len(value.Quarantine))
 		for _, q := range value.Quarantine {
 			fmt.Fprintf(cmd.OutOrStdout(), "Quarantine %s at sequence %d: %s\n", q.ShareUID, q.Sequence, q.Error)
 		}

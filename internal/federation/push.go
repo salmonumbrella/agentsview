@@ -22,12 +22,11 @@ type PushResult struct {
 
 func (s *Service) Push(ctx context.Context) (PushResult, error) {
 	var out PushResult
-	select {
-	case s.pushSem <- struct{}{}:
-		defer func() { <-s.pushSem }()
-	case <-ctx.Done():
-		return out, ctx.Err()
+	release, err := s.acquirePush(ctx)
+	if err != nil {
+		return out, err
 	}
+	defer release()
 	link, err := s.db.GetFederationLink(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, nil
@@ -101,7 +100,7 @@ func (s *Service) Push(ctx context.Context) (PushResult, error) {
 				out.Refused++
 				continue
 			}
-			if ok && old.State == "sent" && old.Hash == hash {
+			if ok && old.State == "sent" && old.Hash == hash && old.AttemptHash == "" {
 				out.Unchanged++
 				continue
 			}
@@ -130,6 +129,13 @@ func (s *Service) Push(ctx context.Context) (PushResult, error) {
 			filtered := pending[:0]
 			for _, record := range pending {
 				if allowed[record.RecordUID] {
+					if record.Payload.ParentID != nil && !allowed[*record.Payload.ParentID] {
+						record.Payload.ParentID, record.Payload.Relationship = nil, nil
+						record.Hash, err = export.DigestCanonical(record.Payload)
+						if err != nil {
+							return out, err
+						}
+					}
 					filtered = append(filtered, record)
 				}
 			}
@@ -138,17 +144,26 @@ func (s *Service) Push(ctx context.Context) (PushResult, error) {
 				break
 			}
 			batch := Batch{Protocol: ProtocolVersion, SpokeInstance: s.archiveID, ShareUID: share.UID, Epoch: 1, Sequence: view.Committed + 1, Records: []BatchRecord{}}
+			envelope, err := jsonv2.Marshal(batch)
+			if err != nil {
+				return out, err
+			}
+			size := len(envelope)
 			n := 0
 			for n < len(pending) && n < 1000 {
-				batch.Records = append(batch.Records, pending[n])
-				data, err := jsonv2.Marshal(batch)
+				data, err := jsonv2.Marshal(pending[n])
 				if err != nil {
 					return out, err
 				}
-				if len(data) > 16<<20 {
-					batch.Records = batch.Records[:len(batch.Records)-1]
+				extra := len(data)
+				if n > 0 {
+					extra++
+				}
+				if size+extra > 16<<20 {
 					break
 				}
+				size += extra
+				batch.Records = append(batch.Records, pending[n])
 				n++
 			}
 			if n == 0 {
@@ -157,6 +172,13 @@ func (s *Service) Push(ctx context.Context) (PushResult, error) {
 				}
 				out.Quarantined++
 				break
+			}
+			attempts := make([]db.FederationDelivery, 0, n)
+			for _, record := range batch.Records {
+				attempts = append(attempts, db.FederationDelivery{RecordUID: record.RecordUID, SessionID: record.RecordUID, Hash: record.Hash})
+			}
+			if err = s.db.RecordFederationAttempt(ctx, share.UID, attempts); err != nil {
+				return out, err
 			}
 			ack, err := PostBatch(ctx, link.HubOrigin, token, s.archiveID, batch)
 			if err != nil {

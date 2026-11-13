@@ -62,7 +62,7 @@ func (s *Service) ApplyBatch(ctx context.Context, enrollment, spoke, uid string,
 			}
 			write.UsageEvents = append(write.UsageEvents, event)
 		}
-		records = append(records, db.FederationHubRecord{UID: r.RecordUID, Hash: r.Hash, Remote: p.Remote, ProjectKey: p.ProjectKey, AssistantCount: p.AssistantMessageCount, ToolCount: p.ToolCount, Write: write})
+		records = append(records, db.FederationHubRecord{UID: r.RecordUID, Hash: r.Hash, Remote: p.Remote, ProjectKey: p.ProjectKey, AssistantCount: p.AssistantMessageCount, Write: write})
 	}
 	digest, err := export.DigestCanonical(batch)
 	if err != nil {
