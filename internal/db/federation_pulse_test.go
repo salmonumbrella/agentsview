@@ -377,7 +377,7 @@ func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T)
 // These regressions describe the accepted cross-release privacy requirement.
 // The publication policy is still open; no admission bypass is used here.
 func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
-	for _, scenario := range []string{"window", "reverse-window", "update", "copy-before-publication", "cancel-before-admission", "concurrent", "purge-regrant"} {
+	for _, scenario := range []string{"window", "reverse-window", "update", "copy-before-publication", "cancel-before-admission", "concurrent", "purge-regrant", "untraced-write"} {
 		t.Run(scenario, func(t *testing.T) {
 			d := testDB(t)
 			ctx := t.Context()
@@ -517,6 +517,25 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 			}
 			if scenario == "copy-before-publication" {
 				later, err := copied.readFederationPulse(ctx, "2026-07-28", 3, now)
+				if err != nil {
+					assert.Empty(t, later.Projects)
+					assert.Nil(t, later.Totals)
+					return
+				}
+				assert.True(t, later.Suppressed)
+				assert.Empty(t, later.Projects)
+				assert.Nil(t, later.Totals["tokens"].Value)
+				assert.Nil(t, later.Totals["cost_microdollars"].Value)
+				return
+			}
+			if scenario == "untraced-write" {
+				// This bypasses DB.Update's traced owner and exercises the source-DML fence.
+				result, err := d.getWriter().ExecContext(ctx, `UPDATE usage_events SET input_tokens=17,cost_microdollars=170 WHERE session_id='a'`)
+				require.NoError(t, err)
+				changed, err := result.RowsAffected()
+				require.NoError(t, err)
+				require.EqualValues(t, 1, changed)
+				later, err := d.readFederationPulse(ctx, "2026-07-29", 3, now)
 				if err != nil {
 					assert.Empty(t, later.Projects)
 					assert.Nil(t, later.Totals)
