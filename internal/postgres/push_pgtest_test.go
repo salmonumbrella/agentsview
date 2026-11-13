@@ -140,9 +140,12 @@ func TestFullPushReconcilesRowsAfterSameGenerationRestore(t *testing.T) {
 			syncer := &Sync{pg: pg, local: local, machine: "machine", schema: schema, schemaDone: true}
 			_, err = syncer.PushWithOptions(ctx, storage.PushOptions{Full: true}, nil)
 			require.NoError(t, err)
+			filtered := &Sync{pg: pg, local: local, machine: "machine", schema: schema, schemaDone: true, projects: []string{"project"}}
+			_, err = filtered.PushWithOptions(ctx, storage.PushOptions{Full: true}, nil)
+			require.NoError(t, err)
 			revision, err := local.SessionDeletionPublicationRevision(ctx)
 			require.NoError(t, err)
-			progress, err := syncer.effectiveSyncState().GetSyncState(ctx, "session_deletion_revision_v1:"+syncer.targetFingerprint+":"+syncer.databaseGeneration)
+			progress, err := filtered.effectiveSyncState().GetSyncState(ctx, "session_deletion_revision_v1:"+filtered.targetFingerprint+":"+filtered.databaseGeneration)
 			require.NoError(t, err)
 			assert.Equal(t, fmt.Sprint(revision), progress)
 			snapshot := filepath.Join(t.TempDir(), "snapshot.db")
