@@ -183,6 +183,18 @@ func TestFederationRevokePublishesCommittedPartialCleanup(t *testing.T) {
 	var retainedCount int
 	require.NoError(t, database.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='retained'`).Scan(&retainedCount))
 	assert.Equal(t, 1, retainedCount)
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	canceledRequest := httptest.NewRequestWithContext(canceled, http.MethodPost, "/api/v1/federation/enrollments/other-enr/revoke", nil)
+	canceledRequest.Host = "127.0.0.1:8080"
+	canceledRequest.Header.Set("Origin", "http://127.0.0.1:8080")
+	response = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, canceledRequest)
+	assert.NotEqual(t, http.StatusOK, response.Code)
+	assert.Empty(t, events)
+	assert.EqualValues(t, 2, callbacks.Load())
+	require.NoError(t, database.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='other'`).Scan(&otherCount))
+	assert.Equal(t, 1, otherCount)
 	// A separately delivered member-controlled enrollment succeeds and
 	// publishes its own committed purge once.
 	otherRequest := httptest.NewRequest(http.MethodPost, "/api/v1/federation/enrollments/other-enr/revoke", nil)
@@ -1066,6 +1078,12 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, newShares, 1)
 	assert.NotEqual(t, shares[0].UID, newShares[0].UID)
+	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, nil))
+	var excludedOnNewHub, excludedOnSpoke int
+	require.NoError(t, otherDB.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id IN ('session-a','session-b')`).Scan(&excludedOnNewHub))
+	require.NoError(t, spokeDB.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id IN ('session-a','session-b')`).Scan(&excludedOnSpoke))
+	assert.Zero(t, excludedOnNewHub)
+	assert.Equal(t, 2, excludedOnSpoke)
 	require.Equal(t, http.StatusOK, request(http.MethodGet, "/api/v1/federation/shares/"+shares[0].UID, nil, &history))
 	assert.Equal(t, uncertain["session-a"].AttemptHash, history.Records["session-a"].AttemptHash)
 	assert.Equal(t, peer.URL, history.Records["session-a"].HubOrigin)
@@ -1584,12 +1602,16 @@ func TestRetainedSnapshotRecoversHubSequenceWithoutSendingContent(t *testing.T) 
 			var bodies []string
 			var dropNext atomic.Bool
 			var stopFault atomic.Int32
+			var inventories atomic.Int32
 			captured := func() ([]federation.BatchRecord, []string) {
 				captureMu.Lock()
 				defer captureMu.Unlock()
 				return append([]federation.BatchRecord(nil), sent...), append([]string(nil), bodies...)
 			}
 			peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/reconcile") {
+					inventories.Add(1)
+				}
 				if r.Method == http.MethodPut {
 					switch stopFault.Load() {
 					case 1:
@@ -1656,6 +1678,11 @@ func TestRetainedSnapshotRecoversHubSequenceWithoutSendingContent(t *testing.T) 
 			for _, id := range []string{"b", "c"} {
 				require.NoError(t, spokeDB.ReplaceSessionUsageEvents(ctx, id, []db.UsageEvent{{SessionID: id, Source: "fixture", Model: "model", InputTokens: 42, OccurredAt: "2026-01-02T00:00:00Z", DedupKey: id}}))
 			}
+			snapshot := filepath.Join(t.TempDir(), "snapshot.db")
+			if mode == "regressed cursors" {
+				// Save the same archive identity before its deletion journal advances.
+				require.NoError(t, spokeDB.SnapshotTo(ctx, snapshot))
+			}
 			preview, err := spoke.PreviewShare(ctx, federation.ShareGrant{Project: remote, Level: "summary", Attribution: "pooled"})
 			require.NoError(t, err)
 			require.NoError(t, spoke.AddShare(ctx, preview))
@@ -1668,12 +1695,30 @@ func TestRetainedSnapshotRecoversHubSequenceWithoutSendingContent(t *testing.T) 
 			require.NoError(t, spoke.RemoveShare(ctx, uid))
 			_, err = spoke.Push(ctx)
 			require.NoError(t, err)
-			snapshot := filepath.Join(t.TempDir(), "snapshot.db")
-			require.NoError(t, spokeDB.SnapshotTo(ctx, snapshot))
+			if mode == "regressed cursors" {
+				require.NoError(t, spokeDB.UpsertSession(ctx, db.Session{ID: "later-local", Project: "fixture", Machine: "install", Agent: "claude"}))
+				require.NoError(t, spokeDB.DeleteSession(ctx, "later-local"))
+				_, err = spoke.Push(ctx)
+				require.NoError(t, err)
+				older, err := db.OpenIsolated(ctx, snapshot)
+				require.NoError(t, err)
+				require.NoError(t, older.CopyFederationStateFrom(ctx, spokeDB.Path()))
+				link, err := older.GetFederationLink(ctx)
+				require.NoError(t, err)
+				copiedShare, err := older.GetFederationShare(ctx, link.UID, uid)
+				require.NoError(t, err)
+				oldRevision, err := older.SessionDeletionPublicationRevision(ctx)
+				require.NoError(t, err)
+				assert.Greater(t, copiedShare.DeletionCursor, oldRevision)
+				require.NoError(t, older.Close())
+			} else {
+				require.NoError(t, spokeDB.SnapshotTo(ctx, snapshot))
+			}
 			captureMu.Lock()
 			sent = nil
 			bodies = nil
 			captureMu.Unlock()
+			inventories.Store(0)
 			if mode == "replacement with proven deletion" {
 				replacement, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "replacement.db"))
 				require.NoError(t, err)
@@ -1707,6 +1752,10 @@ func TestRetainedSnapshotRecoversHubSequenceWithoutSendingContent(t *testing.T) 
 				var localC int
 				require.NoError(t, replacement.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='c'`).Scan(&localC))
 				assert.Equal(t, 1, localC)
+				ledger, err := replacement.FederationLedger(ctx, uid)
+				require.NoError(t, err)
+				assert.Equal(t, "sent", ledger["a"].State)
+				assert.Zero(t, inventories.Load())
 				sent, _ := captured()
 				require.Len(t, sent, 2)
 				for _, record := range sent {
@@ -1776,6 +1825,7 @@ func TestRetainedSnapshotRecoversHubSequenceWithoutSendingContent(t *testing.T) 
 					var untouched int
 					require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id IN ('b','c')`).Scan(&untouched))
 					assert.Equal(t, 2, untouched)
+					assert.Zero(t, inventories.Load())
 					return
 				}
 				_, err = spoke.Push(ctx)
@@ -1792,6 +1842,7 @@ func TestRetainedSnapshotRecoversHubSequenceWithoutSendingContent(t *testing.T) 
 				require.NoError(t, err)
 				assert.Equal(t, "tombstoned", ledger["a"].State)
 				assert.NotEmpty(t, ledger["a"].Hash)
+				assert.Zero(t, inventories.Load())
 				for _, record := range sent {
 					assert.Equal(t, "tombstone", record.Kind)
 					assert.Nil(t, record.Payload)
@@ -1814,13 +1865,6 @@ func TestRetainedSnapshotRecoversHubSequenceWithoutSendingContent(t *testing.T) 
 					require.NoError(t, replacement.UpsertSession(ctx, db.Session{ID: id, Project: "fixture", Machine: "install", Agent: "claude"}))
 				}
 				restored = replacement
-			}
-			if mode == "regressed cursors" {
-				// A same-identity snapshot can carry cursors beyond its journals.
-				require.NoError(t, restored.Update(ctx, func(tx *sql.Tx) error {
-					_, err := tx.ExecContext(ctx, `UPDATE federation_shares SET usage_cursor=1000000,deletion_cursor=1000000 WHERE share_uid=?`, uid)
-					return err
-				}))
 			}
 			recovered := federation.NewService("spoke", "spoke-a", cfg.Federation.Hub, restored)
 			require.NoError(t, recovered.Exclude(ctx, "b", "private"))
@@ -1846,6 +1890,7 @@ func TestRetainedSnapshotRecoversHubSequenceWithoutSendingContent(t *testing.T) 
 			assert.Zero(t, b)
 			assert.Equal(t, 1, c)
 			assert.Equal(t, "stopped", state)
+			assert.Zero(t, inventories.Load())
 			if mode == "conflicting pending snapshot" {
 				assert.EqualValues(t, 1, sequence)
 			} else {
