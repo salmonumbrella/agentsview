@@ -14,6 +14,14 @@ import (
 	"go.kenn.io/agentsview/internal/money"
 )
 
+const (
+	shareIncludes          = "Session identity, repository, agent, models, times, counts, usage, cost, automation, outcome and health"
+	shareOmits             = "Content, paths, titles, tool inputs and results, and tool categories"
+	shareDisclosure        = "Anyone holding the hub bearer token can read everything the hub stores"
+	shareAttributionNotice = "Member attribution is a request for a later release"
+	shareDeliveryNotice    = "This release records the share only; nothing is sent"
+)
+
 type ShareGrant struct {
 	Project     string `json:"project"`
 	Level       string `json:"level"`
@@ -49,23 +57,28 @@ type SummaryUsage struct {
 	HasCost                  bool        `json:"has_cost"`
 }
 type SharePreview struct {
-	Grant           ShareGrant      `json:"grant"`
-	PolicyDigest    string          `json:"policy_digest"`
-	Retention       string          `json:"retention"`
-	Processing      string          `json:"processing"`
-	Audience        string          `json:"audience"`
-	Selected        int             `json:"selected"`
-	Bytes           int             `json:"bytes"`
-	NotLocal        int             `json:"not_provably_local"`
-	NotIdentifiable int             `json:"not_identifiable"`
-	Excluded        int             `json:"excluded"`
-	Held            int             `json:"held"`
-	FirstStart      *string         `json:"first_start"`
-	LastEnd         *string         `json:"last_end"`
-	Agents          []string        `json:"agents"`
-	Models          []string        `json:"models"`
-	Usage           SummaryUsage    `json:"usage"`
-	Records         []SummaryRecord `json:"-"`
+	Grant             ShareGrant      `json:"grant"`
+	PolicyDigest      string          `json:"policy_digest"`
+	Retention         string          `json:"retention"`
+	Processing        string          `json:"processing"`
+	Audience          string          `json:"audience"`
+	Includes          string          `json:"includes"`
+	Omits             string          `json:"omits"`
+	Disclosure        string          `json:"disclosure"`
+	AttributionNotice string          `json:"attribution_notice"`
+	DeliveryNotice    string          `json:"delivery_notice"`
+	Selected          int             `json:"selected"`
+	Bytes             int             `json:"bytes"`
+	NotLocal          int             `json:"not_provably_local"`
+	NotIdentifiable   int             `json:"not_identifiable"`
+	Excluded          int             `json:"excluded"`
+	Held              int             `json:"held"`
+	FirstStart        *string         `json:"first_start"`
+	LastEnd           *string         `json:"last_end"`
+	Agents            []string        `json:"agents"`
+	Models            []string        `json:"models"`
+	Usage             SummaryUsage    `json:"usage"`
+	Records           []SummaryRecord `json:"-"`
 }
 
 func (s *Service) livePolicy(ctx context.Context) (db.FederationLink, *HubStatus, error) {
@@ -124,7 +137,7 @@ func (s *Service) previewWithPolicy(ctx context.Context, g ShareGrant, hub *HubS
 	if err != nil {
 		return p, err
 	}
-	p = SharePreview{Grant: g, PolicyDigest: hub.PolicyDigest, Retention: hub.Policy.Retention, Processing: hub.Policy.Processing, Audience: "operators", Selected: len(selected.IDs), NotLocal: selected.NotLocal, NotIdentifiable: selected.NotIdentifiable, Excluded: selected.Excluded, Records: []SummaryRecord{}}
+	p = SharePreview{Grant: g, PolicyDigest: hub.PolicyDigest, Retention: hub.Policy.Retention, Processing: hub.Policy.Processing, Audience: "operators", Includes: shareIncludes, Omits: shareOmits, Disclosure: shareDisclosure, AttributionNotice: shareAttributionNotice, DeliveryNotice: shareDeliveryNotice, Selected: len(selected.IDs), NotLocal: selected.NotLocal, NotIdentifiable: selected.NotIdentifiable, Excluded: selected.Excluded, Records: []SummaryRecord{}}
 	agents, models := map[string]bool{}, map[string]bool{}
 	p.Usage.HasCost = len(selected.Rows) > 0
 	for _, row := range selected.Rows {
@@ -194,7 +207,7 @@ func (s *Service) AddShare(ctx context.Context, p SharePreview) error {
 	if err != nil {
 		return err
 	}
-	if g != p.Grant || p.PolicyDigest != hub.PolicyDigest || p.Audience != "operators" || p.Retention != hub.Policy.Retention || p.Processing != hub.Policy.Processing {
+	if g != p.Grant || p.PolicyDigest != hub.PolicyDigest || p.Audience != "operators" || p.Retention != hub.Policy.Retention || p.Processing != hub.Policy.Processing || p.Includes != shareIncludes || p.Omits != shareOmits || p.Disclosure != shareDisclosure || p.AttributionNotice != shareAttributionNotice || p.DeliveryNotice != shareDeliveryNotice {
 		return inputError("policy or grant changed; preview again")
 	}
 	data, err := json.Marshal(p)

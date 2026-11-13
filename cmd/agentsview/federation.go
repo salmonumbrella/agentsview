@@ -210,7 +210,6 @@ func addFederationShare(ctx context.Context, base, token string, grant federatio
 		return err
 	}
 	fmt.Fprintln(out, string(data))
-	fmt.Fprintln(out, "Summary includes counts, usage, outcome and health; it omits content, paths, titles and tool categories. Anyone holding the hub bearer token can read everything stored. Member attribution is a request for a later release. This release records the share only; nothing is sent.")
 	if !confirm(in, out, "Create this share?") {
 		return nil
 	}
