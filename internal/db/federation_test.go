@@ -744,3 +744,60 @@ func TestFederationDeliveryAndStopSurviveReopen(t *testing.T) {
 	assert.Equal(t, "attempt", ledger["item"].Hash)
 	assert.Empty(t, ledger["item"].AttemptHash)
 }
+
+func TestLegacyHubRetentionIsNotInventedOnOpenOrCopy(t *testing.T) {
+	for _, retention := range []string{"member-controlled", "org-retained"} {
+		t.Run(retention, func(t *testing.T) {
+			ctx := t.Context()
+			path := filepath.Join(t.TempDir(), "legacy-hub.db")
+			old, err := OpenIsolated(ctx, path)
+			require.NoError(t, err)
+			require.NoError(t, old.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr", SpokeArchiveID: "spoke", Member: "member", CredentialSHA256: "credential"}))
+			share := FederationHubShare{UID: "share", EnrollmentUID: "enr", Remote: "example.org/repo", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "accepted", Epoch: 1, State: "active", Retention: retention}
+			_, err = old.PutFederationHubShare(ctx, "spoke", share)
+			require.NoError(t, err)
+			record := FederationHubRecord{UID: "owned", Hash: "hash", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: SessionBatchWrite{Session: Session{ID: "owned", Project: "p", Machine: "federated", Agent: "claude"}}}
+			_, err = old.CommitFederationBatch(ctx, "enr", "spoke", "share", "accepted", 1, 1, "batch", []FederationHubRecord{record})
+			require.NoError(t, err)
+			require.NoError(t, old.Close())
+			legacy, err := sql.Open("sqlite3", path)
+			require.NoError(t, err)
+			_, err = legacy.ExecContext(ctx, `CREATE TABLE pre_withdrawal_share (
+				share_uid TEXT PRIMARY KEY,enrollment_uid TEXT NOT NULL,normalized_remote TEXT NOT NULL,
+				project_key TEXT NOT NULL,level TEXT NOT NULL,attribution TEXT NOT NULL,audience TEXT NOT NULL,
+				policy_digest TEXT NOT NULL,epoch INTEGER NOT NULL,sequence INTEGER NOT NULL,
+				last_batch_digest TEXT NOT NULL,last_refused TEXT NOT NULL,state TEXT NOT NULL);
+				INSERT INTO pre_withdrawal_share SELECT share_uid,enrollment_uid,normalized_remote,project_key,level,attribution,audience,policy_digest,epoch,sequence,last_batch_digest,last_refused,state FROM federation_hub_shares;
+				DROP TABLE federation_hub_shares;
+				ALTER TABLE pre_withdrawal_share RENAME TO federation_hub_shares`)
+			require.NoError(t, err)
+			require.NoError(t, legacy.Close())
+			copied := testDB(t)
+			require.NoError(t, copied.CopyFederationStateFrom(ctx, path))
+			require.NoError(t, copied.UpsertSession(ctx, Session{ID: "owned", Project: "p", Machine: "federated", Agent: "claude"}))
+			upgraded, err := OpenIsolated(ctx, path)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, upgraded.Close()) })
+			for _, archive := range []*DB{copied, upgraded} {
+				var stored string
+				require.NoError(t, archive.Reader().QueryRow(ctx, `SELECT retention FROM federation_hub_shares WHERE share_uid='share'`).Scan(&stored))
+				assert.Empty(t, stored)
+				err := archive.RevokeFederationEnrollment(ctx, "enr", FederationRetentionProof{PolicyDigest: "different", Retention: retention})
+				require.ErrorIs(t, err, ErrFederationCleanupPending)
+				var revoked string
+				var owned int
+				require.NoError(t, archive.Reader().QueryRow(ctx, `SELECT revoked_at FROM federation_enrollments WHERE enrollment_uid='enr'`).Scan(&revoked))
+				assert.NotEmpty(t, revoked)
+				require.NoError(t, archive.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='owned'`).Scan(&owned))
+				assert.Equal(t, 1, owned)
+				require.NoError(t, archive.RevokeFederationEnrollment(ctx, "enr", FederationRetentionProof{PolicyDigest: "accepted", Retention: retention}))
+				require.NoError(t, archive.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='owned'`).Scan(&owned))
+				if retention == "member-controlled" {
+					assert.Zero(t, owned)
+				} else {
+					assert.Equal(t, 1, owned)
+				}
+			}
+		})
+	}
+}
