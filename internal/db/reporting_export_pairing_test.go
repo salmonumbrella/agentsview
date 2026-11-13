@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"encoding/json/jsontext"
 	"fmt"
 	"slices"
@@ -20,9 +21,9 @@ import (
 func TestJointReportingUsageSupportFollowsPricedSurvivors(t *testing.T) {
 	start := time.Date(2026, 7, 28, 9, 0, 0, 0, time.UTC)
 	rows := []activity.UsageRow{
-		{SessionID: "one", SourceSessionID: "one", Timestamp: "2026-07-28T09:05:00Z", Agent: "codex", Model: "m", InputTokens: 10, Priced: true, Cost: money.Money{Microdollars: 4}},
-		{SessionID: "two", SourceSessionID: "two", Timestamp: "2026-07-28T09:10:00Z", Agent: "codex", Model: "m", InputTokens: 20, Priced: true, Cost: money.Money{Microdollars: 6}},
-		{SessionID: "one", SourceSessionID: "three", Timestamp: "2026-07-28T09:15:00Z", Agent: "codex", Model: "m", InputTokens: 30},
+		{SessionID: "one", SourceSessionID: "one", Timestamp: "2026-07-28T09:05:00Z", Agent: "codex", Model: "m", InputTokens: 10, Priced: true, Cost: money.Money{Microdollars: 4}, ProofRef: 101},
+		{SessionID: "two", SourceSessionID: "two", Timestamp: "2026-07-28T09:10:00Z", Agent: "codex", Model: "m", InputTokens: 20, Priced: true, Cost: money.Money{Microdollars: 6}, ProofRef: 102},
+		{SessionID: "one", SourceSessionID: "three", Timestamp: "2026-07-28T09:15:00Z", Agent: "codex", Model: "m", InputTokens: 30, ProofRef: 103},
 		{SessionID: "four", SourceSessionID: "four", Timestamp: "2026-07-28T09:20:00Z", Agent: "codex", Model: "m", InputTokens: 40, Cost: money.Money{Microdollars: 20_000}},
 	}
 	sessions := map[string]activity.SessionMeta{
@@ -48,6 +49,10 @@ func TestJointReportingUsageSupportFollowsPricedSurvivors(t *testing.T) {
 		assert.EqualValues(t, 10, contributors[reportingJointContributor{"one", "one"}].usage.inputTokens)
 		assert.EqualValues(t, 20, contributors[reportingJointContributor{"two", "two"}].usage.inputTokens)
 		assert.EqualValues(t, 30, contributors[reportingJointContributor{"three", "one"}].usage.inputTokens)
+		assert.Equal(t, []activity.UsageProofRef{101}, contributors[reportingJointContributor{"one", "one"}].proofRefs)
+		assert.Equal(t, []activity.UsageProofRef{102}, contributors[reportingJointContributor{"two", "two"}].proofRefs)
+		assert.Equal(t, []activity.UsageProofRef{103}, contributors[reportingJointContributor{"three", "one"}].proofRefs)
+		assert.Empty(t, contributors[reportingJointContributor{"four", "four"}].proofRefs)
 		assert.True(t, contributors[reportingJointContributor{"one", "one"}].costObserved)
 		assert.True(t, contributors[reportingJointContributor{"two", "two"}].costObserved)
 		assert.False(t, contributors[reportingJointContributor{"three", "one"}].costObserved)
@@ -58,6 +63,9 @@ func TestJointReportingUsageSupportFollowsPricedSurvivors(t *testing.T) {
 		assert.True(t, contributors[reportingJointContributor{"three", "one"}].unpriced)
 		assert.True(t, contributors[reportingJointContributor{"four", "four"}].unpriced)
 	}
+	encoded, err := json.Marshal(rows[0])
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "ProofRef")
 }
 
 // TestReportingHoursMatchPerHourPairing compares every hour produced from the
