@@ -404,7 +404,7 @@ func (s *Service) reconcileShare(ctx context.Context, link db.FederationLink, to
 			return err
 		}
 		if result.Complete {
-			return nil
+			return s.repairFederationRelationships(ctx, link, token, share, hub, view, out)
 		}
 		if len(result.Missing) == 0 && len(result.Extra) == 0 {
 			if result.Boundary == after {
@@ -459,6 +459,48 @@ func (s *Service) reconcileShare(ctx context.Context, link db.FederationLink, to
 		}
 		if err = s.postFederationRecords(ctx, link, token, share, view, repairs, out); err != nil {
 			return err
+		}
+	}
+}
+
+// repairFederationRelationships makes one bounded pass after inventory, so a
+// child encountered before its independently selected parent can attach later.
+func (s *Service) repairFederationRelationships(ctx context.Context, link db.FederationLink, token string, share db.FederationShare, hub *HubStatus, view *ShareView, out *PushResult) error {
+	after := ""
+	for {
+		selected, err := s.db.SelectFederationPage(ctx, share.NormalizedRemote, share.Since, after, 400)
+		if err != nil {
+			return err
+		}
+		if len(selected.IDs) == 0 {
+			return nil
+		}
+		preview, err := previewFromSelection(ShareGrant{Project: share.NormalizedRemote, Level: share.Level, Attribution: share.Attribution, Since: share.Since}, hub, selected)
+		if err != nil {
+			return err
+		}
+		ledger, err := s.db.FederationLedgerForIDs(ctx, share.UID, selected.IDs)
+		if err != nil {
+			return err
+		}
+		var repairs []BatchRecord
+		for _, record := range preview.Records {
+			if record.ParentID == nil || ledger[record.SessionID].State == "refused" {
+				continue
+			}
+			hash, err := export.DigestCanonical(record)
+			if err != nil {
+				return err
+			}
+			payload := record
+			repairs = append(repairs, BatchRecord{RecordUID: record.SessionID, Kind: "session_summary", Hash: hash, Payload: &payload})
+		}
+		if err = s.postFederationRecords(ctx, link, token, share, view, repairs, out); err != nil {
+			return err
+		}
+		after = selected.IDs[len(selected.IDs)-1]
+		if len(selected.IDs) < 400 {
+			return nil
 		}
 	}
 }

@@ -576,3 +576,29 @@ func TestFederationPurgeInvalidatesWarmSearchAndExtraction(t *testing.T) {
 	assert.Zero(t, progress)
 	assert.Equal(t, 1, vectorDeletion)
 }
+
+func TestFederationSameHashAttachesLaterOwnedParent(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr", SpokeArchiveID: "spoke", Member: "member", CredentialSHA256: "digest"}))
+	share := FederationHubShare{UID: "share", EnrollmentUID: "enr", Remote: "example.org/repo", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active", Retention: "member-controlled"}
+	_, err := d.PutFederationHubShare(ctx, "spoke", share)
+	require.NoError(t, err)
+	parent := "z-parent"
+	child := FederationHubRecord{UID: "a-child", Hash: "child-hash", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: SessionBatchWrite{Session: Session{ID: "a-child", Project: "p", Machine: "federated", Agent: "claude", ParentSessionID: &parent, RelationshipType: "subagent"}}}
+	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 1, "child", []FederationHubRecord{child})
+	require.NoError(t, err)
+	parentRecord := FederationHubRecord{UID: parent, Hash: "parent-hash", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: SessionBatchWrite{Session: Session{ID: parent, Project: "p", Machine: "federated", Agent: "claude"}}}
+	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 2, "parent", []FederationHubRecord{parentRecord})
+	require.NoError(t, err)
+	result, err := d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 3, "repair", []FederationHubRecord{child})
+	require.NoError(t, err)
+	assert.True(t, result.Changed)
+	var gotParent, relationship string
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT coalesce(parent_session_id,''),relationship_type FROM sessions WHERE id='a-child'`).Scan(&gotParent, &relationship))
+	assert.Equal(t, "z-parent", gotParent)
+	assert.Equal(t, "subagent", relationship)
+	result, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 4, "repeat", []FederationHubRecord{child})
+	require.NoError(t, err)
+	assert.False(t, result.Changed)
+}

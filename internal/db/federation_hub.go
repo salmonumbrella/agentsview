@@ -155,6 +155,7 @@ func (db *DB) CommitFederationBatch(ctx context.Context, enrollment, spoke, shar
 	}
 	var writes []SessionBatchWrite
 	var purged []string
+	var relationshipChanges []string
 	var pending recallEvidenceRevocationEvents
 	for _, record := range records {
 		if record.Tombstone {
@@ -184,25 +185,43 @@ func (db *DB) CommitFederationBatch(ctx context.Context, enrollment, spoke, shar
 				return result, err
 			}
 		}
-		if !collision && e == nil && owner == share && hash == record.Hash {
-			if _, err = tx.ExecContext(ctx, `UPDATE federation_records SET epoch=? WHERE share_uid=? AND record_uid=?`, epoch, share, record.UID); err != nil {
-				return result, err
-			}
-			continue
-		}
 		if collision {
 			result.Refused[record.UID] = FederationCollision
 			continue
 		}
 		if record.Write.Session.ParentSessionID != nil {
-			var owned bool
-			if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM federation_records WHERE share_uid=? AND session_id=?)`, share, *record.Write.Session.ParentSessionID).Scan(&owned); err != nil {
+			parent := *record.Write.Session.ParentSessionID
+			var owned, cycle bool
+			if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM federation_records WHERE share_uid=? AND session_id=?)`, share, parent).Scan(&owned); err != nil {
 				return result, err
 			}
-			if !owned {
+			if owned {
+				err = tx.QueryRowContext(ctx, `WITH RECURSIVE ancestors(id) AS (SELECT ? UNION SELECT s.parent_session_id FROM sessions s JOIN ancestors a ON s.id=a.id WHERE s.parent_session_id IS NOT NULL) SELECT EXISTS(SELECT 1 FROM ancestors WHERE id=?)`, parent, id).Scan(&cycle)
+				if err != nil {
+					return result, err
+				}
+			}
+			if !owned || cycle {
 				record.Write.Session.ParentSessionID = nil
 				record.Write.Session.RelationshipType = ""
 			}
+		}
+		if e == nil && owner == share && hash == record.Hash {
+			if _, err = tx.ExecContext(ctx, `UPDATE federation_records SET epoch=? WHERE share_uid=? AND record_uid=?`, epoch, share, record.UID); err != nil {
+				return result, err
+			}
+			changed, err := tx.ExecContext(ctx, `UPDATE sessions SET parent_session_id=?,relationship_type=? WHERE id=? AND (parent_session_id IS NOT ? OR relationship_type<>?)`, record.Write.Session.ParentSessionID, record.Write.Session.RelationshipType, id, record.Write.Session.ParentSessionID, record.Write.Session.RelationshipType)
+			if err != nil {
+				return result, err
+			}
+			n, err := changed.RowsAffected()
+			if err != nil {
+				return result, err
+			}
+			if n > 0 {
+				relationshipChanges = append(relationshipChanges, id)
+			}
+			continue
 		}
 		writes = append(writes, record.Write)
 		if _, err = tx.ExecContext(ctx, `INSERT INTO federation_records(share_uid,record_uid,session_id,hash,assistant_count,epoch) VALUES(?,?,?,?,?,?) ON CONFLICT(share_uid,record_uid) DO UPDATE SET hash=excluded.hash,assistant_count=excluded.assistant_count,epoch=excluded.epoch`, share, record.UID, id, record.Hash, record.AssistantCount, epoch); err != nil {
@@ -231,11 +250,11 @@ func (db *DB) CommitFederationBatch(ctx context.Context, enrollment, spoke, shar
 	if err = tx.Commit(); err != nil {
 		return result, err
 	}
-	db.notifyUsageSessions(append(ids, purged...))
+	db.notifyUsageSessions(append(append(ids, purged...), relationshipChanges...))
 	revocations.flush()
 	pending.flush()
 	result.Committed = sequence
-	result.Changed = len(ids) > 0 || len(purged) > 0
+	result.Changed = len(ids) > 0 || len(purged) > 0 || len(relationshipChanges) > 0
 	return result, nil
 }
 

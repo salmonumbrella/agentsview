@@ -783,6 +783,7 @@ func TestFederationExclusionBetweenBatches(t *testing.T) {
 	var batches int
 	var exclusionErr error
 	var childPayload string
+	var parentAfterTrash bool
 	var wire bytes.Buffer
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
@@ -796,6 +797,13 @@ func TestFederationExclusionBetweenBatches(t *testing.T) {
 			body, e := io.ReadAll(r.Body)
 			require.NoError(t, e)
 			childPayload += string(body)
+			var batch federation.Batch
+			require.NoError(t, json.Unmarshal(body, &batch))
+			for _, record := range batch.Records {
+				if record.RecordUID == "s1001" && record.Payload != nil && record.Payload.ParentID != nil {
+					parentAfterTrash = true
+				}
+			}
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			buffered := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(buffered, r)
@@ -835,7 +843,10 @@ func TestFederationExclusionBetweenBatches(t *testing.T) {
 				return e
 			}
 		}
-		_, e := tx.ExecContext(ctx, `UPDATE sessions SET parent_session_id='s1000', relationship_type='subagent', cwd='CANARY-path',git_branch='CANARY-branch',first_message='CANARY-first',display_name='CANARY-title',session_name='CANARY-name',pr_links='CANARY-links' WHERE id='s1001'`)
+		if _, e := tx.ExecContext(ctx, `UPDATE sessions SET parent_session_id='s1000', relationship_type='subagent', cwd='CANARY-path',git_branch='CANARY-branch',first_message='CANARY-first',display_name='CANARY-title',session_name='CANARY-name',pr_links='CANARY-links' WHERE id='s1001'`); e != nil {
+			return e
+		}
+		_, e := tx.ExecContext(ctx, `UPDATE sessions SET parent_session_id='s1001', relationship_type='subagent' WHERE id='s0000'`)
 		return e
 	}))
 	preview, err := spoke.PreviewShare(ctx, federation.ShareGrant{Project: remote, Level: "summary", Attribution: "pooled"})
@@ -845,15 +856,23 @@ func TestFederationExclusionBetweenBatches(t *testing.T) {
 	result, err := spoke.Push(ctx)
 	require.NoError(t, err)
 	require.NoError(t, exclusionErr)
-	assert.Equal(t, 1001, result.Sent)
-	assert.Equal(t, 3, batches)
+	assert.Equal(t, 1002, result.Sent)
+	assert.Equal(t, 4, batches)
 	assert.Contains(t, childPayload, "s1001")
-	assert.NotContains(t, childPayload, "parent_session_id")
+	assert.False(t, parentAfterTrash)
 	assert.NotContains(t, wire.String(), "CANARY")
 	var count, excluded int
 	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*),coalesce(sum(id='s1000'),0) FROM sessions`).Scan(&count, &excluded))
 	assert.Equal(t, 1001, count)
 	assert.Zero(t, excluded)
+	var parent, relationship string
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT coalesce(parent_session_id,''),relationship_type FROM sessions WHERE id='s0000'`).Scan(&parent, &relationship))
+	assert.Equal(t, "s1001", parent)
+	assert.Equal(t, "subagent", relationship)
+	_, err = spoke.Push(ctx)
+	require.NoError(t, err)
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions`).Scan(&count))
+	assert.Equal(t, 1001, count)
 	assertArchiveHasNoCanary(t, hubDB)
 }
 
