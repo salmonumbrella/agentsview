@@ -2942,7 +2942,8 @@ is pending. Add and push need a live hub policy. Removing a share stops future
 delivery and queues cleanup; run `federation push` and check status or
 `share show` for the receipt. A member-controlled hub purges its records; an
 organization-retained hub keeps them and reports retention. An offline hub
-leaves cleanup pending for retry. If a retained share's source archive is
+leaves cleanup pending for retry. A push can deliver to the current hub while
+reporting that cleanup for an earlier hub remains pending. If a retained share's source archive is
 replaced, deletion narrowing waits for fresh consent rather than treating
 missing records in the replacement as deletions.
 `federation exclude <session-id> [--reason text]` works before or after joining

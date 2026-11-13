@@ -27,8 +27,9 @@ func (s *Service) PushScheduled(ctx context.Context, full bool) (PushResult, err
 	return s.push(ctx, full)
 }
 
-func (s *Service) push(ctx context.Context, full bool) (PushResult, error) {
-	var out PushResult
+func (s *Service) push(ctx context.Context, full bool) (out PushResult, resultErr error) {
+	var cleanupErr error
+	defer func() { resultErr = errors.Join(resultErr, cleanupErr) }()
 	release, err := s.acquirePush(ctx)
 	if err != nil {
 		return out, err
@@ -39,19 +40,29 @@ func (s *Service) push(ctx context.Context, full bool) (PushResult, error) {
 		return out, err
 	}
 	for _, l := range links {
+		if err := ctx.Err(); err != nil {
+			return out, err
+		}
 		shares, e := s.db.ListFederationShares(ctx, l.UID)
 		if e != nil {
 			return out, e
 		}
 		if e = s.processFederationStops(ctx, l, shares); e != nil {
-			return out, e
+			if ctx.Err() != nil {
+				return out, ctx.Err()
+			}
+			cleanupErr = errors.Join(cleanupErr, e)
+			continue
 		}
 		shares, e = s.db.ListFederationShares(ctx, l.UID)
 		if e != nil {
 			return out, e
 		}
 		if e = s.processRetainedNarrowing(ctx, l, shares, &out); e != nil {
-			return out, e
+			if ctx.Err() != nil {
+				return out, ctx.Err()
+			}
+			cleanupErr = errors.Join(cleanupErr, e)
 		}
 	}
 	link, err := s.db.GetFederationLink(ctx)

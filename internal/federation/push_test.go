@@ -65,6 +65,73 @@ func TestStopRetriesAfterHubEpochAhead(t *testing.T) {
 	assert.Equal(t, "retained", share.StopReceipt)
 }
 
+func TestRetiredCleanupFailureDoesNotBlockCurrentShare(t *testing.T) {
+	ctx := t.Context()
+	archive, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "archive.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, archive.Close()) })
+	policy := config.FederationHubConfig{Retention: "member-controlled", AllowedLevels: []string{"summary"}, MinGroupSize: 3, SuggestedProjects: []string{}, Processing: "none"}
+	digest, err := export.DigestCanonical(policy)
+	require.NoError(t, err)
+	consent, err := json.Marshal(SharePreview{DeliveryNotice: shareDeliveryNotice, Policy: policy})
+	require.NoError(t, err)
+	var delivered []string
+	var sequence int64
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub-b", ProtocolVersions: []int{ProtocolVersion}, EnrollmentUID: "enr-b", Member: "member", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
+		case r.Method == http.MethodPut:
+			_ = json.NewEncoder(w).Encode(ShareView{State: "accepted", Epoch: 1, Committed: sequence})
+		case strings.HasSuffix(r.URL.Path, "/reconcile"):
+			var page ReconcileRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&page))
+			_ = json.NewEncoder(w).Encode(db.FederationInventoryResult{Complete: page.Final, Boundary: page.Through, Covered: page.Through})
+		default:
+			var batch Batch
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&batch))
+			for _, record := range batch.Records {
+				if record.Payload != nil {
+					delivered = append(delivered, record.Payload.SessionID)
+				}
+			}
+			sequence = batch.Sequence
+			_ = json.NewEncoder(w).Encode(BatchAck{Committed: sequence, Refused: map[string]string{}})
+		}
+	}))
+	t.Cleanup(hub.Close)
+	file := filepath.Join(testutil.PrivateTempDir(t), "credential")
+	require.NoError(t, os.WriteFile(file, []byte("avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), 0600))
+	old := db.FederationLink{UID: "old", HubOrigin: "http://127.0.0.1:1", HubArchiveID: "hub-a", EnrollmentUID: "enr-a", Member: "member", TokenFile: "/missing/fixture", ProtocolVersion: ProtocolVersion, State: "active"}
+	require.NoError(t, archive.PutFederationLink(ctx, old))
+	require.NoError(t, archive.PutFederationShare(ctx, db.FederationShare{UID: "old-share", LinkUID: old.UID, NormalizedRemote: "github.com/example/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: string(consent), PolicyDigest: digest}))
+	require.NoError(t, archive.DeleteFederationLink(ctx))
+	current := db.FederationLink{UID: "new", HubOrigin: hub.URL, HubArchiveID: "hub-b", EnrollmentUID: "enr-b", Member: "member", TokenFile: file, ProtocolVersion: ProtocolVersion, State: "active"}
+	require.NoError(t, archive.PutFederationLink(ctx, current))
+	require.NoError(t, archive.PutFederationShare(ctx, db.FederationShare{UID: "new-share", LinkUID: current.UID, NormalizedRemote: "github.com/example/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: string(consent), PolicyDigest: digest}))
+	require.NoError(t, archive.Update(ctx, func(tx *sql.Tx) error {
+		for _, q := range []string{
+			`INSERT INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install')`,
+			`INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES('selected','fixture','install','claude','selected','2026-01-02T00:00:00Z',1)`,
+			`INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES('selected','install','claude','selected')`,
+			`INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES('selected','fixture','install','2026-01-01T00:00:00Z','resolved',1,'github.com/example/repo','git_remote','key')`,
+		} {
+			if _, err := tx.ExecContext(ctx, q); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	svc := NewService("spoke", "spoke", policy, archive)
+	result, err := svc.Push(ctx)
+	require.Error(t, err)
+	assert.Equal(t, 1, result.Sent)
+	assert.Equal(t, []string{"selected"}, delivered)
+	pending, err := archive.GetFederationShare(ctx, old.UID, "old-share")
+	require.NoError(t, err)
+	assert.Equal(t, "pending", pending.StopReceipt)
+}
+
 func TestPushOldConsentDoesNotDeliver(t *testing.T) {
 	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
 	require.NoError(t, err)
