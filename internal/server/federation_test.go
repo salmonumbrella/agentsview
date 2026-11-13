@@ -255,6 +255,40 @@ func TestFederationPulseHTTPReleasesOnlySafeProjects(t *testing.T) {
 	}
 }
 
+func TestFederationPulseHTTPDoesNotExposeInferredStart(t *testing.T) {
+	database := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "archive.db"))
+	ctx := t.Context()
+	svc := federation.NewService("hub", "archive", config.FederationHubConfig{MinGroupSize: 3}, database)
+	srv := New(config.Config{Host: "127.0.0.1", Port: 8080}, database, nil, WithFederation(svc))
+	get := func(query string) string {
+		response := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/v1/federation/pulse"+query, nil))
+		require.Equal(t, http.StatusOK, response.Code)
+		return response.Body.String()
+	}
+	assert.Contains(t, get(""), `"since":null`)
+	for i, name := range []string{"a", "b", "c"} {
+		enrollment, spoke, share := "e-"+name, "s-"+name, "h-"+name
+		require.NoError(t, database.CreateFederationEnrollment(ctx, db.FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: name, CredentialSHA256: "digest-" + name}))
+		_, err := database.PutFederationHubShare(ctx, spoke, db.FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+		require.NoError(t, err)
+		start := "2026-07-28T09:00:00Z"
+		record := db.FederationHubRecord{UID: name, Hash: "hash", Remote: "example/repo", ProjectKey: "project", Write: db.SessionBatchWrite{Session: db.Session{ID: name, Project: "example/repo", Agent: "codex", StartedAt: &start}, Signals: db.SessionSignalUpdate{Outcome: "unknown"}}}
+		_, err = database.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", []db.FederationHubRecord{record})
+		require.NoError(t, err)
+		if i == 1 {
+			continue
+		}
+		body := get("")
+		assert.Contains(t, body, `"since":null`)
+		assert.NotContains(t, body, "2026-07-28")
+		if i == 0 {
+			assert.Contains(t, body, `"state":"suppressed"`)
+		}
+	}
+	assert.Contains(t, get("?since=2026-07-27"), `"since":"2026-07-27"`)
+}
+
 func TestFederationOffPreservesOrdinaryAuth(t *testing.T) {
 	for _, required := range []bool{false, true} {
 		database := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "archive.db"))

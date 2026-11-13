@@ -449,7 +449,6 @@ func (db *DB) readFederationPulse(ctx context.Context, since string, minimum int
 		}
 		modelsSeen[id][model] = true
 	}
-	var windowStart *string
 	var links []FederationPulseLink
 	rng, err := db.readFederationPulseSnapshot(ctx, since, now, func(tx *sql.Tx) error {
 		var err error
@@ -458,10 +457,6 @@ func (db *DB) readFederationPulse(ctx context.Context, since string, minimum int
 	}, func(tx *sql.Tx, start, end time.Time, owners map[string]federationPulseOwner, source reportingDaySource) error {
 		if accumulator == nil {
 			accumulator = newFederationPulseAccumulator(owners)
-		}
-		if windowStart == nil {
-			value := start.Format(time.DateOnly)
-			windowStart = &value
 		}
 		query, err := activity.ResolveQuery(activity.QueryInput{Preset: "custom", From: start.Format(time.RFC3339), To: end.Format(time.RFC3339), Timezone: "UTC"}, end)
 		if err != nil {
@@ -604,7 +599,6 @@ func (db *DB) readFederationPulse(ctx context.Context, since string, minimum int
 		}
 	}
 	result := accumulator.release(minimum)
-	result.Since = windowStart
 	if since != "" {
 		result.Since = &since
 	}

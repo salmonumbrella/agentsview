@@ -567,10 +567,11 @@ The hub's `agentsview federation pulse` command and ordinary
 `GET /api/v1/federation/pulse` endpoint use one SQLite snapshot of owned,
 permitted federation records. The optional `since` date is inclusive in UTC;
 the response's `closed_through` is the exclusive last-closed-hour cutoff.
-Without `since`, the window starts at the earliest retained owned dated
-evidence. Sessions are counted once across the window, including sessions
-started earlier with evidence in the window. Stopped or revoked shares retained
-under their accepted policy remain eligible; purged and excluded records do not.
+Without `since`, the scan starts at the earliest retained owned dated evidence,
+but the response does not disclose that inferred date. Sessions are counted once
+across the window, including sessions started earlier with evidence in the
+window. Stopped or revoked shares retained under their accepted policy remain
+eligible; purged and excluded records do not.
 
 Usage follows the reporting export's survivor and pricing rules for the same
 owned sessions. A cost can be unavailable even when tokens are present. Stored

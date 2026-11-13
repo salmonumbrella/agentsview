@@ -141,6 +141,24 @@ func TestFederationPulseTextUsesReleasedStatesAndSeparateLinks(t *testing.T) {
 	assert.Contains(t, text.String(), "Latest stored batch refusals: collision")
 }
 
+func TestFederationPulseDefaultStartIsNotDisclosed(t *testing.T) {
+	for _, state := range []string{"suppressed", "available", "unavailable"} {
+		pulse := db.FederationPulse{ClosedThrough: "2026-07-29T00:00:00Z", Totals: map[string]db.FederationPulseMetric{"sessions": {State: state}}}
+		encoded, err := json.Marshal(pulse)
+		require.NoError(t, err)
+		assert.Contains(t, string(encoded), `"since":null`)
+		assert.NotContains(t, string(encoded), "2026-07-28")
+		var out bytes.Buffer
+		require.NoError(t, printFederationPulse(&out, pulse))
+		assert.Contains(t, out.String(), "UTC window: default start not disclosed to 2026-07-29T00:00:00Z")
+		assert.NotContains(t, out.String(), "2026-07-28")
+	}
+	since := "2026-07-27"
+	var out bytes.Buffer
+	require.NoError(t, printFederationPulse(&out, db.FederationPulse{Since: &since, ClosedThrough: "2026-07-29T00:00:00Z", Suppressed: true}))
+	assert.Contains(t, out.String(), "UTC window: 2026-07-27 to")
+}
+
 func TestShareRemoveReportsPendingCleanup(t *testing.T) {
 	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodDelete, r.Method)

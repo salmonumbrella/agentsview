@@ -127,8 +127,9 @@ The credential file remains in place for that retry.
 On a hub, `agentsview federation pulse` reads aggregate reporting evidence from
 the daemon. Use `--since YYYY-MM-DD` for an inclusive UTC start date, and
 `--json` for the same released data in JSON. The response gives its exclusive
-last-closed-hour cutoff. Without a start date it begins at the earliest retained
-owned dated evidence. A session can count even if it started before the window.
+last-closed-hour cutoff. Without a start date it scans from the earliest retained
+owned dated evidence but does not disclose that inferred date. A session can
+count even if it started before the window.
 
 The pulse reports sessions, projects, usage, known cost, automation, stored
 outcomes and session-health grades. Values with too little distinct-member

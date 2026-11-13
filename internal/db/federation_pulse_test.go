@@ -666,12 +666,48 @@ func TestFederationPulseIncludesDatedMessageLessSignals(t *testing.T) {
 	}
 	got, err := d.readFederationPulse(ctx, "", 3, time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC))
 	require.NoError(t, err)
-	assert.Equal(t, Ptr("2026-07-28"), got.Since)
+	assert.Nil(t, got.Since)
 	assert.Equal(t, Ptr(int64(3)), got.Totals["sessions"].Value)
 	assert.Equal(t, "unavailable", got.Totals["tokens"].State)
 	require.Len(t, got.Projects, 1)
 	assert.Equal(t, Ptr(int64(3)), got.Projects[0].Outcomes[0].Metrics["sessions"].Value)
 	assert.Equal(t, Ptr(int64(3)), got.Projects[0].Grades[0].Metrics["sessions"].Value)
+}
+
+func TestFederationPulseDoesNotReleaseInferredStart(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	now := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	empty, err := d.readFederationPulse(ctx, "", 3, now)
+	require.NoError(t, err)
+	assert.Nil(t, empty.Since)
+	for i, name := range []string{"one", "two", "three"} {
+		require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "e-" + name, SpokeArchiveID: "s-" + name, Member: name, CredentialSHA256: "digest-" + name}))
+		_, err := d.PutFederationHubShare(ctx, "s-"+name, FederationHubShare{UID: "h-" + name, EnrollmentUID: "e-" + name, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+		require.NoError(t, err)
+		start := "2026-07-28T09:00:00Z"
+		record := FederationHubRecord{UID: name, Hash: "hash", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: name, Project: "example/repo", Agent: "codex", StartedAt: &start}, Signals: SessionSignalUpdate{Outcome: "unknown"}}}
+		_, err = d.CommitFederationBatch(ctx, "e-"+name, "s-"+name, "h-"+name, "policy", 1, 1, "batch", []FederationHubRecord{record})
+		require.NoError(t, err)
+		if i == 1 {
+			continue
+		}
+		pulse, err := d.readFederationPulse(ctx, "", 3, now)
+		require.NoError(t, err)
+		assert.Nil(t, pulse.Since)
+		assert.Equal(t, i == 0, pulse.Suppressed)
+		if i == 0 {
+			assert.Nil(t, pulse.Totals["sessions"].Value)
+		}
+		encoded, err := json.Marshal(pulse)
+		require.NoError(t, err)
+		assert.Contains(t, string(encoded), `"since":null`)
+		assert.NotContains(t, string(encoded), "2026-07-28")
+	}
+	explicit, err := d.readFederationPulse(ctx, "2026-07-27", 4, now)
+	require.NoError(t, err)
+	assert.True(t, explicit.Suppressed)
+	assert.Equal(t, Ptr("2026-07-27"), explicit.Since)
 }
 
 func TestFederationPulseReleaseRatiosAndGlobalDistributions(t *testing.T) {

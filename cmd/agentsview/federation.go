@@ -273,7 +273,7 @@ func newFederationPulseCommand() *cobra.Command {
 
 func printFederationPulse(out io.Writer, pulse db.FederationPulse) error {
 	var b strings.Builder
-	start := "earliest available"
+	start := "default start not disclosed"
 	if pulse.Since != nil {
 		start = *pulse.Since
 	}
