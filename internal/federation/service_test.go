@@ -41,6 +41,15 @@ func TestPulseRejectsInvalidDateAndWrongRole(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 }
 
+func TestPulseReturnsArchiveReadFailure(t *testing.T) {
+	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
+	require.NoError(t, err)
+	hub := NewService("hub", "hub", config.FederationHubConfig{MinGroupSize: 3}, archive)
+	require.NoError(t, archive.Close())
+	_, err = hub.Pulse(t.Context(), "")
+	assert.Error(t, err)
+}
+
 func TestStatusKeepsLocalSharesWhenPeerReturnsHTTPError(t *testing.T) {
 	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
 	require.NoError(t, err)
