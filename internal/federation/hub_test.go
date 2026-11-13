@@ -101,7 +101,7 @@ func TestStopManifestUsesConsentedRetentionAndStaleRegisterStaysStopped(t *testi
 // A change to any published membership or availability dimension must not
 // become a second view of a single member while another project stays useful.
 func TestHubPulseProtectsWholeSummaryAfterOneMemberChanges(t *testing.T) {
-	for _, dimension := range []string{"agent", "model", "outcome", "health", "automation", "cost-availability"} {
+	for _, dimension := range []string{"agent", "model", "outcome", "health", "automation", "cost-availability", "zero-to-unknown"} {
 		t.Run(dimension, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			ctx := t.Context()
@@ -128,6 +128,9 @@ func TestHubPulseProtectsWholeSummaryAfterOneMemberChanges(t *testing.T) {
 				key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
 				m := member{name: name, spoke: "spoke-" + name, share: "share-" + name}
 				m.payload = SummaryRecord{SessionID: name, Remote: remote, ProjectKey: key, Agent: "codex", StartedAt: &started, Outcome: "unknown", ByModel: map[string]db.SessionModelUsageBreakdown{"model": {InputTokens: (i + 1) * 10, HasCost: true, Cost: money.Money{Microdollars: int64((i + 1) * 100)}}}}
+				if dimension == "zero-to-unknown" {
+					m.payload.ByModel = map[string]db.SessionModelUsageBreakdown{"model": {InputTokens: (i + 1) * 10, HasCost: true, Cost: money.Money{}}}
+				}
 				enrollment, _, err := hub.Enroll(ctx, m.spoke, name, "")
 				require.NoError(t, err)
 				m.enrollment = enrollment.UID
@@ -153,7 +156,12 @@ func TestHubPulseProtectsWholeSummaryAfterOneMemberChanges(t *testing.T) {
 			require.NotNil(t, first.Totals["tokens"].Value)
 			assert.EqualValues(t, 210, *first.Totals["tokens"].Value)
 			require.NotNil(t, first.Totals["cost_microdollars"].Value)
-			assert.EqualValues(t, 2100, *first.Totals["cost_microdollars"].Value)
+			if dimension == "zero-to-unknown" {
+				assert.EqualValues(t, 0, *first.Totals["cost_microdollars"].Value)
+				assert.Equal(t, "available", first.Totals["cost_microdollars"].State)
+			} else {
+				assert.EqualValues(t, 2100, *first.Totals["cost_microdollars"].Value)
+			}
 			p := &members[0].payload
 			switch dimension {
 			case "agent":
@@ -167,7 +175,7 @@ func TestHubPulseProtectsWholeSummaryAfterOneMemberChanges(t *testing.T) {
 				p.Health = &grade
 			case "automation":
 				p.Automated = true
-			case "cost-availability":
+			case "cost-availability", "zero-to-unknown":
 				p.ByModel = map[string]db.SessionModelUsageBreakdown{"model": {InputTokens: 10}}
 			}
 			apply(members[0], 2)
@@ -194,7 +202,12 @@ func TestHubPulseProtectsWholeSummaryAfterOneMemberChanges(t *testing.T) {
 			require.NotNil(t, later.Projects[0].Totals["tokens"].Value)
 			assert.EqualValues(t, 150, *later.Projects[0].Totals["tokens"].Value)
 			require.NotNil(t, later.Projects[0].Totals["cost_microdollars"].Value)
-			assert.EqualValues(t, 1500, *later.Projects[0].Totals["cost_microdollars"].Value)
+			if dimension == "zero-to-unknown" {
+				assert.EqualValues(t, 0, *later.Projects[0].Totals["cost_microdollars"].Value)
+				assert.Equal(t, "available", later.Projects[0].Totals["cost_microdollars"].State)
+			} else {
+				assert.EqualValues(t, 1500, *later.Projects[0].Totals["cost_microdollars"].Value)
+			}
 		})
 	}
 }
