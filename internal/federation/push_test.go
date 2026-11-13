@@ -639,6 +639,16 @@ func TestRetainedRestoreHonorsExplicitExclusionButNotMissingRows(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "sent", ledger["absent"].State)
 	assert.Equal(t, "tombstoned", ledger["excluded"].State)
+	share, err = archive.GetFederationShare(ctx, link.UID, "share")
+	require.NoError(t, err)
+	records = nil
+	link.TokenFile = "/missing"
+	err = svc.processRetainedNarrowing(ctx, link, []db.FederationShare{share}, &PushResult{})
+	require.ErrorContains(t, err, "unproven absence remains pending")
+	assert.Empty(t, records)
+	ledger, err = archive.FederationLedger(ctx, "share")
+	require.NoError(t, err)
+	assert.Equal(t, "sent", ledger["absent"].State)
 }
 
 func TestRetainedPendingTombstoneIsNotReplayedAfterRestore(t *testing.T) {
@@ -671,7 +681,7 @@ func TestRetainedPendingTombstoneIsNotReplayedAfterRestore(t *testing.T) {
 	batches := 0
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPut {
-			_ = json.NewEncoder(w).Encode(ShareView{State: "stopped", Epoch: 1, Retention: "org-retained"})
+			_ = json.NewEncoder(w).Encode(ShareView{State: "stopped", Epoch: 1, Committed: 1, Retention: "org-retained"})
 			return
 		}
 		if r.Method != http.MethodGet {
@@ -684,18 +694,39 @@ func TestRetainedPendingTombstoneIsNotReplayedAfterRestore(t *testing.T) {
 	t.Cleanup(hub.Close)
 	file := filepath.Join(testutil.PrivateTempDir(t), "credential")
 	require.NoError(t, os.WriteFile(file, []byte("avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), 0600))
-	batch, err := json.Marshal(Batch{Protocol: ProtocolVersion, SpokeInstance: "spoke", ShareUID: "share", Epoch: 1, Sequence: 1, Records: []BatchRecord{{RecordUID: "restored", Kind: "tombstone"}}})
+	link := db.FederationLink{UID: "link", HubOrigin: hub.URL, HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: file, ProtocolVersion: ProtocolVersion, State: "active"}
+	require.NoError(t, archive.PutFederationLink(ctx, link))
+	require.NoError(t, archive.PutFederationShare(ctx, db.FederationShare{UID: "share", LinkUID: link.UID, NormalizedRemote: remote, Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: string(consent), PolicyDigest: digest}))
+	saveSummaryFixture(t, archive, link.UID, "share", "claude", []string{"restored"}, true)
+	require.NoError(t, archive.StopFederationShare(ctx, link.UID, "share", "remove"))
+	require.NoError(t, archive.ReceiptFederationStop(ctx, link.UID, "share", "retained", 1, 1))
+	batch, err := json.Marshal(Batch{Protocol: ProtocolVersion, SpokeInstance: "spoke", ShareUID: "share", Epoch: 1, Sequence: 2, Records: []BatchRecord{{RecordUID: "restored", Kind: "tombstone"}}})
 	require.NoError(t, err)
-	share := db.FederationShare{UID: "share", State: "paused", NormalizedRemote: remote, StopReceipt: "retained", SourceGeneration: generation, Epoch: 1, PendingBatch: string(batch), ConsentJSON: string(consent), PolicyDigest: digest}
+	require.NoError(t, archive.SaveFederationPending(ctx, "share", 2, string(batch), nil))
+	share, err := archive.GetFederationShare(ctx, link.UID, "share")
+	require.NoError(t, err)
+	share.SourceGeneration = generation
 	svc := NewService("spoke", "spoke", policy, archive)
-	err = svc.processRetainedNarrowing(ctx, db.FederationLink{HubOrigin: hub.URL, HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: file}, []db.FederationShare{share}, &PushResult{})
+	err = svc.processRetainedNarrowing(ctx, link, []db.FederationShare{share}, &PushResult{})
 	require.ErrorContains(t, err, "unresolved deletion after restore")
 	assert.Zero(t, batches)
-	// Restored content envelopes are also left pending on a stopped grant.
-	content, err := json.Marshal(Batch{Protocol: ProtocolVersion, SpokeInstance: "spoke", ShareUID: "share", Epoch: 1, Sequence: 1, Records: []BatchRecord{{RecordUID: "restored", Kind: "session_summary", Hash: "hash", Payload: &SummaryRecord{SessionID: "restored"}}}})
+	stillPending, err := archive.GetFederationShare(ctx, link.UID, "share")
 	require.NoError(t, err)
-	share.PendingBatch = string(content)
-	err = svc.processRetainedNarrowing(ctx, db.FederationLink{HubOrigin: hub.URL, HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: file}, []db.FederationShare{share}, &PushResult{})
+	assert.Equal(t, string(batch), stillPending.PendingBatch)
+	// Restored content envelopes are also left pending on a stopped grant.
+	require.NoError(t, archive.PutFederationShare(ctx, db.FederationShare{UID: "content-share", LinkUID: link.UID, NormalizedRemote: "github.com/example/other", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: string(consent), PolicyDigest: digest}))
+	saveSummaryFixture(t, archive, link.UID, "content-share", "claude", []string{"restored"}, true)
+	require.NoError(t, archive.StopFederationShare(ctx, link.UID, "content-share", "remove"))
+	require.NoError(t, archive.ReceiptFederationStop(ctx, link.UID, "content-share", "retained", 1, 1))
+	content, err := json.Marshal(Batch{Protocol: ProtocolVersion, SpokeInstance: "spoke", ShareUID: "content-share", Epoch: 1, Sequence: 2, Records: []BatchRecord{{RecordUID: "restored", Kind: "session_summary", Hash: "hash", Payload: &SummaryRecord{SessionID: "restored"}}}})
+	require.NoError(t, err)
+	require.NoError(t, archive.SaveFederationPending(ctx, "content-share", 2, string(content), nil))
+	contentShare, err := archive.GetFederationShare(ctx, link.UID, "content-share")
+	require.NoError(t, err)
+	err = svc.processRetainedNarrowing(ctx, link, []db.FederationShare{contentShare}, &PushResult{})
 	require.ErrorContains(t, err, "unresolved delivery")
 	assert.Zero(t, batches)
+	stillPending, err = archive.GetFederationShare(ctx, link.UID, "content-share")
+	require.NoError(t, err)
+	assert.Equal(t, string(content), stillPending.PendingBatch)
 }
