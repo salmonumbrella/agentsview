@@ -1,0 +1,36 @@
+name: Retained module diagnostic
+on:
+  push:
+    branches: [diagnostic/2510-retained-module]
+permissions:
+  contents: read
+jobs:
+  tidy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 1913bccaa3b75339ff84247c7b5f831f7c6f05bc
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Generate module metadata
+        run: |
+          set -eu
+          git rev-parse HEAD | tee "$RUNNER_TEMP/source-sha.txt"
+          test "$(cat "$RUNNER_TEMP/source-sha.txt")" = 1913bccaa3b75339ff84247c7b5f831f7c6f05bc
+          go mod tidy
+          git diff -- go.mod go.sum > "$RUNNER_TEMP/module.diff"
+          cp go.mod go.sum "$RUNNER_TEMP/"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: retained-module-1913
+          path: |
+            ${{ runner.temp }}/source-sha.txt
+            ${{ runner.temp }}/module.diff
+            ${{ runner.temp }}/go.mod
+            ${{ runner.temp }}/go.sum
+          if-no-files-found: error
