@@ -2944,7 +2944,10 @@ is pending. Shares paused before upgrading also need this first
 cleanup retry; the upgrade does not invent a receipt. Add and push need a live hub policy. Removing a share stops future
 delivery and queues cleanup; run `federation push` and check status or
 `share show` for the receipt. A member-controlled hub purges its records; an
-organization-retained hub keeps them and reports retention. An offline hub
+organization-retained hub keeps them and reports retention. The receipt reflects
+the policy the hub accepted for those records, even if a newer local preview
+was not registered. If the hub has a newer share epoch, a pending stop retries
+at a later epoch without sending summary content. An offline hub
 leaves cleanup pending for retry. A push can deliver to the current hub while
 reporting that cleanup for an earlier hub remains pending. After a retained
 share's source archive is replaced, explicit exclusions can still narrow its
