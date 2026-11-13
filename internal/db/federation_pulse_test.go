@@ -317,9 +317,9 @@ func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T)
 	d := testDB(t)
 	ctx := t.Context()
 	for _, item := range []struct {
-		id, member string
-		tokens     int
-	}{{"one", "alice", 10}, {"two", "bob", 20}, {"three", "carol", 30}} {
+		id, member, occurred string
+		tokens               int
+	}{{"one", "alice", "2026-07-28T09:05:00Z", 10}, {"two", "bob", "2026-07-28T10:05:00Z", 20}, {"three", "carol", "2026-07-28T11:05:00Z", 30}} {
 		require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr-" + item.id, SpokeArchiveID: "spoke-" + item.id, Member: item.member, CredentialSHA256: "digest-" + item.id}))
 		attribution := "pooled"
 		if item.id == "three" {
@@ -328,7 +328,7 @@ func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T)
 		_, err := d.PutFederationHubShare(ctx, "spoke-"+item.id, FederationHubShare{UID: "share-" + item.id, EnrollmentUID: "enr-" + item.id, Remote: "example/repo", ProjectKey: "project-key", Level: "summary", Attribution: attribution, Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
 		require.NoError(t, err)
 		started := "2026-07-28T09:00:00Z"
-		record := FederationHubRecord{UID: item.id, Hash: "hash", Remote: "example/repo", ProjectKey: "project-key", Write: SessionBatchWrite{Session: Session{ID: item.id, Project: "example/repo", Machine: "federated", Agent: "codex", StartedAt: &started}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: item.tokens, OccurredAt: "2026-07-28T09:05:00Z", DedupKey: item.id}}}}
+		record := FederationHubRecord{UID: item.id, Hash: "hash", Remote: "example/repo", ProjectKey: "project-key", Write: SessionBatchWrite{Session: Session{ID: item.id, Project: "example/repo", Machine: "federated", Agent: "codex", StartedAt: &started}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: item.tokens, OccurredAt: item.occurred, DedupKey: item.id}}}}
 		_, err = d.CommitFederationBatch(ctx, "enr-"+item.id, "spoke-"+item.id, "share-"+item.id, "policy", 1, 1, "batch", []FederationHubRecord{record})
 		require.NoError(t, err)
 	}
@@ -366,6 +366,9 @@ func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T)
 	for _, hour := range hours {
 		exported += hour.Usage.Totals.InputTokens
 	}
+	assert.EqualValues(t, 10, hours[9].Usage.Totals.InputTokens)
+	assert.EqualValues(t, 20, hours[10].Usage.Totals.InputTokens)
+	assert.EqualValues(t, 30, hours[11].Usage.Totals.InputTokens)
 	assert.EqualValues(t, 60, exported)
 	assert.Equal(t, exported, *got.Totals["tokens"].Value)
 }
