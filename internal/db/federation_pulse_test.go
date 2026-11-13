@@ -341,6 +341,67 @@ func TestFederationPulseCrossProjectScopedExportParity(t *testing.T) {
 	assert.Equal(t, map[string]int64{"example/alpha": 6, "example/beta": 15}, projectCost)
 }
 
+func TestFederationPulseCrossProjectAllocatedCostMatchesScopedExport(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.UpsertModelPricing([]ModelPricing{
+		{ModelPattern: "copilot-model-a", InputPerMTok: money.MustParseDollars("10")},
+		{ModelPattern: "copilot-model-b", InputPerMTok: money.MustParseDollars("20")},
+	}))
+	scope := map[string]struct{}{}
+	for _, project := range []string{"alpha", "beta"} {
+		for _, member := range []string{"a", "b", "c"} {
+			id := project + "-" + member
+			scope[id] = struct{}{}
+			enrollment, spoke, share := "enr-"+id, "spoke-"+id, "share-"+id
+			remote, key := "example/"+project, "key-"+project
+			require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: member, CredentialSHA256: "digest-" + id}))
+			_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: remote, ProjectKey: key, Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+			require.NoError(t, err)
+			started, ended := "2026-07-28T10:00:00Z", "2026-07-28T11:10:00Z"
+			cost := money.MustParseDollars("0.03")
+			record := FederationHubRecord{UID: id, Hash: "hash", Remote: remote, ProjectKey: key, Write: SessionBatchWrite{
+				Session: Session{ID: id, Project: remote, Agent: "copilot", StartedAt: &started, EndedAt: &ended}, Signals: SessionSignalUpdate{Outcome: "unknown"},
+				UsageEvents: []UsageEvent{
+					{Source: "shutdown", Model: "copilot-model-a", InputTokens: 1_000_000, OccurredAt: "2026-07-28T10:05:00Z", DedupKey: id + "-first"},
+					{Source: "shutdown", Model: "copilot-model-b", InputTokens: 1_000_000, Cost: &cost, CostStatus: "exact", CostSource: CopilotReportedCostSource, OccurredAt: "2026-07-28T11:10:00Z", DedupKey: id + "-final"},
+				},
+			}}
+			_, err = d.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", []FederationHubRecord{record})
+			require.NoError(t, err)
+		}
+	}
+	date := time.Date(2026, 7, 28, 0, 0, 0, 0, time.UTC)
+	tx, err := d.getReader().BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	require.NoError(t, err)
+	source, err := d.loadReportingExportSourceScoped(ctx, tx, date, date.Add(24*time.Hour), export.ReportingJointSchemaVersion, scope)
+	require.NoError(t, err)
+	hours, err := reportingHoursFromSource(ctx, source.forDate(date, date.Add(24*time.Hour)), date, 24, export.ReportingJointSchemaVersion, nil, time.Hour)
+	require.NoError(t, err)
+	assert.EqualValues(t, 6_000_000, hours[10].Usage.Totals.InputTokens)
+	assert.EqualValues(t, 60_000, hours[10].Usage.Totals.Cost.Microdollars)
+	assert.EqualValues(t, 6_000_000, hours[11].Usage.Totals.InputTokens)
+	assert.EqualValues(t, 120_000, hours[11].Usage.Totals.Cost.Microdollars)
+	for hour, expectedCost := range map[int]int64{10: 30_000, 11: 60_000} {
+		costs := map[string]int64{}
+		for _, project := range hours[hour].Usage.ByProject {
+			costs[project.Project] += project.Cost.Microdollars
+		}
+		assert.Equal(t, map[string]int64{"example/alpha": expectedCost, "example/beta": expectedCost}, costs)
+	}
+	require.NoError(t, tx.Rollback())
+	pulse, err := d.readFederationPulse(ctx, "2026-07-28", 3, date.Add(24*time.Hour))
+	require.NoError(t, err)
+	require.False(t, pulse.Suppressed)
+	assert.Equal(t, Ptr(int64(12_000_000)), pulse.Totals["tokens"].Value)
+	assert.Equal(t, Ptr(int64(180_000)), pulse.Totals["cost_microdollars"].Value)
+	require.Len(t, pulse.Projects, 2)
+	for _, project := range pulse.Projects {
+		assert.Equal(t, Ptr(int64(6_000_000)), project.Totals["tokens"].Value)
+		assert.Equal(t, Ptr(int64(90_000)), project.Totals["cost_microdollars"].Value)
+	}
+}
+
 func TestFederationPulseSurvivorUsesAttributedSessionForModelCoverage(t *testing.T) {
 	d := testDB(t)
 	ctx := t.Context()
