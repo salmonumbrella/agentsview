@@ -1286,6 +1286,7 @@ func TestFederationPulseDatedEvidenceAndPublicReporting(t *testing.T) {
 		messageCount          int
 	}{
 		{"existence", "2026-07-28T10:00:00Z", "", 0},
+		{"creation fallback", "2026-07-27T10:00:00Z", `UPDATE sessions SET created_at='2026-07-28T10:00:00Z', ended_at='2026-07-29T10:00:00Z' WHERE id='session'`, 0},
 		{"usage", "2026-07-27T10:00:00Z", `INSERT INTO usage_events(session_id,source,model,occurred_at,input_tokens) VALUES('session','fixture','model','2026-07-28T10:00:00Z',7)`, 0},
 		{"message", "2026-07-27T10:00:00Z", `INSERT INTO messages(session_id,ordinal,role,content,timestamp) VALUES('session',0,'user','fixture','2026-07-28T12:00:00+02:00')`, 1},
 		{"terminal", "2026-07-27T10:00:00Z", `INSERT INTO tool_result_events(session_id,tool_call_message_ordinal,source,status,content,timestamp) VALUES('session',0,'tool_execution','completed','','2026-07-28T10:00:00Z')`, 1},
