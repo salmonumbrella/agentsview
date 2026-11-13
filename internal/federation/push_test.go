@@ -110,46 +110,56 @@ func TestRetiredCleanupFailureDoesNotBlockCurrentShare(t *testing.T) {
 			t.Cleanup(hub.Close)
 			file := filepath.Join(testutil.PrivateTempDir(t), "credential")
 			require.NoError(t, os.WriteFile(file, []byte("avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), 0600))
+			var oldSequence int64
+			var oldDelivered []string
+			oldFault := false
 			oldHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == http.MethodPut {
 					var manifest ShareManifest
 					require.NoError(t, json.NewDecoder(r.Body).Decode(&manifest))
-					_ = json.NewEncoder(w).Encode(ShareView{State: "stopped", Epoch: manifest.Epoch, Retention: "member-controlled"})
+					state := "accepted"
+					if manifest.Action == "stop" {
+						state = "stopped"
+					}
+					_ = json.NewEncoder(w).Encode(ShareView{State: state, Epoch: manifest.Epoch, Committed: oldSequence, Retention: "member-controlled"})
+					return
+				}
+				if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/reconcile") {
+					var page ReconcileRequest
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&page))
+					_ = json.NewEncoder(w).Encode(db.FederationInventoryResult{Complete: page.Final, Boundary: page.Through, Covered: page.Through})
+					return
+				}
+				if r.Method == http.MethodPost {
+					var batch Batch
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&batch))
+					for _, record := range batch.Records {
+						if record.Payload != nil {
+							oldDelivered = append(oldDelivered, record.Payload.SessionID)
+						}
+					}
+					oldSequence = batch.Sequence
+					_ = json.NewEncoder(w).Encode(BatchAck{Committed: oldSequence, Refused: map[string]string{}})
 					return
 				}
 				assert.Equal(t, http.MethodGet, r.Method)
-				if fault == "canceled" {
+				if oldFault && fault == "canceled" {
 					cancel()
 					return
 				}
 				state, hubID := "enrolled", "hub-a"
-				if fault == "revoked" {
+				if oldFault && fault == "revoked" {
 					state = "revoked"
 				}
-				if fault == "identity mismatch" {
+				if oldFault && fault == "identity mismatch" {
 					hubID = "wrong-hub"
 				}
 				_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: hubID, ProtocolVersions: []int{ProtocolVersion}, EnrollmentUID: "enr-a", Member: "member", EnrollmentState: state, Policy: policy, PolicyDigest: digest})
 			}))
 			t.Cleanup(oldHub.Close)
-			oldFile := file
-			if fault == "missing credential" {
-				oldFile = "/missing/fixture"
-			}
-			if fault == "offline" {
-				oldHub.Close()
-			}
-			old := db.FederationLink{UID: "old", HubOrigin: oldHub.URL, HubArchiveID: "hub-a", EnrollmentUID: "enr-a", Member: "member", TokenFile: oldFile, ProtocolVersion: ProtocolVersion, State: "active"}
+			old := db.FederationLink{UID: "old", HubOrigin: oldHub.URL, HubArchiveID: "hub-a", EnrollmentUID: "enr-a", Member: "member", TokenFile: file, ProtocolVersion: ProtocolVersion, State: "active"}
 			require.NoError(t, archive.PutFederationLink(ctx, old))
 			require.NoError(t, archive.PutFederationShare(ctx, db.FederationShare{UID: "old-share", LinkUID: old.UID, NormalizedRemote: "github.com/example/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: string(consent), PolicyDigest: digest}))
-			require.NoError(t, archive.DeleteFederationLink(ctx))
-			if fault == "retained generation" {
-				require.NoError(t, archive.RecordFederationDelivery(ctx, "old-share", []db.FederationDelivery{{RecordUID: "old-missing", SessionID: "old-missing", Hash: "old", State: "sent"}}))
-				require.NoError(t, archive.ReceiptFederationStop(ctx, old.UID, "old-share", "retained", 1, 0))
-			}
-			current := db.FederationLink{UID: "new", HubOrigin: hub.URL, HubArchiveID: "hub-b", EnrollmentUID: "enr-b", Member: "member", TokenFile: file, ProtocolVersion: ProtocolVersion, State: "active"}
-			require.NoError(t, archive.PutFederationLink(ctx, current))
-			require.NoError(t, archive.PutFederationShare(ctx, db.FederationShare{UID: "new-share", LinkUID: current.UID, NormalizedRemote: "github.com/example/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: string(consent), PolicyDigest: digest}))
 			require.NoError(t, archive.Update(ctx, func(tx *sql.Tx) error {
 				for _, q := range []string{
 					`INSERT INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install')`,
@@ -157,13 +167,38 @@ func TestRetiredCleanupFailureDoesNotBlockCurrentShare(t *testing.T) {
 					`INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES('selected','install','claude','selected')`,
 					`INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES('selected','fixture','install','2026-01-01T00:00:00Z','resolved',1,'github.com/example/repo','git_remote','key')`,
 				} {
-					if _, err := tx.ExecContext(ctx, q); err != nil {
-						return err
+					if _, e := tx.ExecContext(ctx, q); e != nil {
+						return e
 					}
 				}
 				return nil
 			}))
 			svc := NewService("spoke", "spoke", policy, archive)
+			_, err = svc.Push(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, []string{"selected"}, oldDelivered)
+			require.NoError(t, archive.DeleteFederationLink(ctx))
+			oldFault = true
+			if fault == "missing credential" {
+				require.NoError(t, archive.Update(ctx, func(tx *sql.Tx) error {
+					_, e := tx.ExecContext(ctx, `UPDATE federation_links SET token_file=? WHERE link_uid='old'`, filepath.Join(t.TempDir(), "missing"))
+					return e
+				}))
+			}
+			if fault == "offline" {
+				oldHub.Close()
+			}
+			if fault == "retained generation" {
+				require.NoError(t, archive.RecordFederationDelivery(ctx, "old-share", []db.FederationDelivery{{RecordUID: "old-missing", SessionID: "old-missing", Hash: "old", State: "sent"}}))
+				require.NoError(t, archive.ReceiptFederationStop(ctx, old.UID, "old-share", "retained", 1, 0))
+				require.NoError(t, archive.Update(ctx, func(tx *sql.Tx) error {
+					_, e := tx.ExecContext(ctx, `UPDATE federation_shares SET source_generation='prior-generation' WHERE share_uid='old-share'`)
+					return e
+				}))
+			}
+			current := db.FederationLink{UID: "new", HubOrigin: hub.URL, HubArchiveID: "hub-b", EnrollmentUID: "enr-b", Member: "member", TokenFile: file, ProtocolVersion: ProtocolVersion, State: "active"}
+			require.NoError(t, archive.PutFederationLink(ctx, current))
+			require.NoError(t, archive.PutFederationShare(ctx, db.FederationShare{UID: "new-share", LinkUID: current.UID, NormalizedRemote: "github.com/example/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: string(consent), PolicyDigest: digest}))
 			result, pushErr := svc.Push(ctx)
 			require.Error(t, pushErr)
 			if fault == "canceled" {
