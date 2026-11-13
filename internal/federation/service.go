@@ -10,7 +10,6 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"

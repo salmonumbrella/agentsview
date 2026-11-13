@@ -1668,10 +1668,10 @@ func TestFederationPulseDatedEvidenceAndPublicReporting(t *testing.T) {
 			assert.Equal(t, tc.name != "terminal", day.HasData)
 			digest, err := d.ExportReportingDigest(ctx, ReportingDigestExportOptions{From: date, To: date, Now: now})
 			require.NoError(t, err)
-			require.Len(t, digest.Days, 1)
-			assert.Equal(t, "2026-07-28", digest.Days[0].Date)
-			assert.Equal(t, tc.name != "terminal", digest.Days[0].HasData)
-			assert.Equal(t, day.Digest, digest.Days[0].DayDigest)
+			require.Len(t, digest, 1)
+			assert.Equal(t, "2026-07-28", digest[0].Date)
+			assert.Equal(t, tc.name != "terminal", digest[0].HasData)
+			assert.Equal(t, day.Digest, digest[0].DayDigest)
 		})
 	}
 }
@@ -1725,11 +1725,11 @@ func TestFederationPulseMidnightEvidenceCountsSessionOnce(t *testing.T) {
 	assert.EqualValues(t, 7, day2.Hours[0].Usage.Totals.InputTokens)
 	digest, err := d.ExportReportingDigest(ctx, ReportingDigestExportOptions{From: first, To: second, Now: now})
 	require.NoError(t, err)
-	require.Len(t, digest.Days, 2)
-	assert.Equal(t, []string{"2026-07-28", "2026-07-29"}, []string{digest.Days[0].Date, digest.Days[1].Date})
-	assert.True(t, digest.Days[0].HasData)
-	assert.True(t, digest.Days[1].HasData)
-	assert.Equal(t, []string{day1.Digest, day2.Digest}, []string{digest.Days[0].DayDigest, digest.Days[1].DayDigest})
+	require.Len(t, digest, 2)
+	assert.Equal(t, []string{"2026-07-28", "2026-07-29"}, []string{digest[0].Date, digest[1].Date})
+	assert.True(t, digest[0].HasData)
+	assert.True(t, digest[1].HasData)
+	assert.Equal(t, []string{day1.Digest, day2.Digest}, []string{digest[0].DayDigest, digest[1].DayDigest})
 }
 
 func TestFederationPulseStoredRefusalsUnionAcrossShares(t *testing.T) {
