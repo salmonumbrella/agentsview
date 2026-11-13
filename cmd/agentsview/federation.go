@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -213,8 +214,142 @@ func newFederationCommand() *cobra.Command {
 		_, err = fmt.Fprintln(cmd.ErrOrStderr(), "Link removed. The hub keeps this enrollment until its operator revokes it; the credential file was left in place.")
 		return err
 	}}
-	root.AddCommand(enroll, enrollments, revoke, join, status, leave, newFederationShareCommand(), newFederationExcludeCommand(), newFederationPushCommand())
+	root.AddCommand(enroll, enrollments, revoke, join, status, leave, newFederationPulseCommand(), newFederationShareCommand(), newFederationExcludeCommand(), newFederationPushCommand())
 	return root
+}
+
+func fetchFederationPulse(ctx context.Context, base, token, since string, out *db.FederationPulse) error {
+	path := "/api/v1/federation/pulse"
+	if since != "" {
+		path += "?" + url.Values{"since": {since}}.Encode()
+	}
+	resp, err := federationResponse(ctx, base, token, http.MethodGet, path, nil, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	const limit = 4 << 20
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return err
+	}
+	if len(data) > limit {
+		return errors.New("federation pulse response too large")
+	}
+	return json.Unmarshal(data, out)
+}
+
+func newFederationPulseCommand() *cobra.Command {
+	var since string
+	var asJSON bool
+	cmd := &cobra.Command{Use: "pulse", Short: "Show the hub's aggregate pulse", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		cfg, err := config.LoadPFlagsFor(cmd.Flags(), config.ScopeServer)
+		if err != nil {
+			return err
+		}
+		if cfg.Federation.Role != "hub" {
+			return errors.New("federation hub role required")
+		}
+		tr, err := ensureTransportContext(cmd.Context(), &cfg, transportIntentRead, 30*time.Second)
+		if err != nil {
+			return err
+		}
+		if tr.Mode != transportHTTP {
+			return errors.New("federation pulse requires a daemon")
+		}
+		var pulse db.FederationPulse
+		if err := fetchFederationPulse(cmd.Context(), tr.URL, cfg.AuthToken, since, &pulse); err != nil {
+			return err
+		}
+		if asJSON {
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(pulse)
+		}
+		return printFederationPulse(cmd.OutOrStdout(), pulse)
+	}}
+	cmd.Flags().StringVar(&since, "since", "", "Inclusive UTC start date (YYYY-MM-DD)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Print JSON")
+	return cmd
+}
+
+func printFederationPulse(out io.Writer, pulse db.FederationPulse) error {
+	var b strings.Builder
+	start := "earliest available"
+	if pulse.Since != nil {
+		start = *pulse.Since
+	}
+	fmt.Fprintf(&b, "UTC window: %s to %s (exclusive)\n", start, pulse.ClosedThrough)
+	metrics := func(values map[string]db.FederationPulseMetric) {
+		keys := make([]string, 0, len(values))
+		for key := range values {
+			keys = append(keys, key)
+		}
+		slices.Sort(keys)
+		for _, key := range keys {
+			value := values[key]
+			if value.Value != nil {
+				fmt.Fprintf(&b, "  %s: %d\n", key, *value.Value)
+			} else {
+				fmt.Fprintf(&b, "  %s: %s\n", key, value.State)
+			}
+		}
+	}
+	ratios := func(values map[string]db.FederationPulseRatio) {
+		keys := make([]string, 0, len(values))
+		for key := range values {
+			keys = append(keys, key)
+		}
+		slices.Sort(keys)
+		for _, key := range keys {
+			value := values[key]
+			if value.Value != nil {
+				fmt.Fprintf(&b, "  %s: %.2f%%\n", key, 100**value.Value)
+			} else {
+				fmt.Fprintf(&b, "  %s: %s\n", key, value.State)
+			}
+		}
+	}
+	groups := func(label string, values []db.FederationPulseGroup) {
+		for _, group := range values {
+			fmt.Fprintf(&b, "%s: %s\n", label, group.Key)
+			metrics(group.Metrics)
+		}
+	}
+	fmt.Fprintln(&b, "Totals:")
+	metrics(pulse.Totals)
+	ratios(pulse.Ratios)
+	for _, project := range pulse.Projects {
+		fmt.Fprintf(&b, "Project: %s\n", project.Key)
+		metrics(project.Totals)
+		ratios(project.Ratios)
+		groups("Agent", project.Agents)
+		groups("Model", project.Models)
+		groups("Outcome", project.Outcomes)
+		groups("Grade", project.Grades)
+		groups("Category", project.Categories)
+	}
+	groups("Agent", pulse.Agents)
+	groups("Model", pulse.Models)
+	groups("Outcome", pulse.Outcomes)
+	groups("Grade", pulse.Grades)
+	groups("Category", pulse.Categories)
+	if pulse.Suppressed {
+		fmt.Fprintln(&b, "Some values are withheld.")
+	}
+	for _, link := range pulse.Links {
+		contact, delivery := "unavailable", "unavailable"
+		if link.LastContactAt != nil {
+			contact = *link.LastContactAt
+		}
+		if link.LastDeliveryAt != nil {
+			delivery = *link.LastDeliveryAt
+		}
+		fmt.Fprintf(&b, "Spoke: %s; state: %s; last contact: %s; last accepting batch: %s; backlog lag: unavailable\n", link.SpokeName, link.State, contact, delivery)
+		if len(link.LatestBatchRefusals) > 0 {
+			fmt.Fprintf(&b, "  Latest stored batch refusals: %s\n", strings.Join(link.LatestBatchRefusals, ", "))
+		}
+	}
+	_, err := io.WriteString(out, b.String())
+	return err
 }
 
 func addFederationShare(ctx context.Context, base, token string, grant federation.ShareGrant, in io.Reader, out io.Writer) error {

@@ -84,6 +84,32 @@ func TestFederationRequestReturnsDaemonMessage(t *testing.T) {
 	assert.EqualError(t, err, "federation: x")
 }
 
+func TestFederationPulseResponseAndOverflow(t *testing.T) {
+	oversize := false
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/federation/pulse", r.URL.Path)
+		assert.Equal(t, "2025-01-02", r.URL.Query().Get("since"))
+		assert.Equal(t, "Bearer operator", r.Header.Get("Authorization"))
+		if oversize {
+			_, _ = io.WriteString(w, `{"padding":"`+strings.Repeat("x", 4<<20)+`"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"since":"2025-01-02","closed_through":"2025-01-03T12:00:00Z","totals":{"tokens":{"value":60,"state":"available"}},"suppressed":true}`)
+	}))
+	t.Cleanup(daemon.Close)
+	var pulse db.FederationPulse
+	require.NoError(t, fetchFederationPulse(t.Context(), daemon.URL, "operator", "2025-01-02", &pulse))
+	require.NotNil(t, pulse.Totals["tokens"].Value)
+	assert.EqualValues(t, 60, *pulse.Totals["tokens"].Value)
+	var out bytes.Buffer
+	require.NoError(t, printFederationPulse(&out, pulse))
+	assert.Contains(t, out.String(), "tokens: 60")
+	assert.Contains(t, out.String(), "withheld")
+	oversize = true
+	err := fetchFederationPulse(t.Context(), daemon.URL, "operator", "2025-01-02", &pulse)
+	assert.ErrorContains(t, err, "response too large")
+}
+
 func TestShareRemoveReportsPendingCleanup(t *testing.T) {
 	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodDelete, r.Method)
