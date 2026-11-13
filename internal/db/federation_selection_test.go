@@ -16,10 +16,13 @@ func TestFederationSelectionRequiresOwnSnapshotAndLocalProof(t *testing.T) {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO pg_sync_state (key,value) VALUES ('artifact_local_installation_id','install-a')`); err != nil {
 			return err
 		}
-		for _, id := range []string{"selected", "imported", "other", "ambiguous", "excluded", "before", "boundary", "child", "no-snapshot", "attached", "artifact", "trashed", "other-repo", "root-only", "renamed"} {
+		for _, id := range []string{"selected", "imported", "other", "ambiguous", "excluded", "before", "boundary", "child", "no-snapshot", "attached", "artifact", "trashed", "other-repo", "root-only", "renamed", "local-sentinel"} {
 			machine := "install-a"
 			if id == "other" {
 				machine = "other"
+			}
+			if id == "local-sentinel" {
+				machine = "local"
 			}
 			start := "2026-01-02T00:00:00Z"
 			if id == "before" {
@@ -60,6 +63,7 @@ func TestFederationSelectionRequiresOwnSnapshotAndLocalProof(t *testing.T) {
 			`INSERT INTO messages (id,session_id,ordinal,role,content) VALUES (100,'selected',0,'assistant','CANARY-content')`,
 			`INSERT INTO tool_calls (message_id,session_id,tool_name,category,input_json) VALUES (100,'selected','fixture','CANARY-category','CANARY-input')`,
 			`UPDATE sessions SET parent_session_id='selected',relationship_type='subagent' WHERE id='child'`,
+			`UPDATE sessions SET first_message='CANARY-first', display_name='CANARY-title', cwd='/CANARY-cwd', git_branch='CANARY-branch'`,
 			`UPDATE sessions SET project='personal', cwd='/fixture/private/work' WHERE id='renamed'`,
 		} {
 			if _, err := tx.ExecContext(ctx, q); err != nil {
@@ -79,7 +83,7 @@ func TestFederationSelectionRequiresOwnSnapshotAndLocalProof(t *testing.T) {
 	result, err := database.SelectFederationSessions(ctx, "github.com/example/api", "2026-01-02")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"boundary", "selected"}, result.IDs)
-	assert.Equal(t, 4, result.NotLocal)
+	assert.Equal(t, 5, result.NotLocal)
 	assert.Equal(t, 1, result.Excluded)
 	assert.Equal(t, 1, result.NotIdentifiable)
 	assert.Equal(t, 1, result.ToolCounts["selected"])
