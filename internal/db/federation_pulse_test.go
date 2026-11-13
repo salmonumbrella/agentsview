@@ -195,6 +195,42 @@ func TestFederationPulseReleaseDistinguishesUnavailableAndCostSupport(t *testing
 	assert.Nil(t, empty.Totals["tokens"].Value)
 }
 
+func TestFederationPulseWithholdsIntersectingSafeMarginals(t *testing.T) {
+	owners := map[string]federationPulseOwner{
+		"a": {member: "a", project: "private-project"}, "b": {member: "b", project: "private-project"},
+		"c": {member: "c", project: "private-project"}, "d": {member: "d", project: "private-project"},
+		"e": {member: "e", project: "private-project"}, "f": {member: "f", project: "private-project"},
+		"g": {member: "g", project: "safe"}, "h": {member: "h", project: "safe"}, "i": {member: "i", project: "safe"},
+	}
+	a := newFederationPulseAccumulator(owners)
+	for _, item := range []struct{ id, model, outcome string }{
+		{"a", "private-model-a", "private-outcome-x"}, {"b", "private-model-a", "private-outcome-x"},
+		{"c", "private-model-a", "private-outcome-y"}, {"d", "private-model-b", "private-outcome-x"},
+		{"e", "private-model-b", "private-outcome-y"}, {"f", "private-model-b", "private-outcome-y"},
+	} {
+		a.add(item.id, "total", "", "sessions", 1)
+		a.add(item.id, "model", item.model, "sessions", 1)
+		a.add(item.id, "outcome", item.outcome, "sessions", 1)
+	}
+	for _, id := range []string{"g", "h", "i"} {
+		a.add(id, "total", "", "sessions", 1)
+		a.add(id, "total", "", "tokens", 10)
+	}
+	got := a.release(3)
+	require.True(t, got.Suppressed)
+	require.Len(t, got.Projects, 1)
+	assert.Equal(t, "safe", got.Projects[0].Key)
+	assert.Equal(t, Ptr(int64(30)), got.Projects[0].Totals["tokens"].Value)
+	assert.Nil(t, got.Totals["sessions"].Value)
+	assert.Equal(t, "suppressed", got.Totals["sessions"].State)
+	assert.Equal(t, "suppressed", got.Ratios["automation_share"].State)
+	data, err := json.Marshal(got)
+	require.NoError(t, err)
+	for _, secret := range []string{"private-project", "private-model", "private-outcome"} {
+		assert.NotContains(t, string(data), secret)
+	}
+}
+
 func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T) {
 	d := testDB(t)
 	ctx := t.Context()

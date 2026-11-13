@@ -37,9 +37,12 @@ func TestFederationSummaryModelAnalytics(t *testing.T) {
 	unknown := fixtureSession("no-usage-summary", "alpha", "fixture", "2026-02-03T09:00:00Z", 1)
 	unknown.Machine = "federated"
 	unknown.UserMessageCount = 0
+	knownMixedTime := "2026-02-03T10:00:00Z"
+	knownMixed := fixtureSession("known-mixed", "alpha", "fixture", knownMixedTime, 1)
 	_, err = local.WriteSessionBatchAtomic(ctx, []db.SessionBatchWrite{
 		{Session: ordinary, DataVersion: 1, Messages: []db.Message{fixtureMessage(ordinary.ID, 0, "assistant", "answer", ordinaryTime)}, ReplaceMessages: true},
 		{Session: unknown, DataVersion: 1},
+		{Session: knownMixed, DataVersion: 1, Messages: []db.Message{fixtureMessage(knownMixed.ID, 0, "assistant", "answer", knownMixedTime)}, ReplaceMessages: true},
 	})
 	require.NoError(t, err)
 	_, err = syncer.Push(ctx, false, nil)

@@ -87,9 +87,12 @@ func TestActivityDoesNotInferFederationFromMachineName(t *testing.T) {
 	unknown := syncSession("summary-without-usage", "alpha", "fixture", "2024-06-02T09:00:00Z", 1)
 	unknown.Machine = "federated"
 	unknown.UserMessageCount = 0
+	knownMixedTime := "2024-06-02T10:00:00Z"
+	knownMixed := syncSession("known-mixed", "alpha", "fixture", knownMixedTime, 1)
 	store := newDuckAnalyticsStore(t, []db.SessionBatchWrite{
 		{Session: ordinary, DataVersion: 1, Messages: []db.Message{duckModelMessage("ordinary", 0, "assistant", "answer", ordinaryTime, "model-a")}, ReplaceMessages: true},
 		{Session: unknown, DataVersion: 1},
+		{Session: knownMixed, DataVersion: 1, Messages: []db.Message{duckModelMessage("known-mixed", 0, "assistant", "answer", knownMixedTime, "model-a")}, ReplaceMessages: true},
 	})
 	var machine string
 	require.NoError(t, store.DB().QueryRowContext(t.Context(), `SELECT machine FROM sessions WHERE id='ordinary'`).Scan(&machine))
