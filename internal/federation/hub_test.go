@@ -280,17 +280,15 @@ func TestHubPulseProtectsWholeSummaryAfterOneMemberChanges(t *testing.T) {
 			require.Len(t, q.Categories, 1)
 			assert.Equal(t, "interactive", q.Categories[0].Key)
 			assert.Equal(t, db.FederationPulseMetric{Value: new(int64(3)), State: "available"}, q.Categories[0].Metrics["sessions"])
+			assert.Equal(t, db.FederationPulseMetric{Value: new(int64(3)), State: "available"}, q.Totals["outcome_observed_sessions"])
+			assert.Equal(t, db.FederationPulseRatio{Value: new(float64(1)), State: "available"}, q.Ratios["outcome_coverage"])
+			require.Len(t, q.Outcomes, 1)
 			if dimension == "outcome-unknown" {
-				assert.Equal(t, db.FederationPulseMetric{Value: new(int64(3)), State: "available"}, q.Totals["outcome_observed_sessions"])
-				assert.Equal(t, db.FederationPulseRatio{Value: new(float64(1)), State: "available"}, q.Ratios["outcome_coverage"])
-				require.Len(t, q.Outcomes, 1)
 				assert.Equal(t, "completed", q.Outcomes[0].Key)
-				assert.Equal(t, db.FederationPulseMetric{Value: new(int64(3)), State: "available"}, q.Outcomes[0].Metrics["sessions"])
 			} else {
-				assert.Equal(t, db.FederationPulseMetric{State: "unavailable"}, q.Totals["outcome_observed_sessions"])
-				assert.Equal(t, db.FederationPulseRatio{State: "unavailable"}, q.Ratios["outcome_coverage"])
-				assert.Empty(t, q.Outcomes)
+				assert.Equal(t, "unknown", q.Outcomes[0].Key)
 			}
+			assert.Equal(t, db.FederationPulseMetric{Value: new(int64(3)), State: "available"}, q.Outcomes[0].Metrics["sessions"])
 			if dimension == "health-absent" {
 				assert.Equal(t, db.FederationPulseMetric{Value: new(int64(3)), State: "available"}, q.Totals["health_observed_sessions"])
 				require.Len(t, q.Grades, 1)
