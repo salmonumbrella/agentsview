@@ -3166,6 +3166,10 @@ func applySchemaColumnMigrations(ctx context.Context, w *writerHandle, progress 
 			"creating provider_freshness side-table: %w", err)
 	}
 
+	var legacyStopIntent, legacyStopReceipt bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pragma_table_info('federation_shares') WHERE name='stop_intent'), EXISTS(SELECT 1 FROM pragma_table_info('federation_shares') WHERE name='stop_receipt')`).Scan(&legacyStopIntent, &legacyStopReceipt); err != nil {
+		return fmt.Errorf("checking legacy federation stop columns: %w", err)
+	}
 	if err := applyColumnMigrations(
 		schemaColumnMigrations(),
 		func(query string, args ...any) rowScanner {
@@ -3175,6 +3179,16 @@ func applySchemaColumnMigrations(ctx context.Context, w *writerHandle, progress 
 		progress,
 	); err != nil {
 		return err
+	}
+	if !legacyStopIntent {
+		if _, err := tx.ExecContext(ctx, `UPDATE federation_shares SET stop_intent=CASE state WHEN 'paused' THEN 'pause' WHEN 'policy_paused' THEN 'policy' END WHERE state IN ('paused','policy_paused')`); err != nil {
+			return fmt.Errorf("initializing legacy federation stop intents: %w", err)
+		}
+	}
+	if !legacyStopReceipt {
+		if _, err := tx.ExecContext(ctx, `UPDATE federation_shares SET stop_receipt='pending' WHERE state IN ('paused','policy_paused') AND stop_intent IN ('pause','policy')`); err != nil {
+			return fmt.Errorf("initializing legacy federation stop receipts: %w", err)
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE federation_deliveries AS d SET
 		hub_origin=COALESCE((SELECT l.hub_origin FROM federation_shares s JOIN federation_links l ON l.link_uid=s.link_uid WHERE s.share_uid=d.share_uid),''),

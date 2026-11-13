@@ -2938,7 +2938,8 @@ standard error; `share show` prints the stored preview. A changed hub policy
 pauses active shares. A share you paused stays paused; run `share add` again to
 replace its consent and `resume` to activate it. Resume requires a completed
 stop receipt; run `federation push` and check status or `share show` if cleanup
-is pending. Add and push need a live hub policy. Removing a share stops future
+is pending. Shares paused before upgrading also need this first
+cleanup retry; the upgrade does not invent a receipt. Add and push need a live hub policy. Removing a share stops future
 delivery and queues cleanup; run `federation push` and check status or
 `share show` for the receipt. A member-controlled hub purges its records; an
 organization-retained hub keeps them and reports retention. An offline hub

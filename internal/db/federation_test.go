@@ -509,6 +509,51 @@ func TestFederationDeliveryContextUpgradeUsesOriginalJoins(t *testing.T) {
 	assert.Equal(t, "github.com/example/api", ledger["record"].NormalizedRemote)
 }
 
+func TestLegacyPausedSharesAcquirePendingStopOnOpenAndCopy(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	old, err := sql.Open("sqlite3", path)
+	require.NoError(t, err)
+	_, err = old.ExecContext(ctx, `CREATE TABLE federation_shares (
+		share_uid TEXT PRIMARY KEY, link_uid TEXT NOT NULL, normalized_remote TEXT NOT NULL,
+		level TEXT NOT NULL, attribution TEXT NOT NULL, since TEXT NOT NULL DEFAULT '',
+		audience TEXT NOT NULL, state TEXT NOT NULL, consent_json TEXT NOT NULL,
+		policy_digest TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '2026-01-01');
+		INSERT INTO federation_shares(share_uid,link_uid,normalized_remote,level,attribution,audience,state,consent_json,policy_digest) VALUES
+		('manual','link','example.org/manual','summary','pooled','operators','paused','{}','digest'),
+		('policy','link','example.org/policy','summary','pooled','operators','policy_paused','{}','digest');
+		CREATE TABLE federation_exclusions(session_id TEXT PRIMARY KEY,reason TEXT NOT NULL,created_at TEXT NOT NULL);
+		INSERT INTO federation_exclusions VALUES('excluded','private','2026-01-01');
+		CREATE TABLE federation_deliveries(share_uid TEXT NOT NULL,record_uid TEXT NOT NULL,session_id TEXT NOT NULL,hash TEXT NOT NULL,state TEXT NOT NULL,attempt_hash TEXT NOT NULL DEFAULT '',PRIMARY KEY(share_uid,record_uid));
+		INSERT INTO federation_deliveries VALUES('manual','record','record','confirmed','sent','attempt')`)
+	require.NoError(t, err)
+	require.NoError(t, old.Close())
+	copy := testDB(t)
+	require.NoError(t, copy.CopyFederationStateFrom(ctx, path))
+	upgraded, err := OpenIsolated(ctx, path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, upgraded.Close()) })
+	for _, archive := range []*DB{copy, upgraded} {
+		manual, err := archive.GetFederationShare(ctx, "link", "manual")
+		require.NoError(t, err)
+		assert.Equal(t, "paused", manual.State)
+		assert.Equal(t, "pause", manual.StopIntent)
+		assert.Equal(t, "pending", manual.StopReceipt)
+		policy, err := archive.GetFederationShare(ctx, "link", "policy")
+		require.NoError(t, err)
+		assert.Equal(t, "policy_paused", policy.State)
+		assert.Equal(t, "policy", policy.StopIntent)
+		assert.Equal(t, "pending", policy.StopReceipt)
+		ledger, err := archive.FederationLedger(ctx, "manual")
+		require.NoError(t, err)
+		assert.Equal(t, "confirmed", ledger["record"].Hash)
+		assert.Equal(t, "attempt", ledger["record"].AttemptHash)
+		var exclusion int
+		require.NoError(t, archive.Reader().QueryRow(ctx, `SELECT count(*) FROM federation_exclusions WHERE session_id='excluded'`).Scan(&exclusion))
+		assert.Equal(t, 1, exclusion)
+	}
+}
+
 func TestFederationWithdrawalStateSurvivesCopy(t *testing.T) {
 	source, target := testDB(t), testDB(t)
 	ctx := t.Context()

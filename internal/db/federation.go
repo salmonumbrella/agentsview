@@ -269,6 +269,10 @@ func (db *DB) CopyFederationStateFrom(ctx context.Context, sourcePath string) er
 			}
 			if present != 0 {
 				expressions = append(expressions, column)
+			} else if table == "federation_shares" && column == "stop_intent" {
+				expressions = append(expressions, "CASE state WHEN 'paused' THEN 'pause' WHEN 'policy_paused' THEN 'policy' ELSE '' END")
+			} else if table == "federation_shares" && column == "stop_receipt" {
+				expressions = append(expressions, "CASE WHEN state IN ('paused','policy_paused') THEN 'pending' ELSE '' END")
 			} else if column == "epoch" {
 				expressions = append(expressions, "1")
 			} else if column == "sequence" || column == "usage_cursor" || column == "deletion_cursor" || column == "completed_epoch" {
