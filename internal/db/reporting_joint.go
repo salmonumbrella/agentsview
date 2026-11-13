@@ -129,10 +129,10 @@ func addReportingJointSupport(support reportingJointSupport, key reportingCellKe
 	if row.ProofRef != 0 {
 		contribution.proofRefs = append(contribution.proofRefs, row.ProofRef)
 	}
-	// An input reference alone does not describe shared cost allocation.
-	// Until that native dependency is attached,
-	// a future admission owner must treat this contribution as unproved.
-	if row.ProofRef == 0 || row.CostAllocated {
+	// An input reference alone does not describe shared allocation or search
+	// fees. Until those dependencies are attached, a future admission owner
+	// must treat this contribution as unproved.
+	if row.ProofRef == 0 || row.CostAllocated || row.WebSearchRequests != 0 {
 		contribution.proofIncomplete = true
 	}
 	return nil
