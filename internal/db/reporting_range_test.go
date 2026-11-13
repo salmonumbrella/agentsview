@@ -167,6 +167,20 @@ func TestReportingRangeUntimedEvidence(t *testing.T) {
 	}
 }
 
+func TestReportingEvidenceDaysWithNullableSessionBounds(t *testing.T) {
+	d := testDB(t)
+	_, err := d.getWriter().ExecContext(t.Context(), `INSERT INTO sessions
+		(id, project, machine, agent, started_at, ended_at, created_at) VALUES
+		('started', 'project', 'local', 'agent', '2024-01-01T09:00:00Z', NULL, '2024-01-02T09:00:00Z'),
+		('untimed', 'project', 'local', 'agent', NULL, NULL, '2024-01-03T09:00:00Z')`)
+	require.NoError(t, err)
+	rng, days, err := reportingEvidenceDaysFrom(t.Context(), d.getReader(), time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC), map[string]struct{}{"started": {}, "untimed": {}}, true)
+	require.NoError(t, err)
+	require.NotNil(t, rng.EarliestDate)
+	assert.Equal(t, "2024-01-01", *rng.EarliestDate)
+	assert.Equal(t, []time.Time{time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 3, 0, 0, 0, 0, time.UTC)}, days)
+}
+
 func TestReportingRangeWithoutCursorUsageTable(t *testing.T) {
 	d := testDB(t)
 	_, err := d.getWriter().ExecContext(t.Context(), `

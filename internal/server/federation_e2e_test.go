@@ -1958,6 +1958,8 @@ func TestFederationOfflineStopBeforeNewEpochRegistration(t *testing.T) {
 				require.NoError(t, spoke.ResumeShare(ctx, uid))
 			} else {
 				// A restored spoke can lag a rebuild that the hub has accepted.
+				var key string
+				require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT project_key FROM federation_hub_shares WHERE share_uid=?`, uid).Scan(&key))
 				_, err = hubDB.PutFederationHubShare(ctx, "spoke-a", db.FederationHubShare{UID: uid, EnrollmentUID: link.EnrollmentUID, Remote: remote, ProjectKey: key, Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: preview.PolicyDigest, Epoch: 2, State: "active", Retention: retention, Rebuild: true})
 				require.NoError(t, err)
 			}
