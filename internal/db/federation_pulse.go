@@ -111,11 +111,14 @@ func (db *DB) readFederationPulseSnapshot(
 	if err != nil {
 		return ReportingRange{}, err
 	}
-	start := requested
-	if start == nil && rng.EarliestDate != nil {
+	var start *time.Time
+	if rng.EarliestDate != nil {
 		date, parseErr := time.Parse(time.DateOnly, *rng.EarliestDate)
 		if parseErr != nil {
 			return ReportingRange{}, parseErr
+		}
+		if requested != nil && requested.After(date) {
+			date = *requested
 		}
 		start = &date
 	}

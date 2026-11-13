@@ -104,6 +104,33 @@ func TestFederationPulseSnapshotScopesAndVisitsDays(t *testing.T) {
 	assert.Equal(t, []string{"2026-07-28", "2026-07-29"}, dates)
 	assert.Equal(t, Ptr("2026-07-28"), rng.EarliestDate)
 	assert.Equal(t, "2026-07-29T12:00:00Z", rng.ClosedThrough)
+	for _, tc := range []struct {
+		since string
+		want  []string
+	}{
+		{"0001-01-01", []string{"2026-07-28", "2026-07-29"}},
+		{"2026-07-29", []string{"2026-07-29"}},
+	} {
+		var visited []string
+		_, err := d.readFederationPulseSnapshot(ctx, tc.since, time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC), nil, func(_ *sql.Tx, date, _ time.Time, _ map[string]federationPulseOwner, _ reportingDaySource) error {
+			visited = append(visited, date.Format(time.DateOnly))
+			return nil
+		})
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, visited)
+	}
+	empty := testDB(t)
+	visits := 0
+	_, err = empty.readFederationPulseSnapshot(ctx, "0001-01-01", time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC), nil, func(_ *sql.Tx, _, _ time.Time, _ map[string]federationPulseOwner, _ reportingDaySource) error {
+		visits++
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Zero(t, visits)
+	pulse, err := d.readFederationPulse(ctx, "0001-01-01", 1, time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	assert.Equal(t, Ptr("0001-01-01"), pulse.Since)
+	assert.Equal(t, Ptr(int64(1)), pulse.Totals["sessions"].Value)
 }
 
 func TestFederationPulseSuppressionProtectsSupportAtoms(t *testing.T) {
