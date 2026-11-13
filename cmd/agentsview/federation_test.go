@@ -93,3 +93,13 @@ func TestFederationEnrollmentShowsCredentialOnlyOnce(t *testing.T) {
 	assert.NotContains(t, stderr.String(), credential)
 	assert.Contains(t, stderr.String(), "hub-a")
 }
+
+func TestFederationRequestReturnsDaemonMessage(t *testing.T) {
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"x"}`))
+	}))
+	t.Cleanup(daemon.Close)
+	err := federationRequest(t.Context(), daemon.URL, "", http.MethodGet, "/", nil, nil)
+	assert.EqualError(t, err, "federation: x")
+}

@@ -14,7 +14,7 @@ const federationHandshakePath = "/api/v1/federation/handshake"
 
 // federationAuth returns true when it has handled the request.
 func (s *Server) federationAuth(w http.ResponseWriter, r *http.Request, next http.Handler) bool {
-	token, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	token, hasBearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	unauthorized := func() { setCORSOnAuthError(w, r); http.Error(w, "Unauthorized", http.StatusUnauthorized) }
 	if r.URL.Path != federationHandshakePath {
 		queryCredential := false
@@ -29,7 +29,7 @@ func (s *Server) federationAuth(w http.ResponseWriter, r *http.Request, next htt
 		}
 		return false
 	}
-	if r.Method != http.MethodGet {
+	if !hasBearer || r.Method != http.MethodGet {
 		unauthorized()
 		return true
 	}

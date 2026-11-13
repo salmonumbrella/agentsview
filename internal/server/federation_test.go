@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/dbtest"
+	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/federation"
 	"go.kenn.io/agentsview/internal/testutil"
 )
@@ -56,6 +58,18 @@ func TestFederationCredentialIsolation(t *testing.T) {
 					assert.Equal(t, http.StatusUnauthorized, rec.Code, "%s %s query=%v", op.method, path, query)
 					assert.Equal(t, "Unauthorized\n", rec.Body.String())
 				}
+			}
+			for _, header := range []string{token, "bearer " + token} {
+				req := httptest.NewRequest(http.MethodGet, federationHandshakePath, nil)
+				req.Header.Set("Authorization", header)
+				req.Header.Set(federation.SpokeArchiveHeader, "spoke-a")
+				rec := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(rec, req)
+				assert.Equal(t, http.StatusUnauthorized, rec.Code)
+				assert.Equal(t, "Unauthorized\n", rec.Body.String())
+				rows, err := svc.List(t.Context())
+				require.NoError(t, err)
+				assert.Empty(t, rows[0].LastHandshakeAt)
 			}
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/federation/handshake", nil)
 			req.Header.Set("Authorization", "Bearer "+token)
@@ -143,7 +157,10 @@ func TestFederationHubSpokeLifecycle(t *testing.T) {
 	t.Cleanup(func() { log.SetOutput(previousLog) })
 	hubDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "hub.db"))
 	spokeDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "spoke.db"))
-	policy := config.FederationHubConfig{Retention: "member-controlled", AllowedLevels: []string{"summary"}, MinGroupSize: 3, SuggestedProjects: []string{}, Processing: "none"}
+	cfg, err := config.Default()
+	require.NoError(t, err)
+	cfg.Federation.Role = "hub"
+	policy := cfg.Federation.Hub
 	hub := federation.NewService("hub", "hub-a", policy, hubDB)
 	enrollment, token, err := hub.Enroll(t.Context(), "spoke-a", "member-a", "")
 	require.NoError(t, err)
@@ -157,11 +174,27 @@ func TestFederationHubSpokeLifecycle(t *testing.T) {
 	status, err := spoke.Status(t.Context())
 	require.NoError(t, err)
 	assert.Zero(t, status.Shares)
+	require.NotNil(t, status.Hub)
+	assert.Equal(t, federation.HubOK, status.Hub.State)
+	data, err := json.Marshal(status.Hub.Policy)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"suggested_projects":[]`)
+	digest, err := export.DigestCanonical(*status.Hub.Policy)
+	require.NoError(t, err)
+	assert.Equal(t, digest, status.Hub.PolicyDigest)
 	require.NotNil(t, status.Link)
 	assert.Equal(t, "member-a", status.Link.Member)
 	require.NoError(t, hub.Revoke(t.Context(), enrollment.UID))
-	_, err = spoke.Status(t.Context())
-	require.Error(t, err)
+	status, err = spoke.Status(t.Context())
+	require.NoError(t, err)
+	require.NotNil(t, status.Link)
+	assert.Equal(t, federation.LinkActive, status.Link.State)
+	assert.Equal(t, federation.HubRefused, status.Hub.State)
+	assert.Nil(t, status.Hub.Policy)
+	httpHub.Close()
+	status, err = spoke.Status(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, federation.HubUnreachable, status.Hub.State)
 	require.NoError(t, spoke.Leave(t.Context()))
 	status, err = spoke.Status(t.Context())
 	require.NoError(t, err)
@@ -169,4 +202,88 @@ func TestFederationHubSpokeLifecycle(t *testing.T) {
 	_, err = os.Stat(file)
 	require.NoError(t, err)
 	assert.NotContains(t, logs.String(), token)
+}
+
+func TestFederationControlInputMessages(t *testing.T) {
+	database := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "hub.db"))
+	svc := federation.NewService("hub", "hub-a", config.FederationHubConfig{}, database)
+	srv := New(config.Config{Host: "127.0.0.1", Port: 8080}, database, nil, WithFederation(svc))
+	hub := httptest.NewServer(srv.Handler())
+	t.Cleanup(hub.Close)
+	for _, tc := range []struct{ path, body, message string }{
+		{"/api/v1/federation/enrollments", `{"spoke_archive_id":" ","member":"member-a"}`, "spoke archive ID is required"},
+		{"/api/v1/federation/enrollments", `{"spoke_archive_id":"` + strings.Repeat("a", 129) + `","member":"member-a"}`, "spoke archive ID is too long"},
+		{"/api/v1/federation/enrollments/missing/revoke", `{}`, "enrollment not found"},
+	} {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, hub.URL+tc.path, strings.NewReader(tc.body))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", hub.URL)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		data, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		assert.Contains(t, string(data), tc.message)
+	}
+}
+
+func TestFederationJoinControlMessages(t *testing.T) {
+	database := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "spoke.db"))
+	policy := config.FederationHubConfig{Retention: "member-controlled", AllowedLevels: []string{"summary"}, MinGroupSize: 3, SuggestedProjects: []string{}, Processing: "none"}
+	digest, err := export.DigestCanonical(policy)
+	require.NoError(t, err)
+	response := federation.HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{1}, EnrollmentUID: "enr-a", Member: "member-a", Policy: policy, PolicyDigest: digest}
+	code := http.StatusOK
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if code != http.StatusOK {
+			w.WriteHeader(code)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	t.Cleanup(hub.Close)
+	file := filepath.Join(testutil.PrivateTempDir(t), "credential")
+	credential := "avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	require.NoError(t, os.WriteFile(file, []byte(credential), 0600))
+	badFile := filepath.Join(testutil.PrivateTempDir(t), "bad")
+	require.NoError(t, os.WriteFile(badFile, []byte("bad"), 0600))
+	svc := federation.NewService("spoke", "spoke-a", policy, database)
+	srv := New(config.Config{Host: "127.0.0.1", Port: 8080}, database, nil, WithFederation(svc))
+	daemon := httptest.NewServer(srv.Handler())
+	t.Cleanup(daemon.Close)
+	for _, tc := range []struct {
+		name, origin, hubID, path, message string
+		version, status                    int
+		digest                             string
+	}{
+		{"relative", hub.URL, "hub-a", "relative", "credential file path must be absolute", 1, 200, digest},
+		{"missing", hub.URL, "hub-a", filepath.Join(t.TempDir(), "missing"), "cannot open credential file", 1, 200, digest},
+		{"format", hub.URL, "hub-a", badFile, "invalid federation credential", 1, 200, digest},
+		{"url", "http://example.invalid", "hub-a", file, "invalid federation hub URL", 1, 200, digest},
+		{"identity", hub.URL, "different", file, "federation hub identity mismatch", 1, 200, digest},
+		{"protocol", hub.URL, "hub-a", file, "unsupported federation protocol", 2, 200, digest},
+		{"digest", hub.URL, "hub-a", file, "invalid federation policy digest", 1, 200, "wrong"},
+		{"refused", hub.URL, "hub-a", file, "hub refused this credential (revoked, unknown, or wrong archive)", 1, 401, digest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response.ProtocolVersions, response.PolicyDigest, code = []int{tc.version}, tc.digest, tc.status
+			body, err := json.Marshal(map[string]string{"hub": tc.origin, "hub_archive": tc.hubID, "credential_file": tc.path})
+			require.NoError(t, err)
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, daemon.URL+"/api/v1/federation/link", bytes.NewReader(body))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Origin", daemon.URL)
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			data, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+			assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+			assert.Contains(t, string(data), tc.message)
+			assert.NotContains(t, string(data), credential)
+			assert.NotContains(t, string(data), tc.path)
+		})
+	}
 }

@@ -2805,8 +2805,10 @@ and search modes.
 
 Federation is off by default. Set `[federation] role` to `"hub"` on a
 shared SQLite daemon or `"spoke"` on a member's installation, then restart the
-daemon. Use a dedicated data directory for a hub. Joining does not share any
-sessions or projects.
+daemon. Joining does not share any sessions or projects. The hub role adds the
+enrollment and handshake routes only; local session discovery continues, and
+anyone holding the hub's bearer token can read everything in its archive. Use a
+dedicated data directory for the hub and start it with `agentsview serve --no-sync`.
 
 ```toml
 [federation]
@@ -2820,7 +2822,8 @@ suggested_projects = []
 processing = "none"
 ```
 
-The hub sends this policy and its digest in the handshake. A spoke pins the hub
+The `[federation.hub]` settings are read only when the role is `hub`. The hub
+sends this policy and its digest in the handshake. A spoke pins the hub
 archive ID and base URL, including any reverse-proxy path. HTTPS is required
 except on loopback. Federation management commands contact the local SQLite
 daemon. Bind it to loopback or a bind-all address: a specific non-loopback bind

@@ -50,7 +50,9 @@ func TestStatusRechecksCredentialPermissions(t *testing.T) {
 	svc := NewService("spoke", "spoke-a", policy, archive)
 	require.NoError(t, svc.Join(t.Context(), hub.URL, "hub-a", file))
 	require.NoError(t, os.Chmod(file, 0640))
-	_, err = svc.Status(t.Context())
-	require.Error(t, err)
+	status, err := svc.Status(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, HubCredential, status.Hub.State)
+	assert.Nil(t, status.Hub.Policy)
 	assert.Equal(t, 1, calls)
 }

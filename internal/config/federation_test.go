@@ -16,3 +16,15 @@ func TestFederationConfigDefaultsAndValidation(t *testing.T) {
 	err := loadMinimalErrWithConfig(t, map[string]any{"federation": map[string]any{"role": "unknown"}})
 	require.Error(t, err)
 }
+
+func TestFederationHubPolicyOnlyValidatedForHub(t *testing.T) {
+	for _, role := range []string{"off", "spoke", "hub", "unknown"} {
+		cfg := map[string]any{"federation": map[string]any{"role": role, "hub": map[string]any{"retention": "", "allowed_levels": []string{"x"}}}}
+		err := loadMinimalErrWithConfig(t, cfg)
+		if role == "off" || role == "spoke" {
+			assert.NoError(t, err)
+		} else {
+			assert.Error(t, err)
+		}
+	}
+}

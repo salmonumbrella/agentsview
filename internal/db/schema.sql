@@ -1862,8 +1862,6 @@ CREATE TABLE IF NOT EXISTS federation_links (
     member TEXT NOT NULL,
     token_file TEXT NOT NULL,
     protocol_version INTEGER NOT NULL,
-    policy_json TEXT NOT NULL,
-    policy_digest TEXT NOT NULL,
-    state TEXT NOT NULL CHECK (state IN ('active', 'blocked')),
+    state TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );

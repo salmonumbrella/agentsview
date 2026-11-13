@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -79,71 +80,55 @@ func (s *Server) humaFederationHandshake(ctx context.Context, _ *federationHands
 	}
 	return &jsonOutput[federation.HandshakeResponse]{Body: h}, nil
 }
-func federationControlError(ctx context.Context, err error) error {
-	if !isLocalhostContext(ctx) {
-		return huma.Error403Forbidden("Forbidden")
-	}
+func federationControlError(err error) error {
 	if err == nil {
 		return nil
 	}
 	if errors.Is(err, db.ErrWriterClosed) {
 		return huma.Error503ServiceUnavailable("archive temporarily unavailable")
 	}
-	return huma.Error400BadRequest("federation operation failed")
+	var input *federation.InputError
+	if errors.As(err, &input) || errors.Is(err, federation.ErrHubRefused) {
+		return huma.Error400BadRequest(err.Error())
+	}
+	log.Printf("federation operation failed: %v", err)
+	return huma.Error500InternalServerError("federation operation failed")
 }
 func (s *Server) humaFederationEnroll(ctx context.Context, in *federationEnrollInput) (*jsonOutput[federationEnrollOutput], error) {
-	if err := federationControlError(ctx, nil); err != nil {
-		return nil, err
-	}
 	e, token, err := s.federation.Enroll(ctx, in.Body.SpokeArchiveID, in.Body.Member, in.Body.SpokeName)
-	if err = federationControlError(ctx, err); err != nil {
+	if err = federationControlError(err); err != nil {
 		return nil, err
 	}
 	return &jsonOutput[federationEnrollOutput]{Body: federationEnrollOutput{Enrollment: e, Credential: token, HubArchiveID: s.federation.ArchiveID()}}, nil
 }
 func (s *Server) humaFederationList(ctx context.Context, _ *emptyInput) (*jsonOutput[[]db.FederationEnrollment], error) {
-	if err := federationControlError(ctx, nil); err != nil {
-		return nil, err
-	}
 	result, err := s.federation.List(ctx)
-	if err = federationControlError(ctx, err); err != nil {
+	if err = federationControlError(err); err != nil {
 		return nil, err
 	}
 	return &jsonOutput[[]db.FederationEnrollment]{Body: result}, nil
 }
 func (s *Server) humaFederationRevoke(ctx context.Context, in *federationRevokeInput) (*jsonOutput[map[string]bool], error) {
-	if err := federationControlError(ctx, nil); err != nil {
-		return nil, err
-	}
-	if err := federationControlError(ctx, s.federation.Revoke(ctx, in.UID)); err != nil {
+	if err := federationControlError(s.federation.Revoke(ctx, in.UID)); err != nil {
 		return nil, err
 	}
 	return &jsonOutput[map[string]bool]{Body: map[string]bool{"revoked": true}}, nil
 }
 func (s *Server) humaFederationJoin(ctx context.Context, in *federationJoinInput) (*jsonOutput[map[string]bool], error) {
-	if err := federationControlError(ctx, nil); err != nil {
-		return nil, err
-	}
-	if err := federationControlError(ctx, s.federation.Join(ctx, in.Body.Hub, in.Body.HubArchive, in.Body.CredentialFile)); err != nil {
+	if err := federationControlError(s.federation.Join(ctx, in.Body.Hub, in.Body.HubArchive, in.Body.CredentialFile)); err != nil {
 		return nil, err
 	}
 	return &jsonOutput[map[string]bool]{Body: map[string]bool{"joined": true}}, nil
 }
 func (s *Server) humaFederationStatus(ctx context.Context, _ *emptyInput) (*jsonOutput[federation.Status], error) {
-	if err := federationControlError(ctx, nil); err != nil {
-		return nil, err
-	}
 	status, err := s.federation.Status(ctx)
-	if err = federationControlError(ctx, err); err != nil {
+	if err = federationControlError(err); err != nil {
 		return nil, err
 	}
 	return &jsonOutput[federation.Status]{Body: status}, nil
 }
 func (s *Server) humaFederationLeave(ctx context.Context, _ *emptyInput) (*jsonOutput[map[string]bool], error) {
-	if err := federationControlError(ctx, nil); err != nil {
-		return nil, err
-	}
-	if err := federationControlError(ctx, s.federation.Leave(ctx)); err != nil {
+	if err := federationControlError(s.federation.Leave(ctx)); err != nil {
 		return nil, err
 	}
 	return &jsonOutput[map[string]bool]{Body: map[string]bool{"left": true}}, nil

@@ -108,7 +108,7 @@ off.
 
 When a member joins a configured hub or checks an active link, the spoke sends
 its archive ID and federation credential to the configured hub. The response
-contains the hub archive ID, enrollment member and policy. No sessions or
+contains the hub archive ID, enrollment member and policy; status reports the hub outcome. No sessions or
 projects are shared by enrollment. The hub stores only a credential hash; the
 spoke reads the credential from an owner-only file on each request. HTTPS is
 required outside loopback and redirects are refused. Leave removes the link;

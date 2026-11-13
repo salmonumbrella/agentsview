@@ -1,10 +1,12 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,6 +21,7 @@ func TestFederationEnrollmentLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	assert.Equal(t, "member-a", rows[0].Member)
+	assert.Equal(t, "enrolled", rows[0].State)
 	_, err = db.AuthenticateFederationCredential(ctx, "unknown", "spoke-a")
 	assert.True(t, errors.Is(err, ErrFederationUnauthorized))
 	_, err = db.AuthenticateFederationCredential(ctx, "digest-a", "spoke-b")
@@ -29,8 +32,12 @@ func TestFederationEnrollmentLifecycle(t *testing.T) {
 	rows, err = db.ListFederationEnrollments(ctx)
 	require.NoError(t, err)
 	assert.NotEmpty(t, rows[0].LastHandshakeAt)
+	assert.Equal(t, "linked", rows[0].State)
 	require.Error(t, db.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr-b", SpokeArchiveID: "spoke-a", Member: "member-a", CredentialSHA256: "digest-b"}))
 	require.NoError(t, db.RevokeFederationEnrollment(ctx, "enr-a"))
+	rows, err = db.ListFederationEnrollments(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "revoked", rows[0].State)
 	require.NoError(t, db.RevokeFederationEnrollment(ctx, "enr-a"))
 	require.Error(t, db.RevokeFederationEnrollment(ctx, "missing"))
 	_, err = db.AuthenticateFederationCredential(ctx, "digest-a", "spoke-a")
@@ -42,7 +49,7 @@ func TestFederationCopyPreservesEnrollmentAndLink(t *testing.T) {
 	target := testDB(t)
 	ctx := t.Context()
 	require.NoError(t, source.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr-a", SpokeArchiveID: "spoke-a", Member: "member-a", CredentialSHA256: "digest"}))
-	require.NoError(t, source.PutFederationLink(ctx, FederationLink{UID: "link-a", HubOrigin: "https://hub.example/av", HubArchiveID: "hub-a", EnrollmentUID: "enr-a", Member: "member-a", TokenFile: "/fixture/credential", ProtocolVersion: 1, PolicyJSON: "{}", PolicyDigest: "digest", State: "active"}))
+	require.NoError(t, source.PutFederationLink(ctx, FederationLink{UID: "link-a", HubOrigin: "https://hub.example/av", HubArchiveID: "hub-a", EnrollmentUID: "enr-a", Member: "member-a", TokenFile: "/fixture/credential", ProtocolVersion: 1, State: "active"}))
 	require.NoError(t, target.CopyFederationStateFrom(ctx, source.Path()))
 	rows, err := target.ListFederationEnrollments(ctx)
 	require.NoError(t, err)
@@ -65,4 +72,35 @@ func TestFederationCopySkipsLegacyArchive(t *testing.T) {
 	rows, err := target.ListFederationEnrollments(t.Context())
 	require.NoError(t, err)
 	assert.Empty(t, rows)
+}
+
+func TestFederationUnknownCredentialDoesNotWaitForWriter(t *testing.T) {
+	database := testDB(t)
+	database.mu.Lock()
+	defer database.mu.Unlock()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	for _, tc := range []struct{ digest, archive string }{{"unknown", "spoke-a"}, {"bad", "wrong"}, {"", ""}} {
+		_, err := database.AuthenticateFederationCredential(ctx, tc.digest, tc.archive)
+		assert.ErrorIs(t, err, ErrFederationUnauthorized)
+	}
+}
+
+func TestFederationCopyUsesNamedColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reordered.db")
+	source, err := sql.Open("sqlite3", path)
+	require.NoError(t, err)
+	_, err = source.ExecContext(t.Context(), `CREATE TABLE federation_enrollments (member TEXT, revoked_at TEXT, enrollment_uid TEXT, credential_sha256 TEXT, created_at TEXT, spoke_name TEXT, last_handshake_at TEXT, spoke_archive_id TEXT)`)
+	require.NoError(t, err)
+	_, err = source.ExecContext(t.Context(), `INSERT INTO federation_enrollments VALUES ('member-a','','enr-a','digest','created','name','','spoke-a')`)
+	require.NoError(t, err)
+	require.NoError(t, source.Close())
+	target := testDB(t)
+	require.NoError(t, target.CopyFederationStateFrom(t.Context(), path))
+	rows, err := target.ListFederationEnrollments(t.Context())
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "enr-a", rows[0].UID)
+	assert.Equal(t, "spoke-a", rows[0].SpokeArchiveID)
+	assert.Equal(t, "member-a", rows[0].Member)
 }

@@ -8,6 +8,8 @@ import (
 )
 
 var ErrFederationUnauthorized = errors.New("federation unauthorized")
+var ErrFederationEnrollmentExists = errors.New("federation enrollment exists")
+var ErrFederationLinkExists = errors.New("federation link exists")
 
 type FederationEnrollment struct {
 	UID              string `json:"enrollment_uid"`
@@ -18,6 +20,7 @@ type FederationEnrollment struct {
 	CreatedAt        string `json:"created_at"`
 	LastHandshakeAt  string `json:"last_handshake_at"`
 	RevokedAt        string `json:"revoked_at"`
+	State            string `json:"state"`
 }
 
 type FederationLink struct {
@@ -28,15 +31,21 @@ type FederationLink struct {
 	Member          string `json:"member"`
 	TokenFile       string `json:"token_file"`
 	ProtocolVersion int    `json:"protocol_version"`
-	PolicyJSON      string `json:"policy_json"`
-	PolicyDigest    string `json:"policy_digest"`
 	State           string `json:"state"`
 	CreatedAt       string `json:"created_at"`
 }
 
 func (db *DB) CreateFederationEnrollment(ctx context.Context, e FederationEnrollment) error {
 	return db.Update(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO federation_enrollments (enrollment_uid,spoke_archive_id,member,spoke_name,credential_sha256) VALUES (?,?,?,?,?)`, e.UID, e.SpokeArchiveID, e.Member, e.SpokeName, e.CredentialSHA256)
+		var exists int
+		err := tx.QueryRowContext(ctx, `SELECT 1 FROM federation_enrollments WHERE spoke_archive_id = ? AND member = ? AND revoked_at = ''`, e.SpokeArchiveID, e.Member).Scan(&exists)
+		if err == nil {
+			return ErrFederationEnrollmentExists
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO federation_enrollments (enrollment_uid,spoke_archive_id,member,spoke_name,credential_sha256) VALUES (?,?,?,?,?)`, e.UID, e.SpokeArchiveID, e.Member, e.SpokeName, e.CredentialSHA256)
 		return err
 	})
 }
@@ -52,6 +61,12 @@ func (db *DB) ListFederationEnrollments(ctx context.Context) ([]FederationEnroll
 		var e FederationEnrollment
 		if err := rows.Scan(&e.UID, &e.SpokeArchiveID, &e.Member, &e.SpokeName, &e.CreatedAt, &e.LastHandshakeAt, &e.RevokedAt); err != nil {
 			return nil, err
+		}
+		e.State = "enrolled"
+		if e.RevokedAt != "" {
+			e.State = "revoked"
+		} else if e.LastHandshakeAt != "" {
+			e.State = "linked"
 		}
 		result = append(result, e)
 	}
@@ -77,37 +92,46 @@ func (db *DB) RevokeFederationEnrollment(ctx context.Context, uid string) error 
 
 func (db *DB) AuthenticateFederationCredential(ctx context.Context, digest, archive string) (FederationEnrollment, error) {
 	var e FederationEnrollment
-	err := db.Update(ctx, func(tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, `SELECT enrollment_uid,spoke_archive_id,member,spoke_name FROM federation_enrollments WHERE credential_sha256 = ? AND spoke_archive_id = ? AND revoked_at = ''`, digest, archive).Scan(&e.UID, &e.SpokeArchiveID, &e.Member, &e.SpokeName)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrFederationUnauthorized
-		}
+	err := db.getReader().QueryRowContext(ctx, `SELECT enrollment_uid,spoke_archive_id,member,spoke_name FROM federation_enrollments WHERE credential_sha256 = ? AND spoke_archive_id = ? AND revoked_at = ''`, digest, archive).Scan(&e.UID, &e.SpokeArchiveID, &e.Member, &e.SpokeName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return e, ErrFederationUnauthorized
+	}
+	if err != nil {
+		return e, err
+	}
+	err = db.Update(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE federation_enrollments SET last_handshake_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE enrollment_uid = ? AND revoked_at = ''`, e.UID)
 		if err != nil {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE federation_enrollments SET last_handshake_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE enrollment_uid = ?`, e.UID)
-		return err
+		count, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			return ErrFederationUnauthorized
+		}
+		return nil
 	})
 	return e, err
 }
 
 func (db *DB) GetFederationLink(ctx context.Context) (FederationLink, error) {
 	var l FederationLink
-	err := db.getReader().QueryRowContext(ctx, `SELECT link_uid,hub_origin,hub_archive_id,enrollment_uid,member,token_file,protocol_version,policy_json,policy_digest,state,created_at FROM federation_links LIMIT 1`).Scan(&l.UID, &l.HubOrigin, &l.HubArchiveID, &l.EnrollmentUID, &l.Member, &l.TokenFile, &l.ProtocolVersion, &l.PolicyJSON, &l.PolicyDigest, &l.State, &l.CreatedAt)
+	err := db.getReader().QueryRowContext(ctx, `SELECT link_uid,hub_origin,hub_archive_id,enrollment_uid,member,token_file,protocol_version,state,created_at FROM federation_links ORDER BY created_at,link_uid LIMIT 1`).Scan(&l.UID, &l.HubOrigin, &l.HubArchiveID, &l.EnrollmentUID, &l.Member, &l.TokenFile, &l.ProtocolVersion, &l.State, &l.CreatedAt)
 	return l, err
 }
 func (db *DB) PutFederationLink(ctx context.Context, l FederationLink) error {
 	return db.Update(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM federation_links`); err != nil {
+		var exists int
+		err := tx.QueryRowContext(ctx, `SELECT 1 FROM federation_links LIMIT 1`).Scan(&exists)
+		if err == nil {
+			return ErrFederationLinkExists
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO federation_links (link_uid,hub_origin,hub_archive_id,enrollment_uid,member,token_file,protocol_version,policy_json,policy_digest,state) VALUES (?,?,?,?,?,?,?,?,?,?)`, l.UID, l.HubOrigin, l.HubArchiveID, l.EnrollmentUID, l.Member, l.TokenFile, l.ProtocolVersion, l.PolicyJSON, l.PolicyDigest, l.State)
-		return err
-	})
-}
-func (db *DB) RefreshFederationLink(ctx context.Context, uid, policy, digest string) error {
-	return db.Update(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `UPDATE federation_links SET policy_json = ?, policy_digest = ? WHERE link_uid = ? AND state = 'active'`, policy, digest, uid)
+		_, err = tx.ExecContext(ctx, `INSERT INTO federation_links (link_uid,hub_origin,hub_archive_id,enrollment_uid,member,token_file,protocol_version,state) VALUES (?,?,?,?,?,?,?,?)`, l.UID, l.HubOrigin, l.HubArchiveID, l.EnrollmentUID, l.Member, l.TokenFile, l.ProtocolVersion, l.State)
 		return err
 	})
 }
@@ -133,7 +157,7 @@ func (db *DB) CopyFederationStateFrom(ctx context.Context, sourcePath string) er
 		return err
 	}
 	defer func() { _, _ = execWithoutCancel(ctx, conn, `DETACH DATABASE federation_old`) }()
-	for _, table := range []string{"federation_enrollments", "federation_links"} {
+	for table, columns := range map[string]string{"federation_enrollments": "enrollment_uid,spoke_archive_id,member,spoke_name,credential_sha256,created_at,last_handshake_at,revoked_at", "federation_links": "link_uid,hub_origin,hub_archive_id,enrollment_uid,member,token_file,protocol_version,state,created_at"} {
 		var present int
 		if err = conn.QueryRowContext(ctx, `SELECT count(*) FROM federation_old.sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&present); err != nil {
 			return err
@@ -141,7 +165,7 @@ func (db *DB) CopyFederationStateFrom(ctx context.Context, sourcePath string) er
 		if present == 0 {
 			continue
 		}
-		if _, err = conn.ExecContext(ctx, `INSERT OR IGNORE INTO `+table+` SELECT * FROM federation_old.`+table); err != nil {
+		if _, err = conn.ExecContext(ctx, `INSERT OR IGNORE INTO `+table+` (`+columns+`) SELECT `+columns+` FROM federation_old.`+table); err != nil {
 			return fmt.Errorf("copying federation state: %w", err)
 		}
 	}

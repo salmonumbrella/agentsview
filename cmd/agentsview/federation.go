@@ -50,6 +50,12 @@ func federationRequest(ctx context.Context, base, token, method, path string, bo
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		var response struct {
+			Error string `json:"error"`
+		}
+		if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&response) == nil && response.Error != "" {
+			return fmt.Errorf("federation: %s", response.Error)
+		}
 		return fmt.Errorf("federation daemon request returned HTTP %d", resp.StatusCode)
 	}
 	if out != nil {
@@ -161,7 +167,20 @@ func newFederationCommand() *cobra.Command {
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Archive: %s\nShares: %d\n", value.ArchiveID, value.Shares)
 		if value.Link != nil {
-			fmt.Fprintf(cmd.OutOrStdout(), "Hub: %s\nHub archive: %s\nMember: %s\nState: %s\nPolicy: %s\n", value.Link.HubOrigin, value.Link.HubArchiveID, value.Link.Member, value.Link.State, value.Link.PolicyJSON)
+			fmt.Fprintf(cmd.OutOrStdout(), "Hub: %s\nHub archive: %s\nMember: %s\nState: %s\n", value.Link.HubOrigin, value.Link.HubArchiveID, value.Link.Member, value.Link.State)
+		}
+		if value.Hub != nil {
+			fmt.Fprintf(cmd.OutOrStdout(), "Hub state: %s\n", value.Hub.State)
+			if value.Hub.Message != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "Hub message: %s\n", value.Hub.Message)
+			}
+			if value.Hub.Policy != nil {
+				policy, err := json.Marshal(value.Hub.Policy)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Policy: %s\nPolicy digest: %s\n", policy, value.Hub.PolicyDigest)
+			}
 		}
 		return nil
 	}}
@@ -171,7 +190,11 @@ func newFederationCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		return federationRequest(cmd.Context(), tr.URL, cfg.AuthToken, http.MethodDelete, "/api/v1/federation/link", nil, nil)
+		if err := federationRequest(cmd.Context(), tr.URL, cfg.AuthToken, http.MethodDelete, "/api/v1/federation/link", nil, nil); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(cmd.ErrOrStderr(), "Link removed. The hub keeps this enrollment until its operator revokes it; the credential file was left in place.")
+		return err
 	}}
 	root.AddCommand(enroll, enrollments, revoke, join, status, leave)
 	return root

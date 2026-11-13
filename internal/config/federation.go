@@ -30,10 +30,17 @@ func (c FederationConfig) Validate() error {
 	default:
 		return errors.New("[federation] role must be off, spoke or hub")
 	}
-	if strings.TrimSpace(c.Hub.Retention) == "" || strings.TrimSpace(c.Hub.Processing) == "" || c.Hub.MinGroupSize < 1 || len(c.Hub.AllowedLevels) == 0 {
+	if c.Role == "hub" {
+		return c.Hub.Validate()
+	}
+	return nil
+}
+
+func (c FederationHubConfig) Validate() error {
+	if strings.TrimSpace(c.Retention) == "" || strings.TrimSpace(c.Processing) == "" || c.MinGroupSize < 1 || len(c.AllowedLevels) == 0 {
 		return errors.New("[federation.hub] policy fields must be non-empty and min_group_size positive")
 	}
-	for _, level := range c.Hub.AllowedLevels {
+	for _, level := range c.AllowedLevels {
 		if level != "summary" && level != "transcript" {
 			return errors.New("[federation.hub] allowed_levels must contain summary or transcript")
 		}
