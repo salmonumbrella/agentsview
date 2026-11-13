@@ -21,6 +21,7 @@ const (
 	// their restrictions.
 	ctxKeyRemoteAuth contextKey = iota
 	ctxKeyRawSyncIdentity
+	ctxKeyFederationHandshake
 	ctxKeyRestrictedIngress
 	ctxKeyRestrictedIngressPrefix
 )
@@ -87,6 +88,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 func (s *Server) authMiddlewareRequired(next http.Handler, force bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.federation != nil && s.federation.Role() == "hub" {
+			if s.federationAuth(w, r, next) {
+				return
+			}
+		}
 		// Static assets are always served.
 		if !s.protectedPath(r.URL.Path) {
 			next.ServeHTTP(w, r)

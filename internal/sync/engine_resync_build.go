@@ -614,6 +614,20 @@ func (e *Engine) resyncBuildLocked(
 		return stats, err
 	}
 
+	// Copy federation state after writes are quiesced so a revoke or leave
+	// during the rebuild cannot be lost at the swap.
+	if err := newDB.CopyFederationStateFrom(ctx, origPath); err != nil {
+		stats.Aborted = true
+		stats.Warnings = append(stats.Warnings, "federation state copy failed, aborting swap: "+err.Error())
+		newDB.Close()
+		removeTempDB(tempPath)
+		restoreSkipCache()
+		e.mu.Lock()
+		e.lastSyncStats = stats
+		e.mu.Unlock()
+		return stats, err
+	}
+
 	// Insights and recall entries carry transcript-derived text, which a
 	// usage-only archive promises not to store, so those copies are skipped
 	// there. This also applies when a full archive is rebuilt under the

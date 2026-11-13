@@ -1141,6 +1141,7 @@ type Config struct {
 	Integrations         IntegrationsConfig          `json:"integrations,omitempty" toml:"integrations"`
 	Insights             InsightsConfig              `json:"insights,omitempty" toml:"insights"`
 	Kata                 KataConfig                  `json:"-" toml:"kata"`
+	Federation           FederationConfig            `json:"-" toml:"federation"`
 	Friction             FrictionConfig              `json:"friction,omitempty" toml:"friction"`
 	Automated            AutomatedConfig             `json:"automated,omitempty" toml:"automated"`
 	Agent                map[string]AgentConfig      `json:"agent,omitempty" toml:"agent"`
@@ -1549,8 +1550,9 @@ func Default() (Config, error) {
 				FailureBackoff:   "1h",
 			},
 		},
-		Friction: FrictionConfig{BackfillDays: DefaultFrictionBackfillDays},
-		Kata:     defaultKataConfig(),
+		Friction:   FrictionConfig{BackfillDays: DefaultFrictionBackfillDays},
+		Kata:       defaultKataConfig(),
+		Federation: defaultFederationConfig(),
 	}, nil
 }
 
@@ -1983,6 +1985,7 @@ func (c *Config) applyConfigTOML(data string) error {
 		Integrations                   IntegrationsConfig     `toml:"integrations"`
 		Insights                       InsightsConfig         `toml:"insights"`
 		Kata                           KataConfig             `toml:"kata"`
+		Federation                     FederationConfig       `toml:"federation"`
 		Friction                       FrictionConfig         `toml:"friction"`
 		Automated                      AutomatedConfig        `toml:"automated"`
 		Agent                          map[string]AgentConfig `toml:"agent"`
@@ -2318,6 +2321,9 @@ func (c *Config) applyConfigTOML(data string) error {
 		c.Insights.DefaultAgent = strings.ToLower(
 			strings.TrimSpace(c.Insights.DefaultAgent),
 		)
+	}
+	if meta.IsDefined("federation") {
+		mergeFederationTOML(&c.Federation, file.Federation, meta)
 	}
 	if meta.IsDefined("kata") {
 		mergeKataTOML(&c.Kata, file.Kata, meta)

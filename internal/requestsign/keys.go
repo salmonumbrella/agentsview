@@ -12,6 +12,9 @@ import (
 	"strings"
 )
 
+// IsPrivateFile reports whether an open file is regular and owner-only.
+func IsPrivateFile(file *os.File) bool { return isPrivateRegularFile(file) }
+
 func readPrivate(path string, limit int64) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {

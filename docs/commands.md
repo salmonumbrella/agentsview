@@ -75,6 +75,39 @@ their per-host summary and add recovery advice.
 
 ## Commands
 
+### Link a spoke to a federation hub
+
+Configure the hub and spoke roles in [Configuration](configuration.md). On the
+spoke, `agentsview federation status` shows its archive ID. Give that ID and a
+member handle to the hub operator, who runs:
+
+```bash
+agentsview federation enroll --spoke-archive <spoke-archive-id> --member <handle>
+```
+
+The command prints the credential once. Transfer it securely to the member;
+it is not stored in plaintext on the hub. On the spoke, create an owner-only
+file and paste the credential into it without putting it in a command argument:
+
+```bash
+umask 077
+cat > federation-credential
+```
+
+End input with Ctrl-D. Get the hub archive ID from the operator, then link:
+
+```bash
+agentsview federation join --hub https://hub.example/av --hub-archive <hub-archive-id> --credential-file federation-credential
+agentsview federation status
+```
+
+The hub URL may include a reverse-proxy path. The link starts with zero shares.
+Status contacts the pinned hub and blocks the link if its archive ID changes.
+The hub operator can use `agentsview federation enrollments list` and
+`agentsview federation revoke <enrollment-uid>`. The member can run
+`agentsview federation leave` to remove the local link; the credential file
+remains in place and the hub enrollment remains until revoked.
+
 ### Find a command by task
 
 Describe a task to get up to five matching commands:

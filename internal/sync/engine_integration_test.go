@@ -18251,3 +18251,21 @@ func TestImageTextSurvivesFullResync(t *testing.T) {
 		})
 	}
 }
+
+func TestResyncAllPreservesFederationState(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := t.Context()
+	env.writeClaudeSession(t, "test-proj", "federation.jsonl", testjsonl.NewSessionBuilder().AddClaudeUser(tsEarly, "hello").String())
+	require.NoError(t, env.db.CreateFederationEnrollment(ctx, db.FederationEnrollment{UID: "enr-a", SpokeArchiveID: "spoke-a", Member: "member-a", CredentialSHA256: "digest-a"}))
+	require.NoError(t, env.db.RevokeFederationEnrollment(ctx, "enr-a"))
+	require.NoError(t, env.db.PutFederationLink(ctx, db.FederationLink{UID: "link-a", HubOrigin: "https://hub.example/av", HubArchiveID: "hub-a", EnrollmentUID: "enr-b", Member: "member-a", TokenFile: "/fixture/credential", ProtocolVersion: 1, PolicyJSON: "{}", PolicyDigest: "digest", State: "active"}))
+	stats := env.engine.ResyncAll(ctx, nil)
+	require.False(t, stats.Aborted, "%v", stats.Warnings)
+	rows, err := env.db.ListFederationEnrollments(ctx)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.NotEmpty(t, rows[0].RevokedAt)
+	link, err := env.db.GetFederationLink(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "https://hub.example/av", link.HubOrigin)
+}

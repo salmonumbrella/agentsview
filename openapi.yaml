@@ -777,6 +777,31 @@ components:
         - machine_name
         - allow_insecure
       type: object
+    ConfigFederationHubConfig:
+      additionalProperties: false
+      properties:
+        allowed_levels:
+          items:
+            type: string
+          type: array
+        min_group_size:
+          format: int64
+          type: integer
+        processing:
+          type: string
+        retention:
+          type: string
+        suggested_projects:
+          items:
+            type: string
+          type: array
+      required:
+        - retention
+        - allowed_levels
+        - min_group_size
+        - suggested_projects
+        - processing
+      type: object
     ConfigRemoteHost:
       additionalProperties: false
       properties:
@@ -5264,6 +5289,32 @@ components:
       required:
         - display_label
         - resolution
+      type: object
+    FederationHandshakeResponse:
+      additionalProperties: false
+      properties:
+        enrollment_uid:
+          type: string
+        hub_archive_id:
+          type: string
+        member:
+          type: string
+        policy:
+          $ref: "#/components/schemas/ConfigFederationHubConfig"
+        policy_digest:
+          type: string
+        protocol_versions:
+          items:
+            format: int64
+            type: integer
+          type: array
+      required:
+        - hub_archive_id
+        - protocol_versions
+        - enrollment_uid
+        - member
+        - policy
+        - policy_digest
       type: object
     FillStats:
       additionalProperties: false
@@ -14796,6 +14847,94 @@ paths:
       summary: Initialize conversation export
       tags:
         - Export
+  /api/v1/federation/handshake:
+    get:
+      operationId: get-api-v1-federation-handshake
+      parameters:
+        - in: header
+          name: Authorization
+          schema:
+            type: string
+        - in: header
+          name: X-AgentsView-Spoke-Archive
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FederationHandshakeResponse"
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorResponse"
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorResponse"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorResponse"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorResponse"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorResponse"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorResponse"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorResponse"
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorResponse"
+          description: Not Implemented
+        "502":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorResponse"
+          description: Bad Gateway
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorResponse"
+          description: Service Unavailable
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiErrorResponse"
+          description: Gateway Timeout
+      summary: Read federation handshake
+      tags:
+        - Federation
   /api/v1/friction/digests:
     get:
       operationId: get-api-v1-friction-digests

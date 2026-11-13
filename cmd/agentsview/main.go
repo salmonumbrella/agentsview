@@ -29,6 +29,7 @@ import (
 	"go.kenn.io/agentsview/internal/codexcloud"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/federation"
 	"go.kenn.io/agentsview/internal/insight"
 	"go.kenn.io/agentsview/internal/parser"
 	"go.kenn.io/agentsview/internal/poller"
@@ -641,6 +642,13 @@ func runServe(ctx context.Context, cfg config.Config, opts serveOptions, restart
 		server.WithHTTPRemoteCleanupRegistry(httpRemoteCleanupRegistry),
 		server.WithPprof(opts.Pprof),
 		server.WithTelemetryCapture(telemetryCapture),
+	}
+	if cfg.Federation.Role != "off" {
+		archiveID, err := database.GetArchiveID(ctx)
+		if err != nil {
+			fatal("federation archive identity: %v", err)
+		}
+		srvOpts = append(srvOpts, server.WithFederation(federation.NewService(cfg.Federation.Role, archiveID, cfg.Federation.Hub, database)))
 	}
 	if rtOpts.BasePath != "" {
 		srvOpts = append(srvOpts, server.WithBasePath(rtOpts.BasePath))

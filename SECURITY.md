@@ -104,6 +104,16 @@ off.
   configuration. The web UI talks only to the agentsview server it is pointed
   at. It links to outside sites but never fetches from them.
 
+### Federation handshake
+
+When a member joins a configured hub or checks an active link, the spoke sends
+its archive ID and federation credential to the configured hub. The response
+contains the hub archive ID, enrollment member and policy. No sessions or
+projects are shared by enrollment. The hub stores only a credential hash; the
+spoke reads the credential from an owner-only file on each request. HTTPS is
+required outside loopback and redirects are refused. Leave removes the link;
+the hub operator can revoke the enrollment.
+
 ### Automatic requests
 
 These run without any configuration. None of them sends session content,

@@ -53,6 +53,7 @@ func (c *Config) validateSections() error {
 		{ScopeServer, "[image_text]", c.ImageText.Validate},
 		{ScopeServer, "[friction]", c.Friction.Validate},
 		{ScopeServer, "[kata]", c.Kata.Validate},
+		{ScopeServer, "[federation]", c.Federation.Validate},
 		{ScopePG, "[pg]", func() error { return c.pgConfigErr }},
 		{ScopeClickHouse, "[clickhouse]", func() error { return c.clickHouseConfigErr }},
 		{ScopeDocbank, "[integrations.docbank]", c.Integrations.Docbank.Validate},

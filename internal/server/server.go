@@ -29,6 +29,7 @@ import (
 	"go.kenn.io/agentsview/internal/codexcloud"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/federation"
 	"go.kenn.io/agentsview/internal/friction/filing"
 	"go.kenn.io/agentsview/internal/friction/review"
 	"go.kenn.io/agentsview/internal/insight"
@@ -75,7 +76,7 @@ type VersionInfo struct {
 // Bump it when a client-visible contract cannot be decoded safely by an older
 // CLI or daemon.
 const (
-	APIVersion = 16
+	APIVersion = 17
 	// KataAPIVersion is the first daemon API that serves /api/v1/kata/status.
 	KataAPIVersion = 14
 	// FrictionAPIVersion is the first daemon API that serves
@@ -240,14 +241,16 @@ type Server struct {
 	kata              *kata.Conn
 	frictionExclusive func(func() error) error
 	// constructed is set when New returns; see WithFriction.
-	constructed       bool
-	rawSyncDeviceAuth RawSyncDeviceAuth
-	rawSyncCustody    RawSyncCustody
-	rawSyncStatus     RawSyncStatusReader
-	codexCloudStatus  *codexcloud.StatusBoard
-	rawSyncSchemaOnly bool
-	rawSyncUploads    RawSyncUploads
-	rawSyncJobHealth  RawSyncJobHealth
+	constructed          bool
+	rawSyncDeviceAuth    RawSyncDeviceAuth
+	rawSyncCustody       RawSyncCustody
+	rawSyncStatus        RawSyncStatusReader
+	codexCloudStatus     *codexcloud.StatusBoard
+	rawSyncSchemaOnly    bool
+	federation           *federation.Service
+	federationSchemaOnly bool
+	rawSyncUploads       RawSyncUploads
+	rawSyncJobHealth     RawSyncJobHealth
 
 	ensurePricing func(context.Context, *db.DB) error
 }
@@ -402,6 +405,11 @@ func (s *Server) ingestionConfig() config.Config {
 
 // Option configures a Server.
 type Option func(*Server)
+
+// WithFederation enables federation routes for a local SQLite daemon.
+func WithFederation(service *federation.Service) Option {
+	return func(s *Server) { s.federation = service }
+}
 
 // IngestionReloader reloads the saved session provider settings and applies
 // them to the running daemon's sync engine, watchers, and polling. It returns

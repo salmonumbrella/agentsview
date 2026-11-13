@@ -76,7 +76,7 @@ func (c KataConfig) Validate() error {
 		if u.Host == "" {
 			return fmt.Errorf("[kata] endpoint %q has no host", RedactedEndpoint(endpoint))
 		}
-		if c.AllowInsecure || isLoopbackHost(u.Hostname()) {
+		if c.AllowInsecure || IsLoopbackHost(u.Hostname()) {
 			return nil
 		}
 		return fmt.Errorf("[kata] endpoint %q uses plaintext http to a non-loopback host; use https or set allow_insecure = true", RedactedEndpoint(endpoint))
@@ -85,7 +85,8 @@ func (c KataConfig) Validate() error {
 	}
 }
 
-func isLoopbackHost(host string) bool {
+// IsLoopbackHost reports whether host is localhost or a loopback IP.
+func IsLoopbackHost(host string) bool {
 	if host == "localhost" {
 		return true
 	}

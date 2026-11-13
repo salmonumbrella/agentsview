@@ -1840,3 +1840,30 @@ CREATE TRIGGER IF NOT EXISTS image_text_session_delete BEFORE DELETE ON sessions
     DELETE FROM image_text_cache WHERE image_hash IN (SELECT image_hash FROM image_text_occurrences WHERE session_id=old.id)
     AND NOT EXISTS (SELECT 1 FROM image_text_occurrences o WHERE o.image_hash=image_text_cache.image_hash AND o.session_id<>old.id);
 END;
+
+CREATE TABLE IF NOT EXISTS federation_enrollments (
+    enrollment_uid TEXT PRIMARY KEY,
+    spoke_archive_id TEXT NOT NULL,
+    member TEXT NOT NULL,
+    spoke_name TEXT NOT NULL DEFAULT '',
+    credential_sha256 TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    last_handshake_at TEXT NOT NULL DEFAULT '',
+    revoked_at TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS federation_enrollments_active
+    ON federation_enrollments(spoke_archive_id, member) WHERE revoked_at = '';
+
+CREATE TABLE IF NOT EXISTS federation_links (
+    link_uid TEXT PRIMARY KEY,
+    hub_origin TEXT NOT NULL,
+    hub_archive_id TEXT NOT NULL,
+    enrollment_uid TEXT NOT NULL,
+    member TEXT NOT NULL,
+    token_file TEXT NOT NULL,
+    protocol_version INTEGER NOT NULL,
+    policy_json TEXT NOT NULL,
+    policy_digest TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('active', 'blocked')),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);

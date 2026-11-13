@@ -2800,3 +2800,29 @@ address. Image text requires an `archive_content` setting that keeps tool
 results; otherwise it stays off and a warning is logged. See
 [search text in images](commands.md#search-text-in-images) for supported images
 and search modes.
+
+### Federation
+
+Federation is off by default. Set `[federation] role` to `"hub"` on a
+shared SQLite daemon or `"spoke"` on a member's installation, then restart the
+daemon. Use a dedicated data directory for a hub. Joining does not share any
+sessions or projects.
+
+```toml
+[federation]
+role = "hub" # "off", "hub", or "spoke"
+
+[federation.hub]
+retention = "member-controlled"
+allowed_levels = ["summary"]
+min_group_size = 3
+suggested_projects = []
+processing = "none"
+```
+
+The hub sends this policy and its digest in the handshake. A spoke pins the hub
+archive ID and base URL, including any reverse-proxy path. HTTPS is required
+except on loopback. Federation management commands contact the local SQLite
+daemon. Bind it to loopback or a bind-all address: a specific non-loopback bind
+cannot accept the local-only management requests. See [Commands](commands.md)
+for enrollment and link setup.

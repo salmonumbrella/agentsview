@@ -10,6 +10,7 @@ export * as DaemonService from "./daemon/daemon.ts";
 export * as DataService from "./data/data.ts";
 export * as EmbeddingsService from "./embeddings/embeddings.ts";
 export * as ExportService from "./export/export.ts";
+export * as FederationService from "./federation/federation.ts";
 export * as FrictionService from "./friction/friction.ts";
 export * as HealthService from "./health/health.ts";
 export * as ImportService from "./import/import.ts";
