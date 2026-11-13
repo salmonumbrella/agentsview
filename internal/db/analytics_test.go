@@ -5536,3 +5536,18 @@ func TestAnalyticsDateWindowCreatedAtFallback(t *testing.T) {
 		})
 	}
 }
+
+func TestStoredSignalDistributionsKeepMissingDistinct(t *testing.T) {
+	rows := []SignalRow{
+		{Outcome: "unknown", HealthGrade: Ptr("A")},
+		{Outcome: "completed", HealthGrade: nil},
+		{Outcome: "", HealthGrade: Ptr("")},
+		{Outcome: "unknown", HealthGrade: Ptr("D")},
+	}
+	outcomes, grades := storedSignalDistributions(rows)
+	assert.Equal(t, map[string]int{"unknown": 2, "completed": 1}, outcomes)
+	assert.Equal(t, map[string]int{"A": 1, "D": 1}, grades)
+	got := AggregateSignals(rows)
+	assert.Equal(t, outcomes, got.OutcomeDistribution)
+	assert.Equal(t, grades, got.GradeDistribution)
+}

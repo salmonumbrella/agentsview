@@ -359,34 +359,13 @@ func reportingHoursFromMachineSource(
 	// Preserve the shared range and inactivity-gap policy. Export bucket sizes
 	// have their own validated complete-hour contract, separate from UI presets.
 	query.Bucket = activity.BucketSpec{Unit: activity.BucketMinute, NominalSeconds: int(bucket / time.Second)}
-	resolver := export.NewPricingResolver(source.pricing)
-	sessionUsageCandidates := source.usageCandidates
-	sessionUsage, _, err := materializeActivityReportUsageCandidates(
-		sessionUsageCandidates, nil, nil, nil, resolver,
-	)
+	usage, sessionByID, err := reportingMaterializedUsage(query, source)
 	if err != nil {
 		return nil, err
 	}
-	standaloneUsage := source.standaloneUsage
-	usage := append(
-		append([]activity.UsageRow(nil), sessionUsage...),
-		standaloneUsage...,
-	)
 	sessions := source.activitySessions
 	ids := source.activityIDs
 	events := source.activityEvents
-	usageSessions := source.usageSessions
-	allSessions := mergeReportingSessions(sessions, usageSessions)
-	sessionByID := make(map[string]activity.SessionMeta, len(allSessions))
-	for _, session := range allSessions {
-		sessionByID[session.SessionID] = session
-	}
-	usage, err = finalizeReportingUsage(
-		query, usage, sessionByID,
-	)
-	if err != nil {
-		return nil, err
-	}
 	projects := source.projects
 	if machine != "" {
 		sessions = slices.DeleteFunc(slices.Clone(sessions), func(s activity.SessionMeta) bool { return source.machineID(s.Machine) != machine })
@@ -502,6 +481,24 @@ func reportingHoursFromMachineSource(
 		hours[i] = hour
 	}
 	return hours, nil
+}
+
+// reportingMaterializedUsage is the shared daily survivor and cost-allocation
+// path. Each returned row keeps its attributed and source session IDs private.
+func reportingMaterializedUsage(query activity.Query, source reportingDaySource) ([]activity.UsageRow, map[string]activity.SessionMeta, error) {
+	resolver := export.NewPricingResolver(source.pricing)
+	sessionUsage, _, err := materializeActivityReportUsageCandidates(source.usageCandidates, nil, nil, nil, resolver)
+	if err != nil {
+		return nil, nil, err
+	}
+	usage := append(append([]activity.UsageRow(nil), sessionUsage...), source.standaloneUsage...)
+	allSessions := mergeReportingSessions(source.activitySessions, source.usageSessions)
+	sessionByID := make(map[string]activity.SessionMeta, len(allSessions))
+	for _, session := range allSessions {
+		sessionByID[session.SessionID] = session
+	}
+	usage, err = finalizeReportingUsage(query, usage, sessionByID)
+	return usage, sessionByID, err
 }
 
 func (db *DB) reportingUsageSessionsFrom(
@@ -939,74 +936,7 @@ func buildReportingFirstSeen(
 	usage []activity.UsageRow,
 	groupLabels map[string]string,
 ) map[int]reportingFirstSeenCounts {
-	sessionFirst := make(map[string]time.Time, len(sessions))
-	timed := make(map[string]bool, len(sessions))
-	eventsBySession := make(map[string][]activity.ActivityEvent)
-	for _, event := range events {
-		eventsBySession[event.SessionID] = append(
-			eventsBySession[event.SessionID],
-			event,
-		)
-	}
-	for sessionID, sessionEvents := range eventsBySession {
-		for i := 1; i < len(sessionEvents); i++ {
-			previous, previousErr := parseTimestamp(sessionEvents[i-1].Timestamp)
-			current, currentErr := parseTimestamp(sessionEvents[i].Timestamp)
-			if previousErr != nil || currentErr != nil {
-				continue
-			}
-			intervalStart, _, ok := activity.EffectiveIntervalBounds(
-				previous.UTC(), current.UTC(), start, end, gapCap,
-			)
-			if ok {
-				setEarlierReportingTime(sessionFirst, sessionID, intervalStart)
-				timed[sessionID] = true
-			}
-		}
-	}
-
-	usageFirst := make(map[string]time.Time, len(sessions))
-	for _, row := range usage {
-		at, err := parseTimestamp(row.Timestamp)
-		if err == nil && !at.Before(start) && at.Before(end) {
-			setEarlierReportingTime(usageFirst, row.SessionID, at.UTC())
-		}
-	}
-	for sessionID, at := range usageFirst {
-		if _, ok := sessionFirst[sessionID]; !ok {
-			sessionFirst[sessionID] = at
-		}
-	}
-
-	eventFirst := make(map[string]time.Time, len(sessions))
-	for _, event := range events {
-		at, err := parseTimestamp(event.Timestamp)
-		if err == nil && !at.Before(start) && at.Before(end) {
-			setEarlierReportingTime(eventFirst, event.SessionID, at.UTC())
-		}
-	}
-	for sessionID, at := range eventFirst {
-		if _, ok := sessionFirst[sessionID]; !ok {
-			sessionFirst[sessionID] = at
-		}
-	}
-
-	for _, session := range sessions {
-		if _, ok := sessionFirst[session.SessionID]; ok {
-			continue
-		}
-		if at, err := parseTimestamp(session.StartedAt); err == nil {
-			if at = at.UTC(); !at.Before(start) && at.Before(end) {
-				sessionFirst[session.SessionID] = at
-				continue
-			}
-		}
-		if at, ok := createdAt[session.SessionID]; ok {
-			if at = at.UTC(); !at.Before(start) && at.Before(end) {
-				sessionFirst[session.SessionID] = at
-			}
-		}
-	}
+	sessionFirst, timed := reportingSessionEvidence(start, end, gapCap, sessions, createdAt, events, usage)
 
 	projectFirst := map[string]time.Time{}
 	modelFirst := map[string]time.Time{}
@@ -1076,6 +1006,85 @@ func buildReportingFirstSeen(
 		}
 	}
 	return counts
+}
+
+// reportingSessionEvidence preserves the IDs behind first-seen counts so a
+// multi-day consumer can union sessions rather than summing daily counts.
+func reportingSessionEvidence(
+	start, end time.Time, gapCap time.Duration,
+	sessions []activity.SessionMeta, createdAt map[string]time.Time,
+	events []activity.ActivityEvent, usage []activity.UsageRow,
+) (map[string]time.Time, map[string]bool) {
+	sessionFirst := make(map[string]time.Time, len(sessions))
+	timed := make(map[string]bool, len(sessions))
+	eventsBySession := make(map[string][]activity.ActivityEvent)
+	for _, event := range events {
+		eventsBySession[event.SessionID] = append(
+			eventsBySession[event.SessionID],
+			event,
+		)
+	}
+	for sessionID, sessionEvents := range eventsBySession {
+		for i := 1; i < len(sessionEvents); i++ {
+			previous, previousErr := parseTimestamp(sessionEvents[i-1].Timestamp)
+			current, currentErr := parseTimestamp(sessionEvents[i].Timestamp)
+			if previousErr != nil || currentErr != nil {
+				continue
+			}
+			intervalStart, _, ok := activity.EffectiveIntervalBounds(
+				previous.UTC(), current.UTC(), start, end, gapCap,
+			)
+			if ok {
+				setEarlierReportingTime(sessionFirst, sessionID, intervalStart)
+				timed[sessionID] = true
+			}
+		}
+	}
+
+	usageFirst := make(map[string]time.Time, len(sessions))
+	for _, row := range usage {
+		at, err := parseTimestamp(row.Timestamp)
+		if err == nil && !at.Before(start) && at.Before(end) {
+			setEarlierReportingTime(usageFirst, row.SessionID, at.UTC())
+		}
+	}
+	for sessionID, at := range usageFirst {
+		if _, ok := sessionFirst[sessionID]; !ok {
+			sessionFirst[sessionID] = at
+		}
+	}
+
+	eventFirst := make(map[string]time.Time, len(sessions))
+	for _, event := range events {
+		at, err := parseTimestamp(event.Timestamp)
+		if err == nil && !at.Before(start) && at.Before(end) {
+			setEarlierReportingTime(eventFirst, event.SessionID, at.UTC())
+		}
+	}
+	for sessionID, at := range eventFirst {
+		if _, ok := sessionFirst[sessionID]; !ok {
+			sessionFirst[sessionID] = at
+		}
+	}
+
+	for _, session := range sessions {
+		if _, ok := sessionFirst[session.SessionID]; ok {
+			continue
+		}
+		if at, err := parseTimestamp(session.StartedAt); err == nil {
+			if at = at.UTC(); !at.Before(start) && at.Before(end) {
+				sessionFirst[session.SessionID] = at
+				continue
+			}
+		}
+		if at, ok := createdAt[session.SessionID]; ok {
+			if at = at.UTC(); !at.Before(start) && at.Before(end) {
+				sessionFirst[session.SessionID] = at
+			}
+		}
+	}
+
+	return sessionFirst, timed
 }
 
 func setEarlierReportingTime(values map[string]time.Time, key string, at time.Time) {

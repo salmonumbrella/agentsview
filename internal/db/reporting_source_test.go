@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/agentsview/internal/activity"
 	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/money"
 )
@@ -415,4 +416,54 @@ func TestReportingRangeScopeExcludesUnownedDates(t *testing.T) {
 			assert.Equal(t, "2026-08-01T12:00:00Z", got.ClosedThrough)
 		})
 	}
+}
+
+func TestReportingSessionEvidenceUsesDatedActivity(t *testing.T) {
+	start := time.Date(2026, 7, 28, 0, 0, 0, 0, time.UTC)
+	sessions := []activity.SessionMeta{
+		{SessionID: "earlier", StartedAt: "2026-07-01T10:00:00Z"},
+		{SessionID: "started", StartedAt: "2026-07-28T12:00:00Z"},
+		{SessionID: "outside", StartedAt: "2026-07-01T10:00:00Z"},
+	}
+	events := []activity.ActivityEvent{{SessionID: "earlier", Timestamp: "2026-07-28T10:00:00Z"}}
+	first, timed := reportingSessionEvidence(start, start.Add(24*time.Hour), 5*time.Minute, sessions, nil, events, nil)
+	assert.Equal(t, map[string]time.Time{
+		"earlier": time.Date(2026, 7, 28, 10, 0, 0, 0, time.UTC),
+		"started": time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC),
+	}, first)
+	assert.Empty(t, timed)
+}
+
+func TestScopedReportingUsageMatchesExport(t *testing.T) {
+	d := testDB(t)
+	start := time.Date(2026, 7, 28, 0, 0, 0, 0, time.UTC)
+	insertSession(t, d, "owned", "fixture", func(s *Session) {
+		s.Agent = "codex"
+		s.StartedAt = Ptr("2026-07-28T09:00:00Z")
+	})
+	cost := money.Money{Microdollars: 125}
+	require.NoError(t, d.ReplaceSessionUsageEvents(t.Context(), "owned", []UsageEvent{{
+		Source: "fixture", Model: "model", InputTokens: 7, OutputTokens: 3,
+		Cost: &cost, CostStatus: "exact", CostSource: "reported",
+		OccurredAt: "2026-07-28T09:05:00Z", DedupKey: "one",
+	}}))
+	tx, err := d.getReader().BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	source, err := d.loadReportingExportSourceScoped(t.Context(), tx, start, start.Add(24*time.Hour), export.ReportingSchemaVersion, map[string]struct{}{"owned": {}})
+	require.NoError(t, err)
+	query, err := activity.ResolveQuery(activity.QueryInput{Preset: "custom", From: start.Format(time.RFC3339), To: start.Add(24 * time.Hour).Format(time.RFC3339), Timezone: "UTC"}, start.Add(24*time.Hour))
+	require.NoError(t, err)
+	rows, _, err := reportingMaterializedUsage(query, source.forDate(start, start.Add(24*time.Hour)))
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "owned", rows[0].SessionID)
+	assert.Equal(t, 7, rows[0].InputTokens)
+	assert.Equal(t, 3, rows[0].OutputTokens)
+	assert.Equal(t, cost, rows[0].Cost)
+	day, err := d.ExportReportingDay(t.Context(), ReportingExportOptions{Date: start, Now: start.Add(48 * time.Hour)})
+	require.NoError(t, err)
+	assert.EqualValues(t, 7, day.Hours[9].Usage.Totals.InputTokens)
+	assert.EqualValues(t, 3, day.Hours[9].Usage.Totals.OutputTokens)
+	assert.Equal(t, cost, day.Hours[9].Usage.Totals.Cost)
 }

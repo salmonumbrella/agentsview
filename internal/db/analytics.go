@@ -4988,6 +4988,24 @@ func spaceReplacer(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+// storedSignalDistributions counts only stored outcomes and nonempty grades.
+func storedSignalDistributions(rows []SignalRow) (map[string]int, map[string]int) {
+	outcomes, grades := map[string]int{}, map[string]int{}
+	for _, row := range rows {
+		addStoredSignalDistribution(outcomes, grades, row)
+	}
+	return outcomes, grades
+}
+
+func addStoredSignalDistribution(outcomes, grades map[string]int, row SignalRow) {
+	if row.Outcome != "" {
+		outcomes[row.Outcome]++
+	}
+	if row.HealthGrade != nil && *row.HealthGrade != "" {
+		grades[*row.HealthGrade]++
+	}
+}
+
 // AggregateSignals builds the response from collected rows.
 // Exported so the PostgreSQL store can reuse the same
 // aggregation logic instead of re-implementing it.
@@ -5041,15 +5059,7 @@ func AggregateSignals(
 			resp.UnscoredSessions++
 		}
 
-		// Grade distribution
-		if r.HealthGrade != nil && *r.HealthGrade != "" {
-			resp.GradeDistribution[*r.HealthGrade]++
-		}
-
-		// Outcome distribution
-		if r.Outcome != "" {
-			resp.OutcomeDistribution[r.Outcome]++
-		}
+		addStoredSignalDistribution(resp.OutcomeDistribution, resp.GradeDistribution, r)
 		if r.OutcomeConfidence != "" {
 			resp.OutcomeConfidenceDistribution[r.OutcomeConfidence]++
 		}
