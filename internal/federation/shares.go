@@ -317,6 +317,22 @@ type DeliveryCounts struct {
 	Refused     int `json:"refused"`
 	Unconfirmed int `json:"unconfirmed"`
 }
+
+func deliveryCounts(ledger map[string]db.FederationDelivery) (out DeliveryCounts) {
+	for _, d := range ledger {
+		if d.AttemptHash != "" {
+			out.Unconfirmed++
+		}
+		switch d.State {
+		case "sent":
+			out.Sent++
+		case "refused":
+			out.Refused++
+		}
+	}
+	return out
+}
+
 type ShareDetails struct {
 	Share      db.FederationShare       `json:"share"`
 	Delivery   DeliveryCounts           `json:"delivery"`
@@ -337,16 +353,7 @@ func (s *Service) Share(ctx context.Context, uid string) (ShareDetails, error) {
 	if err != nil {
 		return out, err
 	}
-	for _, d := range ledger {
-		if d.AttemptHash != "" {
-			out.Delivery.Unconfirmed++
-		}
-		if d.State == "sent" {
-			out.Delivery.Sent++
-		} else if d.State == "refused" {
-			out.Delivery.Refused++
-		}
-	}
+	out.Delivery = deliveryCounts(ledger)
 	quarantines, err := s.db.FederationQuarantines(ctx)
 	if err != nil {
 		return out, err

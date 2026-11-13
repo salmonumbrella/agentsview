@@ -1,6 +1,7 @@
 package federation
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -17,6 +18,48 @@ import (
 	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/testutil"
 )
+
+func TestStatusKeepsLocalSharesWhenPeerReturnsHTTPError(t *testing.T) {
+	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, archive.Close()) })
+	code := http.StatusServiceUnavailable
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if code == http.StatusFound {
+			w.Header().Set("Location", "/elsewhere")
+		}
+		w.WriteHeader(code)
+		_, _ = w.Write([]byte("CANARY-peer-body"))
+	}))
+	t.Cleanup(hub.Close)
+	file := filepath.Join(testutil.PrivateTempDir(t), "credential")
+	require.NoError(t, os.WriteFile(file, []byte("avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), 0600))
+	require.NoError(t, archive.PutFederationLink(t.Context(), db.FederationLink{UID: "link", HubOrigin: hub.URL, HubArchiveID: "hub", EnrollmentUID: "enrollment", Member: "member", TokenFile: file, ProtocolVersion: 1, State: LinkActive}))
+	require.NoError(t, archive.PutFederationShare(t.Context(), db.FederationShare{UID: "share", LinkUID: "link", NormalizedRemote: "github.com/example/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: `{}`, PolicyDigest: "digest"}))
+	svc := NewService("spoke", "spoke", config.FederationHubConfig{}, archive)
+	for _, tc := range []struct {
+		status  int
+		message string
+	}{{503, "hub returned HTTP 503"}, {302, "hub returned HTTP 302"}} {
+		code = tc.status
+		status, err := svc.Status(t.Context())
+		require.NoError(t, err)
+		require.NotNil(t, status.Hub)
+		assert.Equal(t, HubError, status.Hub.State)
+		assert.Equal(t, tc.message, status.Hub.Message)
+		assert.Equal(t, 1, status.Shares)
+		listed, err := svc.Shares(t.Context())
+		require.NoError(t, err)
+		encoded, err := json.Marshal(listed)
+		require.NoError(t, err)
+		assert.Contains(t, string(encoded), "share")
+		assert.NotContains(t, string(encoded), "CANARY-peer-body")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = svc.Status(ctx)
+	assert.ErrorIs(t, err, context.Canceled)
+}
 
 func TestJoinPinsHubAndBlocksChangedIdentity(t *testing.T) {
 	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))

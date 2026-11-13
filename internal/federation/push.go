@@ -118,23 +118,21 @@ func (s *Service) Push(ctx context.Context) (PushResult, error) {
 			if current.State != "active" || current.PolicyDigest != hub.PolicyDigest || json.Unmarshal([]byte(current.ConsentJSON), &currentConsent) != nil || currentConsent.DeliveryNotice != shareDeliveryNotice {
 				break
 			}
-			selection, err := s.db.SelectFederationSessionIDs(ctx, share.NormalizedRemote, share.Since)
+			fresh, err := s.previewWithPolicy(ctx, ShareGrant{Project: share.NormalizedRemote, Level: share.Level, Attribution: share.Attribution, Since: share.Since}, hub)
 			if err != nil {
 				return out, err
 			}
-			allowed := map[string]bool{}
-			for _, id := range selection.IDs {
-				allowed[id] = true
+			allowed := make(map[string]SummaryRecord, len(fresh.Records))
+			for _, record := range fresh.Records {
+				allowed[record.SessionID] = record
 			}
 			filtered := pending[:0]
 			for _, record := range pending {
-				if allowed[record.RecordUID] {
-					if record.Payload.ParentID != nil && !allowed[*record.Payload.ParentID] {
-						record.Payload.ParentID, record.Payload.Relationship = nil, nil
-						record.Hash, err = export.DigestCanonical(record.Payload)
-						if err != nil {
-							return out, err
-						}
+				if payload, ok := allowed[record.RecordUID]; ok {
+					record.Payload = payload
+					record.Hash, err = export.DigestCanonical(payload)
+					if err != nil {
+						return out, err
 					}
 					filtered = append(filtered, record)
 				}

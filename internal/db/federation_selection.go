@@ -45,13 +45,17 @@ func (db *DB) SelectFederationSessions(ctx context.Context, remote, since string
 		return out, err
 	}
 	out.NotIdentifiable += withoutIdentity
+	allowed := make(map[string]bool, len(out.IDs))
+	for _, id := range out.IDs {
+		allowed[id] = true
+	}
 	err = QueryChunkedSize(out.IDs, maxSQLVars, func(ids []string) error {
 		placeholders, args := InPlaceholders(ids)
 		found, e := db.querySessionExportRowsFrom(ctx, tx, "sessions.id IN "+placeholders, args, 1e12, sessionExportCursorPayload{}, len(ids), sessionExportActivitySource{})
 		if e != nil {
 			return e
 		}
-		if _, e = db.attachSessionExportUsage(ctx, tx, found); e != nil {
+		if _, e = db.attachSessionExportUsageWithin(ctx, tx, found, allowed); e != nil {
 			return e
 		}
 		out.Rows = append(out.Rows, found...)

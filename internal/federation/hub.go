@@ -61,6 +61,10 @@ func (s *Service) ApplyBatch(ctx context.Context, enrollment, spoke, uid string,
 				event.CostStatus = "exact"
 			}
 			write.UsageEvents = append(write.UsageEvents, event)
+			if u.OutputTokens > 0 {
+				write.Session.TotalOutputTokens += u.OutputTokens
+				write.Session.HasTotalOutputTokens = true
+			}
 		}
 		records = append(records, db.FederationHubRecord{UID: r.RecordUID, Hash: r.Hash, Remote: p.Remote, ProjectKey: p.ProjectKey, AssistantCount: p.AssistantMessageCount, Write: write})
 	}

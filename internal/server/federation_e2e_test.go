@@ -205,14 +205,17 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	assert.NotContains(t, batchBodies[1], "session-b")
 	assert.NotContains(t, captured.String(), "CANARY")
 	var machine, project string
-	var messages, tools, usage, input int
-	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT machine,project,(SELECT count(*) FROM messages WHERE session_id=s.id),(SELECT count(*) FROM tool_calls WHERE session_id=s.id),(SELECT count(*) FROM usage_events WHERE session_id=s.id),(SELECT COALESCE(sum(input_tokens),0) FROM usage_events WHERE session_id=s.id) FROM sessions s WHERE id='session-a'`).Scan(&machine, &project, &messages, &tools, &usage, &input))
+	var messages, tools, usage, input, output int
+	var hasOutput bool
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT machine,project,(SELECT count(*) FROM messages WHERE session_id=s.id),(SELECT count(*) FROM tool_calls WHERE session_id=s.id),(SELECT count(*) FROM usage_events WHERE session_id=s.id),(SELECT COALESCE(sum(input_tokens),0) FROM usage_events WHERE session_id=s.id),total_output_tokens,has_total_output_tokens FROM sessions s WHERE id='session-a'`).Scan(&machine, &project, &messages, &tools, &usage, &input, &output, &hasOutput))
 	assert.Equal(t, "federated", machine)
 	assert.Equal(t, remote, project)
 	assert.Zero(t, messages)
 	assert.Zero(t, tools)
 	assert.Equal(t, 1, usage)
 	assert.Equal(t, 100, input)
+	assert.Equal(t, 20, output)
+	assert.True(t, hasOutput)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
 	rec := httptest.NewRecorder()
 	server.Handler().ServeHTTP(rec, req)

@@ -251,16 +251,10 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 		if e != nil {
 			return out, e
 		}
-		for _, d := range ledger {
-			if d.AttemptHash != "" {
-				out.Delivery.Unconfirmed++
-			}
-			if d.State == "sent" {
-				out.Delivery.Sent++
-			} else if d.State == "refused" {
-				out.Delivery.Refused++
-			}
-		}
+		counts := deliveryCounts(ledger)
+		out.Delivery.Sent += counts.Sent
+		out.Delivery.Refused += counts.Refused
+		out.Delivery.Unconfirmed += counts.Unconfirmed
 	}
 	out.Quarantine, err = s.db.FederationQuarantines(ctx)
 	if err != nil {
@@ -283,7 +277,8 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	h, err := Handshake(ctx, link.HubOrigin, token, s.archiveID)
 	if err != nil {
 		var input *InputError
-		if errors.Is(err, ErrHubRefused) || errors.As(err, &input) {
+		var peer *peerHTTPError
+		if errors.Is(err, ErrHubRefused) || errors.As(err, &input) || errors.As(err, &peer) {
 			out.Hub.State, out.Hub.Message = HubError, err.Error()
 			return out, nil
 		}

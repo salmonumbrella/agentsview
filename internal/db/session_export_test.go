@@ -1541,6 +1541,36 @@ func TestSessionExportUsageUsesPageReadSnapshot(t *testing.T) {
 	assert.Equal(t, 10, rows[0].ModelUsage.OutputTokens)
 }
 
+func TestFederationSelectionRestrictsClaudeSnapshotPeers(t *testing.T) {
+	d := testSessionExportDB(t)
+	ctx := t.Context()
+	seedSessionExportPricing(t, d)
+	for _, id := range []string{"parent", "peer"} {
+		insertExportSession(t, d, Session{ID: id, Project: "snapshot", Machine: "install", Agent: "claude", FilePath: Ptr(id), StartedAt: Ptr("2026-05-01T10:00:00Z")})
+	}
+	insertMessages(t, d,
+		Message{SessionID: "parent", Ordinal: 0, Role: "assistant", Model: "model-computed", ClaudeMessageID: "shared", ClaudeRequestID: "request", TokenUsage: jsontext.Value(`{"input_tokens":100,"output_tokens":5}`)},
+		Message{SessionID: "peer", Ordinal: 0, Role: "assistant", Model: "model-computed", ClaudeMessageID: "shared", ClaudeRequestID: "request", TokenUsage: jsontext.Value(`{"input_tokens":1000,"output_tokens":100}`)},
+	)
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		for _, q := range []string{
+			`INSERT INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install')`,
+			`INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) SELECT id,machine,agent,file_path FROM sessions WHERE id IN ('parent','peer')`,
+			`INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) SELECT id,project,machine,'2026-05-01T00:00:00Z','resolved',1,CASE id WHEN 'parent' THEN 'github.com/example/shared' ELSE 'github.com/example/private' END,'git_remote','key' FROM sessions WHERE id IN ('parent','peer')`,
+		} {
+			if _, err := tx.ExecContext(ctx, q); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	selected, err := d.SelectFederationSessions(ctx, "github.com/example/shared", "")
+	require.NoError(t, err)
+	require.Len(t, selected.Rows, 1)
+	assert.Equal(t, 100, selected.Rows[0].ModelUsage.InputTokens)
+	assert.Equal(t, 5, selected.Rows[0].ModelUsage.OutputTokens)
+}
+
 func TestSessionSummaryExportSelectsCompleteClaudeSnapshotBeforeDedup(t *testing.T) {
 	for _, tc := range []struct {
 		name                string
