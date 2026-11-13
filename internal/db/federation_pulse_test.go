@@ -493,6 +493,9 @@ func TestFederationPulseVisitsSparseEvidenceDays(t *testing.T) {
 			assert.Equal(t, Ptr(tc.cost), pulse.Totals["cost_microdollars"].Value)
 			assert.Equal(t, "available", pulse.Totals["cost_microdollars"].State)
 			assert.Equal(t, "unavailable", pulse.Totals["health_observed_sessions"].State)
+			require.Len(t, pulse.Outcomes, 1)
+			assert.Equal(t, "unknown", pulse.Outcomes[0].Key)
+			assert.Equal(t, Ptr(tc.sessions), pulse.Outcomes[0].Metrics["sessions"].Value)
 			assert.Equal(t, "2026-07-30T00:00:00Z", pulse.ClosedThrough)
 			if tc.since == "" {
 				assert.Nil(t, pulse.Since)
