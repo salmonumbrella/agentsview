@@ -377,7 +377,7 @@ func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T)
 // These regressions describe the accepted cross-release privacy requirement.
 // The publication policy is still open; no admission bypass is used here.
 func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
-	for _, scenario := range []string{"window", "reverse-window", "update", "copy-before-publication", "cancel-before-admission"} {
+	for _, scenario := range []string{"window", "reverse-window", "update", "copy-before-publication", "cancel-before-admission", "concurrent"} {
 		t.Run(scenario, func(t *testing.T) {
 			d := testDB(t)
 			ctx := t.Context()
@@ -393,7 +393,7 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 				require.NoError(t, err)
 			}
 			now := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
-			if scenario == "window" || scenario == "reverse-window" || scenario == "copy-before-publication" || scenario == "cancel-before-admission" {
+			if scenario == "window" || scenario == "reverse-window" || scenario == "copy-before-publication" || scenario == "cancel-before-admission" || scenario == "concurrent" {
 				older := "2026-07-28T09:00:00Z"
 				cost := money.Money{Microdollars: 70}
 				record := FederationHubRecord{UID: "a-older", Hash: "initial", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: "a-older", Project: "example/repo", Agent: "codex", StartedAt: &older}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: 7, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: older, DedupKey: "a-older"}}}}
@@ -409,6 +409,42 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 				count, err := copied.CopyOrphanedDataFrom(ctx, d.Path())
 				require.NoError(t, err)
 				assert.Equal(t, 4, count)
+			}
+			if scenario == "concurrent" {
+				type response struct {
+					pulse FederationPulse
+					err   error
+				}
+				ready := make(chan struct{})
+				results := make(chan response, 2)
+				for _, since := range []string{"2026-07-28", "2026-07-29"} {
+					go func() {
+						<-ready
+						pulse, err := d.readFederationPulse(ctx, since, 3, now)
+						results <- response{pulse: pulse, err: err}
+					}()
+				}
+				close(ready)
+				a, b := <-results, <-results
+				require.NoError(t, a.err)
+				require.NoError(t, b.err)
+				assert.NotEqual(t, a.pulse.Suppressed, b.pulse.Suppressed)
+				for _, result := range []FederationPulse{a.pulse, b.pulse} {
+					if result.Suppressed {
+						assert.Nil(t, result.Totals["tokens"].Value)
+						assert.Nil(t, result.Totals["cost_microdollars"].Value)
+						continue
+					}
+					require.NotNil(t, result.Since)
+					if *result.Since == "2026-07-28" {
+						assert.Equal(t, Ptr(int64(67)), result.Totals["tokens"].Value)
+						assert.Equal(t, Ptr(int64(670)), result.Totals["cost_microdollars"].Value)
+					} else {
+						assert.Equal(t, Ptr(int64(60)), result.Totals["tokens"].Value)
+						assert.Equal(t, Ptr(int64(600)), result.Totals["cost_microdollars"].Value)
+					}
+				}
+				return
 			}
 			if scenario == "cancel-before-admission" {
 				canceled, cancel := context.WithCancel(ctx)
