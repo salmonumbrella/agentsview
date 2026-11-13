@@ -37,6 +37,7 @@ type ShareView struct {
 	State     string `json:"state"`
 	Committed int64  `json:"committed"`
 	Epoch     int64  `json:"epoch"`
+	Retention string `json:"retention,omitempty"`
 	Changed   bool   `json:"-"`
 }
 type Batch struct {

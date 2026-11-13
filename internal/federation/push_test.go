@@ -106,7 +106,7 @@ func TestGrantChangesWaitForPush(t *testing.T) {
 					if manifest.Action == "stop" {
 						state = "stopped"
 					}
-					_ = json.NewEncoder(w).Encode(ShareView{State: state, Epoch: 1, Committed: int64(batches)})
+					_ = json.NewEncoder(w).Encode(ShareView{State: state, Epoch: 1, Committed: int64(batches), Retention: policy.Retention})
 				case strings.HasSuffix(r.URL.Path, "/reconcile"):
 					var request ReconcileRequest
 					require.NoError(t, json.NewDecoder(r.Body).Decode(&request))

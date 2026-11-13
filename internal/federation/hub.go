@@ -44,7 +44,7 @@ func (s *Service) RegisterShare(ctx context.Context, enrollment, spoke, uid stri
 	if state == "active" {
 		state = "accepted"
 	}
-	return ShareView{State: state, Committed: stored.Sequence, Epoch: stored.Epoch, Changed: stored.Changed}, nil
+	return ShareView{State: state, Committed: stored.Sequence, Epoch: stored.Epoch, Retention: stored.Retention, Changed: stored.Changed}, nil
 }
 
 func (s *Service) ApplyBatch(ctx context.Context, enrollment, spoke, uid string, batch Batch) (BatchAck, error) {

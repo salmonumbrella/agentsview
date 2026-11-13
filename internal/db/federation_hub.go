@@ -57,16 +57,16 @@ func (db *DB) PutFederationHubShare(ctx context.Context, spoke string, share Fed
 				return err
 			}
 		} else {
-			if owner != share.EnrollmentUID || remote != share.Remote || (digest != share.PolicyDigest && !(share.Resume && state == "stopped" && share.Epoch > epoch)) {
+			if owner != share.EnrollmentUID || remote != share.Remote || (digest != share.PolicyDigest && !(share.Resume && state == "stopped" && share.Epoch > epoch) && !(share.State == "stopped" && retention != "")) {
 				return sql.ErrNoRows
 			}
-			if retention == "" {
+			if retention == "" && digest == share.PolicyDigest {
 				retention = share.Retention
 			}
-			if share.Retention != "" && retention != share.Retention && !(share.Resume && state == "stopped" && share.Epoch > epoch) {
+			if share.State != "stopped" && share.Retention != "" && retention != share.Retention && !(share.Resume && state == "stopped" && share.Epoch > epoch) {
 				return ErrFederationInvalidBatch
 			}
-			if share.State == "stopped" && epoch == share.Epoch && state == "active" {
+			if share.State == "stopped" && share.Epoch >= epoch && state == "active" {
 				if retention != "member-controlled" && retention != "org-retained" {
 					return ErrFederationInvalidBatch
 				}
@@ -96,7 +96,12 @@ func (db *DB) PutFederationHubShare(ctx context.Context, spoke string, share Fed
 						return err
 					}
 				}
-				_, err = tx.ExecContext(ctx, `UPDATE federation_hub_shares SET state='stopped',retention=?,last_batch_digest='',last_refused='{}' WHERE share_uid=?`, retention, share.UID)
+				_, err = tx.ExecContext(ctx, `UPDATE federation_hub_shares SET state='stopped',retention=?,sequence=CASE WHEN epoch<? THEN 0 ELSE sequence END,epoch=?,last_batch_digest='',last_refused='{}' WHERE share_uid=?`, retention, share.Epoch, share.Epoch, share.UID)
+				if err != nil {
+					return err
+				}
+			} else if share.State == "stopped" && state == "stopped" && share.Epoch > epoch {
+				_, err = tx.ExecContext(ctx, `UPDATE federation_hub_shares SET epoch=?,sequence=0,last_batch_digest='',last_refused='{}' WHERE share_uid=?`, share.Epoch, share.UID)
 				if err != nil {
 					return err
 				}

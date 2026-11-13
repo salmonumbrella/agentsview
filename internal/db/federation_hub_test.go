@@ -319,10 +319,13 @@ func TestFederationStopPurgesOnlyOwnedAndCannotBeReactivatedByStaleManifest(t *t
 	warm, err := d.GetDailyUsage(ctx, filter)
 	require.NoError(t, err)
 	assert.Equal(t, 42, warm.Totals.InputTokens)
-	share.State = "stopped"
+	// The spoke can advance its grant while offline and stop it before the
+	// new active manifest reaches this hub.
+	share.State, share.Epoch = "stopped", 2
 	stopped, err := d.PutFederationHubShare(ctx, "spoke", share)
 	require.NoError(t, err)
 	assert.Equal(t, "stopped", stopped.State)
+	assert.EqualValues(t, 2, stopped.Epoch)
 	var sessions, records int
 	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='owned'), (SELECT count(*) FROM federation_records WHERE share_uid='share')`).Scan(&sessions, &records))
 	assert.Zero(t, sessions)
@@ -330,10 +333,19 @@ func TestFederationStopPurgesOnlyOwnedAndCannotBeReactivatedByStaleManifest(t *t
 	after, err := d.GetDailyUsage(ctx, filter)
 	require.NoError(t, err)
 	assert.Zero(t, after.Totals.InputTokens)
-	share.State = "active"
+	share.State, share.Epoch = "active", 1
 	stale, err := d.PutFederationHubShare(ctx, "spoke", share)
 	require.NoError(t, err)
 	assert.Equal(t, "stopped", stale.State)
+	share.Epoch, share.Resume = 3, true
+	resumed, err := d.PutFederationHubShare(ctx, "spoke", share)
+	require.NoError(t, err)
+	assert.Equal(t, "active", resumed.State)
+	share.State, share.Epoch, share.Resume = "stopped", 2, false
+	stale, err = d.PutFederationHubShare(ctx, "spoke", share)
+	require.NoError(t, err)
+	assert.Equal(t, "active", stale.State)
+	assert.EqualValues(t, 3, stale.Epoch)
 }
 
 func TestFederationReconcileIsShareScopedAndRejectsOutOfOrderPages(t *testing.T) {

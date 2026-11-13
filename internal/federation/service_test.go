@@ -292,7 +292,7 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 			var manifest ShareManifest
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&manifest))
 			assert.Equal(t, "stop", manifest.Action)
-			_ = json.NewEncoder(w).Encode(ShareView{State: "stopped", Epoch: manifest.Epoch})
+			_ = json.NewEncoder(w).Encode(ShareView{State: "stopped", Epoch: manifest.Epoch, Retention: manifest.Policy.Retention})
 			return
 		}
 		assert.Equal(t, http.MethodGet, r.Method)
@@ -528,7 +528,7 @@ func TestShareLocalStateAndExclusionErrors(t *testing.T) {
 		var manifest ShareManifest
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&manifest))
 		assert.Equal(t, "stop", manifest.Action)
-		_ = json.NewEncoder(w).Encode(ShareView{State: "stopped", Epoch: manifest.Epoch})
+		_ = json.NewEncoder(w).Encode(ShareView{State: "stopped", Epoch: manifest.Epoch, Retention: manifest.Policy.Retention})
 	}))
 	t.Cleanup(hub.Close)
 	file := filepath.Join(testutil.PrivateTempDir(t), "credential")

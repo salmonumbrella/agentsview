@@ -216,11 +216,11 @@ func (s *Service) processFederationStops(ctx context.Context, link db.Federation
 		if e != nil {
 			return e
 		}
-		if view.State != "stopped" || view.Epoch != share.Epoch {
+		if view.State != "stopped" || view.Epoch != share.Epoch || (view.Retention != "member-controlled" && view.Retention != "org-retained") {
 			return inputError("invalid federation stop receipt")
 		}
 		receipt := "purged"
-		if consent.Policy.Retention == "org-retained" {
+		if view.Retention == "org-retained" {
 			receipt = "retained"
 		}
 		if e = s.db.ReceiptFederationStop(ctx, link.UID, share.UID, receipt, share.Epoch, view.Committed); e != nil {
