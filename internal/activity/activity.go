@@ -53,6 +53,10 @@ type ActivityEvent struct {
 	Model     string // "" when unknown
 }
 
+// UsageProofRef identifies a node in a private, request-local proof arena.
+// Zero means that no proof was attached; it is not evidence of an empty input.
+type UsageProofRef uint64
+
 // UsageRow is one cost/token row from the usage-row union, with cost already
 // computed by the backend (so cost logic stays in each backend, matching
 // GetDailyUsage). Rows MUST be delivered in the timestamp, session ID, and
@@ -89,6 +93,9 @@ type UsageRow struct {
 	ClaudeRequestID string
 	SourceUUID      string
 	UsageDedupKey   string
+	// ProofRef travels with the native row through attribution and allocation.
+	// Its arena and meaning are private to the caller building a proof.
+	ProofRef UsageProofRef `json:"-"`
 }
 
 // SessionTokenCoverage records the canonical token categories represented for

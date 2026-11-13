@@ -65,9 +65,11 @@ type reportingJointContributor struct{ source, attributed string }
 type reportingJointSupport map[reportingCellKey]map[reportingJointContributor]*reportingJointContribution
 
 type reportingJointContribution struct {
-	usage        reportingUsageAccum
-	costObserved bool
-	unpriced     bool
+	usage           reportingUsageAccum
+	costObserved    bool
+	unpriced        bool
+	proofRefs       []activity.UsageProofRef
+	proofIncomplete bool
 }
 
 // walkReportingHourUsage normalizes each retained hourly row once for both
@@ -124,6 +126,11 @@ func addReportingJointSupport(support reportingJointSupport, key reportingCellKe
 	}
 	contribution.costObserved = contribution.costObserved || row.Priced || row.Cost.Microdollars != 0
 	contribution.unpriced = contribution.unpriced || !row.Priced
+	if row.ProofRef != 0 {
+		contribution.proofRefs = append(contribution.proofRefs, row.ProofRef)
+	} else {
+		contribution.proofIncomplete = true
+	}
 	return nil
 }
 
