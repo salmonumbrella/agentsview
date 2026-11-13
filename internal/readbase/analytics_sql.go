@@ -59,7 +59,7 @@ func AnalyticsActivityAgentsSQL(where string, args []any, localDate string, loca
 func analyticsModelsSQL(idSet string) string {
 	return `
 			SELECT DISTINCT model
-			FROM messages
+			FROM (SELECT session_id,model FROM messages UNION ALL SELECT session_id,model FROM usage_events WHERE source='federation') AS model_rows
 			WHERE session_id IN ` + idSet + `
 				AND model <> ''`
 }
@@ -67,7 +67,7 @@ func analyticsModelsSQL(idSet string) string {
 func analyticsModelTimesSQL(idSet string) string {
 	return `
 			SELECT model, timestamp
-			FROM messages
+			FROM (SELECT session_id,model,timestamp FROM messages UNION ALL SELECT u.session_id,u.model,s.started_at AS timestamp FROM usage_events u JOIN sessions s ON s.id=u.session_id WHERE u.source='federation') AS model_rows
 			WHERE session_id IN ` + idSet + `
 				AND model <> ''`
 }

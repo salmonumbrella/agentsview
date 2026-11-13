@@ -108,6 +108,42 @@ func (s *Analytics) filteredModels(ctx context.Context, ids []string, f db.Analy
 	return db.SortedKeys(models), nil
 }
 
+func (s *Analytics) addFederationStats(ctx context.Context, ids []string, f db.AnalyticsFilter, stats map[string]db.MessageStats) error {
+	models := f.MessageScopeFilter().Models
+	loc := analyticsLocation(f.Timezone)
+	return s.backend.VisitSessionIDSets(ctx, ids, func(ctx context.Context, idSet string, args []any) error {
+		rows, err := s.backend.QueryContext(ctx, `SELECT s.id,s.message_count,s.user_message_count,s.started_at,u.model,u.output_tokens FROM sessions s JOIN usage_events u ON u.session_id=s.id WHERE u.source='federation' AND s.id IN `+idSet, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id, model string
+			var start any
+			var messages, users, output int
+			if err := rows.Scan(&id, &messages, &users, &start, &model, &output); err != nil {
+				return err
+			}
+			if len(models) > 0 {
+				if _, ok := models[model]; !ok {
+					continue
+				}
+			}
+			if f.HasTimeFilter() && !analyticsMessageTimeMatches(s.backend.FormatTime(start), f.MessageScopeFilter(), loc) {
+				continue
+			}
+			stat := stats[id]
+			stat.Messages, stat.UserMessages = messages, users
+			if output > 0 {
+				stat.OutputTokens += output
+				stat.HasOutputTokens = true
+			}
+			stats[id] = stat
+		}
+		return rows.Err()
+	})
+}
+
 func (s *Analytics) filteredToolCounts(ctx context.Context, ids []string, f db.AnalyticsFilter) (map[string]int, error) {
 	counts := make(map[string]int, len(ids))
 	if len(ids) == 0 {

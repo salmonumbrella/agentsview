@@ -374,7 +374,11 @@ func (db *DB) getAnalyticsFilteredMessageStats(
 	if scope == nil {
 		return map[string]MessageStats{}, nil
 	}
-	return scope.StatsBySession(), nil
+	stats := scope.StatsBySession()
+	if err := db.addFederationAnalyticsStats(ctx, sessionIDs, f, stats); err != nil {
+		return nil, err
+	}
+	return stats, nil
 }
 
 func (f AnalyticsFilter) buildWhereWithDate(dateCol string, includeDate bool, sessionIDExpr string) (string, []any) {
@@ -462,13 +466,8 @@ func (db *DB) getAnalyticsModelsSQLiteSummary(
 // analyticsModelsQuery lists the distinct models of the sessions matching
 // where. It reads messages through idx_messages_analytics_metadata.
 func analyticsModelsQuery(where string) string {
-	return `
-		SELECT DISTINCT m.model
-		FROM sessions s
-		JOIN messages m ON m.session_id = s.id
-		WHERE ` + where + `
-		AND m.model <> ''
-		ORDER BY m.model`
+	return `WITH selected AS (SELECT s.id FROM sessions s WHERE ` + where + `)
+		SELECT DISTINCT model FROM (SELECT m.model FROM messages m JOIN selected s ON s.id=m.session_id WHERE m.model<>'' UNION ALL SELECT u.model FROM usage_events u JOIN selected s ON s.id=u.session_id WHERE u.source='federation' AND u.model<>'') ORDER BY model`
 }
 
 func (db *DB) getAnalyticsModelsForSessionIDs(
@@ -486,7 +485,7 @@ func (db *DB) getAnalyticsModelsForSessionIDs(
 		ph, args := InPlaceholders(chunk)
 		found, err := db.queryAnalyticsModels(ctx, `
 			SELECT DISTINCT model
-			FROM messages
+			FROM (SELECT session_id,model FROM messages UNION ALL SELECT session_id,model FROM usage_events WHERE source='federation')
 			WHERE session_id IN `+ph+`
 			AND model <> ''
 			ORDER BY model`,
@@ -532,7 +531,7 @@ func (db *DB) getAnalyticsModelsForSessionIDsFiltered(
 		ph, args := InPlaceholders(chunk)
 		rows, err := db.getReader().QueryContext(ctx, `
 			SELECT model, COALESCE(timestamp, '')
-			FROM messages
+			FROM (SELECT session_id,model,timestamp FROM messages UNION ALL SELECT u.session_id,u.model,s.started_at AS timestamp FROM usage_events u JOIN sessions s ON s.id=u.session_id WHERE u.source='federation')
 			WHERE session_id IN `+ph+`
 			AND model <> ''`,
 			args...,
@@ -712,8 +711,30 @@ func sqliteAnalyticsWhereSQL(
 				"CAST("+hourExpr+" AS INTEGER) = ?")
 			args = append(args, *f.Hour)
 		}
-		where += " AND EXISTS (SELECT 1 FROM messages m WHERE " +
-			strings.Join(preds, " AND ") + ")"
+		messageTime := "EXISTS (SELECT 1 FROM messages m WHERE " + strings.Join(preds, " AND ") + ")"
+		start := strings.TrimSuffix(sessionIDExpr, "id") + "started_at"
+		usagePreds := []string{"u.session_id = " + sessionIDExpr, "u.source = 'federation'", start + " IS NOT NULL"}
+		if modelPred, modelArgs := sqliteAnalyticsCSVPredicate("u.model", f.Model); modelPred != "" {
+			usagePreds = append(usagePreds, modelPred)
+			args = append(args, modelArgs...)
+		}
+		if f.DayOfWeek != nil {
+			expr := "strftime('%w', " + start + ")"
+			if modifier != "" {
+				expr = "strftime('%w', " + start + ", '" + modifier + "')"
+			}
+			usagePreds = append(usagePreds, "((CAST("+expr+" AS INTEGER) + 6) % 7) = ?")
+			args = append(args, *f.DayOfWeek)
+		}
+		if f.Hour != nil {
+			expr := "strftime('%H', " + start + ")"
+			if modifier != "" {
+				expr = "strftime('%H', " + start + ", '" + modifier + "')"
+			}
+			usagePreds = append(usagePreds, "CAST("+expr+" AS INTEGER) = ?")
+			args = append(args, *f.Hour)
+		}
+		where += " AND (" + messageTime + " OR EXISTS (SELECT 1 FROM usage_events u WHERE " + strings.Join(usagePreds, " AND ") + "))"
 	}
 	return where, args
 }
@@ -774,6 +795,20 @@ func (db *DB) filteredSessionIDs(
 			"iterating filtered session IDs: %w", err,
 		)
 	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	candidates, err := db.analyticsModelCandidateSessionIDs(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	stats := make(map[string]MessageStats)
+	if err := db.addFederationAnalyticsStats(ctx, candidates, f, stats); err != nil {
+		return nil, err
+	}
+	for id := range stats {
+		ids[id] = true
+	}
 	return ids, nil
 }
 
@@ -795,6 +830,13 @@ func (db *DB) filteredSessionIDsModel(
 	}
 	ids := make(map[string]bool)
 	for id := range scope {
+		ids[id] = true
+	}
+	stats := make(map[string]MessageStats)
+	if err := db.addFederationAnalyticsStats(ctx, sessionIDs, f, stats); err != nil {
+		return nil, err
+	}
+	for id := range stats {
 		ids[id] = true
 	}
 	return ids, nil
@@ -1474,7 +1516,9 @@ func (db *DB) GetAnalyticsActivity(
 	}
 
 	query := `SELECT ` + dateCol + `, s.agent, s.id,
-		m.role, m.has_thinking, m.is_system, COALESCE(m.source_subtype, ''), COUNT(*)
+		m.role, m.has_thinking, m.is_system, COALESCE(m.source_subtype, ''), COUNT(*),
+		s.message_count, s.user_message_count,
+		EXISTS(SELECT 1 FROM federation_records r WHERE r.session_id=s.id)
 		FROM sessions s
 		LEFT JOIN messages m ON m.session_id = s.id
 		WHERE ` + where + `
@@ -1496,10 +1540,11 @@ func (db *DB) GetAnalyticsActivity(
 		var role *string
 		var sourceSubtype string
 		var hasThinking, isSystem *bool
-		var count int
+		var count, summaryMessages, summaryUsers int
+		var federation bool
 		if err := rows.Scan(
 			&ts, &agent, &sid, &role,
-			&hasThinking, &isSystem, &sourceSubtype, &count,
+			&hasThinking, &isSystem, &sourceSubtype, &count, &summaryMessages, &summaryUsers, &federation,
 		); err != nil {
 			return ActivityResponse{},
 				fmt.Errorf("scanning activity row: %w", err)
@@ -1545,6 +1590,10 @@ func (db *DB) GetAnalyticsActivity(
 			if hasThinking != nil && *hasThinking {
 				entry.ThinkingMessages += count
 			}
+		} else if federation {
+			entry.Messages += summaryMessages
+			entry.UserMessages += summaryUsers
+			entry.ByAgent[agent] += summaryMessages
 		}
 	}
 	if err := rows.Err(); err != nil {

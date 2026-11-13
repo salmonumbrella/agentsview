@@ -2550,6 +2550,9 @@ func legacySchemaColumnMigrations() []schemaColumnMigration {
 func schemaColumnMigrations() []schemaColumnMigration {
 	return []schemaColumnMigration{
 		{"federation_deliveries", "attempt_hash", "ALTER TABLE federation_deliveries ADD COLUMN attempt_hash TEXT NOT NULL DEFAULT ''"},
+		{"federation_deliveries", "hub_origin", "ALTER TABLE federation_deliveries ADD COLUMN hub_origin TEXT NOT NULL DEFAULT ''"},
+		{"federation_deliveries", "hub_archive_id", "ALTER TABLE federation_deliveries ADD COLUMN hub_archive_id TEXT NOT NULL DEFAULT ''"},
+		{"federation_deliveries", "normalized_remote", "ALTER TABLE federation_deliveries ADD COLUMN normalized_remote TEXT NOT NULL DEFAULT ''"},
 
 		{"sessions", "usage_generation", "ALTER TABLE sessions ADD COLUMN usage_generation TEXT;" +
 			" UPDATE sessions SET usage_generation=lower(hex(randomblob(8)))"},
@@ -3152,6 +3155,13 @@ func applySchemaColumnMigrations(ctx context.Context, w *writerHandle, progress 
 		progress,
 	); err != nil {
 		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE federation_deliveries AS d SET
+		hub_origin=COALESCE((SELECT l.hub_origin FROM federation_shares s JOIN federation_links l ON l.link_uid=s.link_uid WHERE s.share_uid=d.share_uid),''),
+		hub_archive_id=COALESCE((SELECT l.hub_archive_id FROM federation_shares s JOIN federation_links l ON l.link_uid=s.link_uid WHERE s.share_uid=d.share_uid),''),
+		normalized_remote=COALESCE((SELECT s.normalized_remote FROM federation_shares s WHERE s.share_uid=d.share_uid),'')
+		WHERE d.hub_origin='' AND d.hub_archive_id='' AND d.normalized_remote=''`); err != nil {
+		return fmt.Errorf("backfilling federation delivery context: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, usageGenerationSchemaSQL); err != nil {
 		return fmt.Errorf("installing usage generation triggers: %w", err)

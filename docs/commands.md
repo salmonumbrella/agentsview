@@ -2943,14 +2943,22 @@ and keeps a session out of all shares in this archive, including after removal
 or rejoining. `federation push --dry-run` prints selected summaries locally. Run
 `federation push` to deliver active shares now; the spoke also retries on a
 schedule. `federation status` and `federation share show` report delivery and
-quarantine counts. Shares confirmed with the earlier notice that nothing is sent
+quarantine counts. Status lists each ledger's original hub and repository,
+including shares removed or left while offline. Use the share UID with
+`share show` to inspect record IDs, confirmed hashes, states, and any
+unconfirmed attempted hashes without contacting the hub. Older orphaned
+entries may have unknown hub and repository context. Sent and unconfirmed
+counts can overlap when a changed record was attempted but not acknowledged.
+Shares confirmed with the earlier notice that nothing is sent
 can be confirmed again with `share add` before delivery. Adding a removed
 repository again reports its delivered sessions as refused until withdrawal is
 supported. A batch that started without an acknowledgment shows as unconfirmed
 and may or may not have reached the hub. If the session is excluded before the
 next acknowledged push, it stays unconfirmed and is never resent until
 withdrawal and reconcile exist. Usage from shared sessions is dated at the
-session’s start.
+session’s start. Model-filtered session summaries retain session-level message
+counts and show the selected model's usage; transcript and tool analytics have
+no message or tool rows for summary shares.
 
 Selection requires the session's own unambiguous repository identity and proof
 that it came from this installation. Imported and uncertain sessions are

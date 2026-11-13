@@ -1889,6 +1889,8 @@ CREATE TABLE IF NOT EXISTS federation_exclusions (
 CREATE TABLE IF NOT EXISTS federation_deliveries (
     share_uid TEXT NOT NULL, record_uid TEXT NOT NULL, session_id TEXT NOT NULL,
     hash TEXT NOT NULL, state TEXT NOT NULL, attempt_hash TEXT NOT NULL DEFAULT '',
+    hub_origin TEXT NOT NULL DEFAULT '', hub_archive_id TEXT NOT NULL DEFAULT '',
+    normalized_remote TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (share_uid, record_uid)
 );
 CREATE TABLE IF NOT EXISTS federation_quarantine (

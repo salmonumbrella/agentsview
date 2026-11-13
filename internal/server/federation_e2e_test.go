@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -34,7 +35,11 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	hub := federation.NewService("hub", "hub-a", policy, hubDB)
 	_, token, err := hub.Enroll(ctx, "spoke-a", "member-a", "")
 	require.NoError(t, err)
-	server := New(config.Config{Host: "127.0.0.1", Port: 8080}, hubDB, nil, WithFederation(hub))
+	var mutations atomic.Int32
+	server := New(config.Config{Host: "127.0.0.1", Port: 8080}, hubDB, nil, WithFederation(hub), WithSessionMutationNotifier(func() { mutations.Add(1) }))
+	server.broadcaster = NewBroadcaster(0)
+	events, unsubscribe := server.broadcaster.Subscribe()
+	defer unsubscribe()
 	var captured bytes.Buffer
 	dropFirst := true
 	conflictNext, rejectNext := false, false
@@ -183,6 +188,12 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(dryJSON), "CANARY")
 	assert.NotEqual(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, nil))
+	assert.Equal(t, int32(1), mutations.Load())
+	require.NotEmpty(t, events)
+	assert.Equal(t, "sessions", (<-events).Scope)
+	var committed int
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='session-a'`).Scan(&committed))
+	assert.Equal(t, 1, committed)
 	shares, err := spokeDB.ListFederationShares(ctx, func() string { link, e := spokeDB.GetFederationLink(ctx); require.NoError(t, e); return link.UID }())
 	require.NoError(t, err)
 	require.Len(t, shares, 1)
@@ -201,6 +212,9 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	var first federation.PushResult
 	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &first))
 	assert.Equal(t, 1, first.Sent)
+	assert.Equal(t, int32(2), mutations.Load())
+	require.NotEmpty(t, events)
+	assert.Equal(t, "sessions", (<-events).Scope)
 	require.GreaterOrEqual(t, len(batchBodies), 2)
 	assert.NotContains(t, batchBodies[1], "session-b")
 	assert.NotContains(t, captured.String(), "CANARY")
@@ -252,9 +266,53 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	assert.Equal(t, 2, summary.TotalSessions)
 	assert.Equal(t, 4, summary.TotalMessages)
 	assert.NotContains(t, rec.Body.String(), "CANARY")
+	require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO usage_events(session_id,source,model,output_tokens,cost_microdollars,cost_status,cost_source,occurred_at,dedup_key) VALUES('session-a','fixture','model-b',7,25,'exact','reported','2026-01-02T00:00:00Z','b')`)
+		return err
+	}))
+	var modelGrowth federation.PushResult
+	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &modelGrowth))
+	assert.Equal(t, 1, modelGrowth.Sent)
+	assert.Equal(t, int32(3), mutations.Load())
+	require.NotEmpty(t, events)
+	assert.Equal(t, "sessions", (<-events).Scope)
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT total_output_tokens,has_total_output_tokens FROM sessions WHERE id='session-a'`).Scan(&output, &hasOutput))
+	assert.Equal(t, 27, output)
+	assert.True(t, hasOutput)
+	require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT total_output_tokens,has_total_output_tokens FROM sessions WHERE id='session-b'`).Scan(&output, &hasOutput))
+	assert.Zero(t, output)
+	assert.False(t, hasOutput)
+	for _, tc := range []struct {
+		model                      string
+		sessions, messages, output int
+	}{
+		{"model-a", 1, 3, 20}, {"model-b", 1, 3, 7}, {"absent", 0, 0, 0},
+	} {
+		req = httptest.NewRequest(http.MethodGet, "/api/v1/analytics/summary?from=2026-01-02&to=2026-01-02&timezone=UTC&include_one_shot=true&model="+tc.model, nil)
+		rec = httptest.NewRecorder()
+		server.Handler().ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var scoped db.AnalyticsSummary
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &scoped))
+		assert.Equal(t, tc.sessions, scoped.TotalSessions)
+		assert.Equal(t, tc.messages, scoped.TotalMessages)
+		assert.Equal(t, tc.output, scoped.TotalOutputTokens)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/analytics/activity?from=2026-01-02&to=2026-01-02&timezone=UTC&include_one_shot=true&model=model-a", nil)
+	rec = httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var activity db.ActivityResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &activity))
+	require.Len(t, activity.Series, 1)
+	assert.Equal(t, 1, activity.Series[0].Sessions)
+	assert.Equal(t, 3, activity.Series[0].Messages)
+	assert.Zero(t, activity.Series[0].ToolCalls)
 	var again federation.PushResult
 	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &again))
 	assert.Zero(t, again.Sent)
+	assert.Equal(t, int32(3), mutations.Load())
+	assert.Empty(t, events)
 	assert.Equal(t, 1, again.Unchanged)
 	require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
 		_, e := tx.ExecContext(ctx, `UPDATE sessions SET message_count=4 WHERE id='session-a'`)
@@ -364,6 +422,18 @@ func TestFederationSummaryDelivery(t *testing.T) {
 	require.Equal(t, http.StatusOK, request(http.MethodPost, "/api/v1/federation/push", nil, &paused))
 	assert.Zero(t, paused.Sent)
 	assert.Equal(t, beforePause, batches)
+	require.Equal(t, http.StatusOK, request(http.MethodDelete, "/api/v1/federation/shares/"+shares[0].UID, nil, nil))
+	require.Equal(t, http.StatusOK, request(http.MethodDelete, "/api/v1/federation/link", nil, nil))
+	var offline federation.Status
+	require.Equal(t, http.StatusOK, request(http.MethodGet, "/api/v1/federation/link", nil, &offline))
+	require.Len(t, offline.History, 1)
+	assert.Equal(t, peer.URL, offline.History[0].HubOrigin)
+	assert.Equal(t, "hub-a", offline.History[0].HubArchiveID)
+	assert.Equal(t, remote, offline.History[0].NormalizedRemote)
+	var history federation.ShareDetails
+	require.Equal(t, http.StatusOK, request(http.MethodGet, "/api/v1/federation/shares/"+shares[0].UID, nil, &history))
+	assert.Equal(t, "session-a", history.Records["session-a"].SessionID)
+	assert.Equal(t, excludedAttempt, history.Records["session-b"].AttemptHash)
 	assertArchiveHasNoCanary(t, hubDB)
 }
 

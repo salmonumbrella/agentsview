@@ -41,7 +41,7 @@ func (s *Service) ApplyBatch(ctx context.Context, enrollment, spoke, uid string,
 		p := r.Payload
 		identity := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: p.Remote})
 		normalized, ok := export.NormalizeGitRemote(p.Remote)
-		if !ok || normalized != p.Remote || identity.Key != p.ProjectKey || p.Agent == "" || p.MessageCount < 0 || p.UserMessageCount < 0 || p.AssistantMessageCount < 0 || p.ToolCount < 0 || (p.ParentID != nil && *p.ParentID == p.SessionID) {
+		if !ok || normalized != p.Remote || identity.Key != p.ProjectKey || p.Agent == "" || p.MessageCount < 0 || p.UserMessageCount < 0 || p.AssistantMessageCount < 0 || p.ToolCount < 0 || (p.ParentID != nil && *p.ParentID == p.SessionID) || !slices.Contains([]string{"", "completed", "abandoned", "errored", "unknown"}, p.Outcome) || (p.Health != nil && !slices.Contains([]string{"A", "B", "C", "D", "F"}, *p.Health)) {
 			return out, inputError("invalid federation batch")
 		}
 		session := db.Session{ID: p.SessionID, Project: p.Remote, Machine: "federated", Agent: p.Agent, StartedAt: p.StartedAt, EndedAt: p.EndedAt, MessageCount: p.MessageCount, UserMessageCount: p.UserMessageCount, IsAutomated: p.Automated, ParentSessionID: p.ParentID}
@@ -77,5 +77,5 @@ func (s *Service) ApplyBatch(ctx context.Context, enrollment, spoke, uid string,
 		return out, err
 	}
 	result, err := s.db.CommitFederationBatch(ctx, enrollment, spoke, uid, policyDigest, batch.Epoch, batch.Sequence, digest, records)
-	return BatchAck{Committed: result.Committed, Refused: result.Refused}, err
+	return BatchAck{Committed: result.Committed, Refused: result.Refused, Changed: result.Changed}, err
 }

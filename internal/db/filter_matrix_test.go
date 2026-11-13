@@ -46,6 +46,7 @@ func TestFilterMatrixAnalytics(t *testing.T) {
 			if d.name == "clickhouse" {
 				model = "s.id IN (SELECT m.session_id FROM messages m WHERE m.model IN (?,?))"
 			}
+			model = "(" + model + " OR s.id IN (SELECT u.session_id FROM usage_events u WHERE u.source='federation' AND u.model IN (?,?)))"
 			cases := []struct {
 				name string
 				f    AnalyticsFilter
@@ -60,7 +61,7 @@ func TestFilterMatrixAnalytics(t *testing.T) {
 				{"branch", AnalyticsFilter{GitBranch: EncodeBranchFilterToken("team,tools", "topic")}, base + " AND (s.project = ? AND s.git_branch = ?)", []any{"team,tools", "topic"}},
 				{"empty-branch", AnalyticsFilter{GitBranch: EncodeBranchFilterToken("alpha", "") + branchListSep + EncodeBranchFilterToken("alpha", "unknown")}, base + " AND ((s.project = ? AND s.git_branch = ?) OR (s.project = ? AND s.git_branch = ?))", []any{"alpha", "", "alpha", "unknown"}},
 				{"agent", AnalyticsFilter{Agent: "codex"}, base + " AND s.agent = ?", []any{"codex"}},
-				{"model", AnalyticsFilter{Model: " a, b "}, base + " AND " + model, []any{"a", "b"}},
+				{"model", AnalyticsFilter{Model: " a, b "}, base + " AND " + model, []any{"a", "b", "a", "b"}},
 				{"minimum", AnalyticsFilter{MinUserMessages: 3}, base + " AND s.user_message_count >= ?", []any{3}},
 				{"all-overrides-legacy", AnalyticsFilter{AutomatedScope: "all", ExcludeAutomated: true}, base, []any{}},
 				{"human", AnalyticsFilter{AutomatedScope: "human"}, base + " AND s.is_automated = " + d.falseSQL, []any{}},
@@ -94,9 +95,10 @@ func TestFilterMatrixAnalytics(t *testing.T) {
 			if d.name == "clickhouse" {
 				modelSQL = "s.id IN (SELECT m.session_id FROM messages m WHERE m.model IN (?,?))"
 			}
+			modelSQL = "(" + modelSQL + " OR s.id IN (SELECT u.session_id FROM usage_events u WHERE u.source='federation' AND u.model IN (?,?)))"
 			want := "s.message_count > 0 AND 1=1 AND s.deleted_at IS NULL AND s.started_at >= ? AND s.started_at <= ? AND s.machine IN (?,?) AND s.project = ? AND ((s.project = ? AND s.git_branch = ?) OR (s.project = ? AND s.git_branch = ?)) AND s.agent IN (?,?) AND " + modelSQL + " AND s.user_message_count >= ? AND ((s.user_message_count > 1 OR s.is_automated = " + d.trueSQL + ") OR s.relationship_type = 'subagent') AND " + d.activity + " AND " + term
 			assert.Equal(t, matrixSQL(d, want, 2), BuildAnalyticsWhere(f, b, "s.", "", dates))
-			assert.Equal(t, []any{"from", "to", "laptop", "server", "team,tools", "team,tools", "main", "other", "topic", "codex", "claude", "model-a", "model-b", 2, f.ActiveSince}, b.Args())
+			assert.Equal(t, []any{"from", "to", "laptop", "server", "team,tools", "team,tools", "main", "other", "topic", "codex", "claude", "model-a", "model-b", "model-a", "model-b", 2, f.ActiveSince}, b.Args())
 		})
 	}
 }

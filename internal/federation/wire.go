@@ -52,6 +52,7 @@ type BatchRecord struct {
 type BatchAck struct {
 	Committed int64             `json:"committed"`
 	Refused   map[string]string `json:"refused"`
+	Changed   bool              `json:"-"`
 }
 
 // DecodeBatch checks the record limit before allocating decoded payloads.

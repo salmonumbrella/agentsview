@@ -283,6 +283,12 @@ func (s *Server) humaFederationBatch(ctx context.Context, in *federationPeerInpu
 	if err = federationControlError(err); err != nil {
 		return nil, err
 	}
+	if v.Changed {
+		if s.broadcaster != nil {
+			s.broadcaster.Emit("sessions")
+		}
+		s.notifySessionMutation()
+	}
 	return &federationBatchOutput{Status: http.StatusOK, Body: v}, nil
 }
 func (s *Server) humaFederationPush(ctx context.Context, _ *emptyInput) (*jsonOutput[federation.PushResult], error) {

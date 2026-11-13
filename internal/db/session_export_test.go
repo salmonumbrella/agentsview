@@ -1569,6 +1569,25 @@ func TestFederationSelectionRestrictsClaudeSnapshotPeers(t *testing.T) {
 	require.Len(t, selected.Rows, 1)
 	assert.Equal(t, 100, selected.Rows[0].ModelUsage.InputTokens)
 	assert.Equal(t, 5, selected.Rows[0].ModelUsage.OutputTokens)
+	for _, statements := range [][]string{
+		{`UPDATE session_project_identity_snapshots SET normalized_remote='github.com/example/shared' WHERE session_id='peer'`, `INSERT INTO federation_exclusions(session_id,reason) VALUES('peer','fixture')`},
+		{`DELETE FROM federation_exclusions WHERE session_id='peer'`, `INSERT INTO artifact_imported_sessions(origin,gid,manifest_hash,imported_session_id) VALUES('fixture','peer','hash','peer')`},
+		{`DELETE FROM artifact_imported_sessions WHERE imported_session_id='peer'`, `UPDATE sessions SET started_at='2026-04-01T00:00:00Z' WHERE id='peer'`},
+	} {
+		require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+			for _, q := range statements {
+				if _, err := tx.ExecContext(ctx, q); err != nil {
+					return err
+				}
+			}
+			return nil
+		}))
+		selected, err = d.SelectFederationSessions(ctx, "github.com/example/shared", "2026-05-01")
+		require.NoError(t, err)
+		require.Len(t, selected.Rows, 1)
+		assert.Equal(t, 100, selected.Rows[0].ModelUsage.InputTokens)
+		assert.Equal(t, 5, selected.Rows[0].ModelUsage.OutputTokens)
+	}
 }
 
 func TestSessionSummaryExportSelectsCompleteClaudeSnapshotBeforeDedup(t *testing.T) {

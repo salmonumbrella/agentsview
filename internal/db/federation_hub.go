@@ -24,6 +24,7 @@ type FederationHubRecord struct {
 type FederationBatchResult struct {
 	Committed int64             `json:"committed"`
 	Refused   map[string]string `json:"refused"`
+	Changed   bool              `json:"-"`
 }
 
 func (db *DB) PutFederationHubShare(ctx context.Context, spoke string, share FederationHubShare) (FederationHubShare, error) {
@@ -134,7 +135,7 @@ func (db *DB) CommitFederationBatch(ctx context.Context, enrollment, spoke, shar
 		return result, err
 	}
 	for _, write := range writes {
-		if _, err = tx.ExecContext(ctx, `UPDATE sessions SET is_automated=?,parent_session_id=?,relationship_type=? WHERE id=?`, write.Session.IsAutomated, write.Session.ParentSessionID, write.Session.RelationshipType, write.Session.ID); err != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE sessions SET is_automated=?,parent_session_id=?,relationship_type=?,outcome=?,health_grade=? WHERE id=?`, write.Session.IsAutomated, write.Session.ParentSessionID, write.Session.RelationshipType, write.Signals.Outcome, write.Signals.HealthGrade, write.Session.ID); err != nil {
 			return result, err
 		}
 	}
@@ -154,6 +155,7 @@ func (db *DB) CommitFederationBatch(ctx context.Context, enrollment, spoke, shar
 	db.notifyUsageSessions(ids)
 	revocations.flush()
 	result.Committed = sequence
+	result.Changed = len(ids) > 0
 	return result, nil
 }
 

@@ -183,12 +183,19 @@ func TestFederationShareStateSurvivesCopyAndLeave(t *testing.T) {
 	require.NoError(t, source.PutFederationLink(ctx, link))
 	share := FederationShare{UID: "share-a", LinkUID: "link-a", NormalizedRemote: "github.com/example/api", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: `{"selected":1}`, PolicyDigest: "digest-a"}
 	require.NoError(t, source.PutFederationShare(ctx, share))
+	require.NoError(t, source.RecordFederationAttempt(ctx, share.UID, []FederationDelivery{{RecordUID: "record", SessionID: "session-a", Hash: "confirmed"}}))
+	require.NoError(t, source.RecordFederationDelivery(ctx, share.UID, []FederationDelivery{{RecordUID: "record", SessionID: "session-a", Hash: "confirmed", State: "sent"}}))
 	require.NoError(t, source.Update(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO sessions (id,project,first_message) VALUES ('session-a','fixture','')`)
 		return err
 	}))
 	require.NoError(t, source.PutFederationExclusion(ctx, "session-a", "private"))
 	require.NoError(t, target.CopyFederationStateFrom(ctx, source.Path()))
+	ledger, err := target.FederationLedger(ctx, share.UID)
+	require.NoError(t, err)
+	assert.Equal(t, "https://hub.example", ledger["record"].HubOrigin)
+	assert.Equal(t, "hub-a", ledger["record"].HubArchiveID)
+	assert.Equal(t, "github.com/example/api", ledger["record"].NormalizedRemote)
 	shares, err := target.ListFederationShares(ctx, "link-a")
 	require.NoError(t, err)
 	require.Len(t, shares, 1)
@@ -339,6 +346,8 @@ func TestFederationDeliveryStateSurvivesCopyAndMarksVersion(t *testing.T) {
 func TestFederationAttemptPreservesAcknowledgmentAndQuarantine(t *testing.T) {
 	d := testDB(t)
 	ctx := t.Context()
+	require.NoError(t, d.PutFederationLink(ctx, FederationLink{UID: "link", HubOrigin: "https://hub.example", HubArchiveID: "hub", EnrollmentUID: "enrollment", Member: "member", TokenFile: "/fixture/token", ProtocolVersion: 1, State: "active"}))
+	require.NoError(t, d.PutFederationShare(ctx, FederationShare{UID: "share", LinkUID: "link", NormalizedRemote: "github.com/example/api", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: `{}`, PolicyDigest: "digest"}))
 	require.NoError(t, d.RecordFederationDelivery(ctx, "share", []FederationDelivery{{RecordUID: "old", SessionID: "old", Hash: "confirmed", State: "sent"}}))
 	require.NoError(t, d.PutFederationQuarantine(ctx, FederationQuarantine{ShareUID: "share", Error: FederationCollision, Sequence: 3}))
 	require.NoError(t, d.RecordFederationAttempt(ctx, "share", []FederationDelivery{{RecordUID: "old", SessionID: "old", Hash: "changed"}, {RecordUID: "new", SessionID: "new", Hash: "first"}}))
@@ -347,6 +356,9 @@ func TestFederationAttemptPreservesAcknowledgmentAndQuarantine(t *testing.T) {
 	assert.Equal(t, "sent", ledger["old"].State)
 	assert.Equal(t, "confirmed", ledger["old"].Hash)
 	assert.Equal(t, "changed", ledger["old"].AttemptHash)
+	assert.Equal(t, "https://hub.example", ledger["old"].HubOrigin)
+	assert.Equal(t, "hub", ledger["old"].HubArchiveID)
+	assert.Equal(t, "github.com/example/api", ledger["old"].NormalizedRemote)
 	assert.Equal(t, "unconfirmed", ledger["new"].State)
 	assert.Empty(t, ledger["new"].Hash)
 	assert.Equal(t, "first", ledger["new"].AttemptHash)

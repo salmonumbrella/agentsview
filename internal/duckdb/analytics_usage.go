@@ -54,10 +54,33 @@ func duckBuildAnalyticsWhere(f db.AnalyticsFilter, dateCol, tablePrefix string, 
 	where, args := readbase.AnalyticsWhere(f, dateCol, tablePrefix, includeDate, "CAST(? AS TIMESTAMP)", localDate, localDateArgs, db.DuckDBQueryDialect())
 	if includeTime && (f.DayOfWeek != nil || f.Hour != nil) {
 		pred, pargs := duckAnalyticsMessageTimeExists(f, tablePrefix+"id")
-		where += " AND " + pred
+		usagePred, usageArgs := duckAnalyticsFederationTimeExists(f, tablePrefix)
+		where += " AND (" + pred + " OR " + usagePred + ")"
 		args = append(args, pargs...)
+		args = append(args, usageArgs...)
 	}
 	return where, args
+}
+
+func duckAnalyticsFederationTimeExists(f db.AnalyticsFilter, prefix string) (string, []any) {
+	usagePred := "u.source = 'federation'"
+	var args []any
+	if pred, values := readbase.AnalyticsCSVPredicate("u.model", f.Model, db.DuckDBQueryDialect()); pred != "" {
+		usagePred += " AND " + pred
+		args = append(args, values...)
+	}
+	preds := []string{prefix + "started_at IS NOT NULL"}
+	if f.DayOfWeek != nil {
+		local, values := duckAnalyticsLocalTimeExpr(prefix+"started_at", f)
+		preds = append(preds, "((CAST(strftime("+local+", '%w') AS INTEGER) + 6) % 7) = ?")
+		args = append(args, append(values, *f.DayOfWeek)...)
+	}
+	if f.Hour != nil {
+		local, values := duckAnalyticsLocalTimeExpr(prefix+"started_at", f)
+		preds = append(preds, "CAST(strftime("+local+", '%H') AS INTEGER) = ?")
+		args = append(args, append(values, *f.Hour)...)
+	}
+	return "(" + prefix + "id IN (SELECT u.session_id FROM usage_events u WHERE " + usagePred + ") AND " + strings.Join(preds, " AND ") + ")", args
 }
 
 func duckAnalyticsLocalDateExpr(

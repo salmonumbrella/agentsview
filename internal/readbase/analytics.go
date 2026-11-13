@@ -121,9 +121,15 @@ func (s *Analytics) analyticsSessionsModelTimeFiltered(
 	if err != nil {
 		return nil, err
 	}
+	stats := make(map[string]db.MessageStats)
+	if err := s.addFederationStats(ctx, candidateIDs, f, stats); err != nil {
+		return nil, err
+	}
 	out := make([]AnalyticsSession, 0, len(sessions))
 	for _, session := range sessions {
-		if _, ok := scope[session.ID]; ok {
+		_, matched := scope[session.ID]
+		_, federation := stats[session.ID]
+		if matched || federation {
 			out = append(out, session)
 		}
 	}
@@ -139,7 +145,11 @@ func (s *Analytics) getAnalyticsFilteredMessageStats(
 	if err != nil {
 		return nil, err
 	}
-	return scope.StatsBySession(), nil
+	stats := scope.StatsBySession()
+	if err := s.addFederationStats(ctx, sessionIDs, f, stats); err != nil {
+		return nil, err
+	}
+	return stats, nil
 }
 
 func (s *Analytics) analyticsSessionsWithModelMessageCounts(
