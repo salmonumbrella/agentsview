@@ -613,6 +613,11 @@ func runServe(ctx context.Context, cfg config.Config, opts serveOptions, restart
 		if err != nil {
 			fatal("federation archive identity: %v", err)
 		}
+		if cfg.Federation.Role == "hub" {
+			if err := database.BindFederationPulseAuthority(ctx); err != nil {
+				fatal("federation pulse authority: %v", err)
+			}
+		}
 		federationService = federation.NewService(cfg.Federation.Role, archiveID, cfg.Federation.Hub, database)
 	}
 	jobs := []poller.Job{pricingRefreshJob(database, pricingRefreshRunner), codexCloudSyncJob(codexCloudSync, idleTracker), codexCloudLiveJob(codexCloudMonitor, idleTracker)}

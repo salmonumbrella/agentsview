@@ -19,6 +19,17 @@ type pulseAuthorityReference struct {
 	ProofVersion int    `json:"proof_version"`
 }
 
+// BindFederationPulseAuthority binds the hub archive to its per-user registry.
+// Publication also requires the separate proof and admission owners.
+func (db *DB) BindFederationPulseAuthority(ctx context.Context) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("locating pulse authority home: %w", err)
+	}
+	_, err = db.bindPulseAuthority(ctx, home, true)
+	return err
+}
+
 // bindPulseAuthority binds metadata while holding the registry lock through the
 // source transaction. It does not activate publication or establish a frontier.
 // Callers must establish managed-copy provenance before allowing creation.

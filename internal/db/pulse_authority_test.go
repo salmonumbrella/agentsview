@@ -94,3 +94,23 @@ func TestPulseAuthorityResyncCopyCarriesReferenceAndRequiresRejoin(t *testing.T)
 	_, err = target.bindPulseAuthority(ctx, home, true)
 	require.Error(t, err, "a staged copy cannot activate its inherited reference")
 }
+
+func TestBindFederationPulseAuthorityUsesHomeAndRetainsBinding(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.BindFederationPulseAuthority(ctx))
+	var first string
+	require.NoError(t, d.Reader().QueryRow(ctx, `SELECT value FROM archive_metadata WHERE key=?`, pulseAuthorityMetadataKey).Scan(&first))
+	require.NotEmpty(t, first)
+	require.NoError(t, d.BindFederationPulseAuthority(ctx))
+	var second string
+	require.NoError(t, d.Reader().QueryRow(ctx, `SELECT value FROM archive_metadata WHERE key=?`, pulseAuthorityMetadataKey).Scan(&second))
+	assert.Equal(t, first, second)
+	other := t.TempDir()
+	t.Setenv("HOME", other)
+	t.Setenv("USERPROFILE", other)
+	require.Error(t, d.BindFederationPulseAuthority(ctx))
+}
