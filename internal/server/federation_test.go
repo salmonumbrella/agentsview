@@ -654,6 +654,7 @@ func (w *pulseLostResponseWriter) Write(_ []byte) (int, error) {
 func TestFederationPulseHTTPProtectsHistoryAfterUpdate(t *testing.T) {
 	for _, scenario := range []string{"delivered", "lost-response", "independent-reader"} {
 		t.Run(scenario, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
 			database := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "archive.db"))
 			ctx := t.Context()
 			started := "2020-07-29T09:00:00Z"

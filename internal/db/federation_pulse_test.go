@@ -380,6 +380,7 @@ func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T)
 func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 	for _, scenario := range []string{"window", "reverse-window", "update", "rolled-back-update", "copy-before-publication", "copy-after-publication", "cancel-before-admission", "concurrent", "purge-regrant", "untraced-write", "reopen", "second-handle", "closed-writer", "untraced-session", "untraced-record", "untraced-message", "untraced-tool-result", "untraced-exclusion"} {
 		t.Run(scenario, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
 			d := testDB(t)
 			ctx := t.Context()
 			start := "2026-07-29T09:00:00Z"
