@@ -3,7 +3,9 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	"go.kenn.io/agentsview/internal/activity"
@@ -106,6 +108,14 @@ func (db *DB) loadReportingExportSourceScoped(
 	)
 	if err != nil {
 		return source, err
+	}
+	if scope != nil {
+		extra, err := reportingMessageLessSessions(ctx, tx, scope, rangeStartUTC, rangeEndUTC)
+		if err != nil {
+			return source, err
+		}
+		sessions = append(sessions, extra...)
+		sort.Slice(sessions, func(i, j int) bool { return sessions[i].SessionID < sessions[j].SessionID })
 	}
 	sessions, activityIDs = scopeReportingSessions(sessions, scope)
 	events, err := db.activityReportActivityFrom(ctx, tx, activityIDs)
@@ -220,6 +230,38 @@ func (db *DB) loadReportingExportSourceScoped(
 		PaddedUsageRows:     len(usageCandidates) + len(standaloneUsage),
 	}
 	return source, nil
+}
+
+// reportingMessageLessSessions supplies scoped dated session evidence without
+// inventing messages or changing the ordinary export's activity eligibility.
+func reportingMessageLessSessions(ctx context.Context, tx *sql.Tx, scope map[string]struct{}, start, end string) ([]activity.SessionMeta, error) {
+	ids := make([]string, 0, len(scope))
+	for id := range scope {
+		ids = append(ids, id)
+	}
+	encoded, err := json.Marshal(ids)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT s.id,
+		COALESCE(NULLIF(s.display_name,''), NULLIF(s.session_name,''), NULLIF(s.project,''),s.id),
+		s.project,s.agent,s.machine,COALESCE(s.started_at,''),COALESCE(s.ended_at,''),
+		s.is_automated,s.relationship_type='subagent'
+		FROM sessions s WHERE s.message_count=0 AND s.deleted_at IS NULL
+		AND s.id IN (SELECT value FROM json_each(?1)) AND `+activityReportSessionWindowPredicate(), string(encoded), start, start, end)
+	if err != nil {
+		return nil, fmt.Errorf("query message-less reporting sessions: %w", err)
+	}
+	defer rows.Close()
+	var result []activity.SessionMeta
+	for rows.Next() {
+		var session activity.SessionMeta
+		if err := rows.Scan(&session.SessionID, &session.Title, &session.Project, &session.Agent, &session.Machine, &session.StartedAt, &session.EndedAt, &session.IsAutomated, &session.IsSubagent); err != nil {
+			return nil, fmt.Errorf("scan message-less reporting session: %w", err)
+		}
+		result = append(result, session)
+	}
+	return result, rows.Err()
 }
 
 // nil means the ordinary unscoped export; an empty non-nil scope selects nothing.

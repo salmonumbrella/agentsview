@@ -35,6 +35,9 @@ func reportingRangeFrom(ctx context.Context, reader sessionExportQuerier, now ti
 	// ponytail: scan timestamp metadata; index normalized bounds if discovery
 	// becomes a measured bottleneck on large archives.
 	activityWhere, _ := (AnalyticsFilter{IncludeSubagents: true, IncludeForks: true}).buildWhereWithDate("", false, "s.id")
+	if scope != nil {
+		activityWhere = "s.deleted_at IS NULL"
+	}
 	var hasCursorUsage bool
 	err := reader.QueryRowContext(ctx, `SELECT EXISTS(
 		SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cursor_usage_events'

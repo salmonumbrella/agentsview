@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"time"
 
+	"go.kenn.io/agentsview/internal/activity"
 	"go.kenn.io/agentsview/internal/export"
 )
 
@@ -205,4 +207,383 @@ func federationPulseSignals(ctx context.Context, tx *sql.Tx, ids []string) (map[
 		return rows.Err()
 	})
 	return out, err
+}
+
+// FederationPulseMetric makes missing evidence and privacy withholding explicit.
+type FederationPulseMetric struct {
+	Value *int64 `json:"value"`
+	State string `json:"state"`
+}
+
+type FederationPulseRatio struct {
+	Value *float64 `json:"value"`
+	State string   `json:"state"`
+}
+
+type FederationPulseGroup struct {
+	Key     string                           `json:"key"`
+	Metrics map[string]FederationPulseMetric `json:"metrics"`
+}
+
+type FederationPulseProject struct {
+	Key        string                           `json:"key"`
+	Totals     map[string]FederationPulseMetric `json:"totals"`
+	Ratios     map[string]FederationPulseRatio  `json:"ratios"`
+	Agents     []FederationPulseGroup           `json:"agents"`
+	Models     []FederationPulseGroup           `json:"models"`
+	Outcomes   []FederationPulseGroup           `json:"outcomes"`
+	Grades     []FederationPulseGroup           `json:"grades"`
+	Categories []FederationPulseGroup           `json:"categories"`
+}
+
+type FederationPulse struct {
+	Since         *string                          `json:"since"`
+	ClosedThrough string                           `json:"closed_through"`
+	Totals        map[string]FederationPulseMetric `json:"totals"`
+	Ratios        map[string]FederationPulseRatio  `json:"ratios"`
+	Projects      []FederationPulseProject         `json:"projects"`
+	Agents        []FederationPulseGroup           `json:"agents"`
+	Models        []FederationPulseGroup           `json:"models"`
+	Outcomes      []FederationPulseGroup           `json:"outcomes"`
+	Grades        []FederationPulseGroup           `json:"grades"`
+	Categories    []FederationPulseGroup           `json:"categories"`
+	Suppressed    bool                             `json:"suppressed"`
+}
+
+type federationPulseCellKey struct{ kind, key, metric string }
+type federationPulseCell struct {
+	value    int64
+	sessions map[string]struct{}
+}
+type federationPulseAccumulator struct {
+	owners         map[string]federationPulseOwner
+	projects       map[string]map[federationPulseCellKey]*federationPulseCell
+	unsafeProjects map[string]bool
+	invalid        bool
+}
+
+func newFederationPulseAccumulator(owners map[string]federationPulseOwner) *federationPulseAccumulator {
+	return &federationPulseAccumulator{owners: owners, projects: map[string]map[federationPulseCellKey]*federationPulseCell{}, unsafeProjects: map[string]bool{}}
+}
+
+func (a *federationPulseAccumulator) add(id, kind, key, metric string, value int64) {
+	owner, ok := a.owners[id]
+	if !ok || owner.member == "" || owner.project == "" {
+		a.invalid = true
+		return
+	}
+	cells := a.projects[owner.project]
+	if cells == nil {
+		cells = map[federationPulseCellKey]*federationPulseCell{}
+		a.projects[owner.project] = cells
+	}
+	cellKey := federationPulseCellKey{kind, key, metric}
+	cell := cells[cellKey]
+	if cell == nil {
+		cell = &federationPulseCell{sessions: map[string]struct{}{}}
+		cells[cellKey] = cell
+	}
+	if value > 0 && cell.value > math.MaxInt64-value || value < 0 && cell.value < math.MinInt64-value {
+		a.invalid = true
+		return
+	}
+	cell.value += value
+	cell.sessions[id] = struct{}{}
+}
+
+var federationPulseTotalMetrics = []string{
+	"sessions", "active_projects", "tokens", "cost_microdollars", "automated_sessions",
+	"usage_observed_sessions", "health_observed_sessions", "outcome_observed_sessions",
+}
+
+func federationPulseMetrics(cells map[federationPulseCellKey]*federationPulseCell, kind, key string, defaults []string, suppressed bool) map[string]FederationPulseMetric {
+	out := make(map[string]FederationPulseMetric, len(defaults))
+	for _, metric := range defaults {
+		state := "unavailable"
+		if suppressed {
+			state = "suppressed"
+		}
+		out[metric] = FederationPulseMetric{State: state}
+	}
+	for k, cell := range cells {
+		if k.kind != kind || k.key != key {
+			continue
+		}
+		if suppressed {
+			out[k.metric] = FederationPulseMetric{State: "suppressed"}
+		} else {
+			value := cell.value
+			out[k.metric] = FederationPulseMetric{Value: &value, State: "available"}
+		}
+	}
+	return out
+}
+
+func federationPulseGroups(cells map[federationPulseCellKey]*federationPulseCell, kind string) []FederationPulseGroup {
+	keys := map[string]struct{}{}
+	for key := range cells {
+		if key.kind == kind {
+			keys[key.key] = struct{}{}
+		}
+	}
+	ordered := make([]string, 0, len(keys))
+	for key := range keys {
+		ordered = append(ordered, key)
+	}
+	slices.Sort(ordered)
+	out := make([]FederationPulseGroup, 0, len(ordered))
+	for _, key := range ordered {
+		out = append(out, FederationPulseGroup{Key: key, Metrics: federationPulseMetrics(cells, kind, key, nil, false)})
+	}
+	return out
+}
+
+func federationPulseRatios(totals map[string]FederationPulseMetric) map[string]FederationPulseRatio {
+	out := map[string]FederationPulseRatio{}
+	for name, numerator := range map[string]string{
+		"automation_share": "automated_sessions", "usage_coverage": "usage_observed_sessions",
+		"health_coverage": "health_observed_sessions", "outcome_coverage": "outcome_observed_sessions",
+	} {
+		n, d := totals[numerator], totals["sessions"]
+		state := "unavailable"
+		var value *float64
+		if n.State == "suppressed" || d.State == "suppressed" {
+			state = "suppressed"
+		} else if n.Value != nil && d.Value != nil && *d.Value > 0 {
+			ratio := float64(*n.Value) / float64(*d.Value)
+			value, state = &ratio, "available"
+		}
+		out[name] = FederationPulseRatio{Value: value, State: state}
+	}
+	return out
+}
+
+func (a *federationPulseAccumulator) release(minimum int) FederationPulse {
+	support := map[string]map[string]map[string]struct{}{}
+	for project, cells := range a.projects {
+		support[project] = map[string]map[string]struct{}{}
+		for key, cell := range cells {
+			encoded, _ := json.Marshal([]string{key.kind, key.key, key.metric})
+			support[project][string(encoded)] = cell.sessions
+		}
+	}
+	hidden, suppressGlobal := federationPulseSuppression(support, a.owners, minimum)
+	for project := range a.unsafeProjects {
+		hidden[project] = true
+		suppressGlobal = true
+	}
+	suppressGlobal = suppressGlobal || a.invalid
+	global := map[federationPulseCellKey]*federationPulseCell{}
+	projects := make([]FederationPulseProject, 0, len(a.projects))
+	keys := make([]string, 0, len(a.projects))
+	for key := range a.projects {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		cells := a.projects[key]
+		if !hidden[key] && !a.invalid {
+			totals := federationPulseMetrics(cells, "total", "", federationPulseTotalMetrics, false)
+			projects = append(projects, FederationPulseProject{Key: key,
+				Totals: totals, Ratios: federationPulseRatios(totals),
+				Agents: federationPulseGroups(cells, "agent"), Models: federationPulseGroups(cells, "model"),
+				Outcomes: federationPulseGroups(cells, "outcome"), Grades: federationPulseGroups(cells, "grade"), Categories: federationPulseGroups(cells, "category")})
+		}
+		for cellKey, cell := range cells {
+			g := global[cellKey]
+			if g == nil {
+				g = &federationPulseCell{sessions: map[string]struct{}{}}
+				global[cellKey] = g
+			}
+			if cell.value > 0 && g.value > math.MaxInt64-cell.value || cell.value < 0 && g.value < math.MinInt64-cell.value {
+				suppressGlobal = true
+			} else {
+				g.value += cell.value
+			}
+			for id := range cell.sessions {
+				g.sessions[id] = struct{}{}
+			}
+		}
+	}
+	totals := federationPulseMetrics(global, "total", "", federationPulseTotalMetrics, suppressGlobal)
+	result := FederationPulse{Totals: totals, Ratios: federationPulseRatios(totals), Projects: projects, Suppressed: suppressGlobal}
+	if !suppressGlobal {
+		result.Agents = federationPulseGroups(global, "agent")
+		result.Models = federationPulseGroups(global, "model")
+		result.Outcomes = federationPulseGroups(global, "outcome")
+		result.Grades = federationPulseGroups(global, "grade")
+		result.Categories = federationPulseGroups(global, "category")
+	}
+	return result
+}
+
+// readFederationPulse builds one private aggregate, then releases it once.
+func (db *DB) readFederationPulse(ctx context.Context, since string, minimum int, now time.Time) (FederationPulse, error) {
+	var accumulator *federationPulseAccumulator
+	sessions := map[string]activity.SessionMeta{}
+	signals := map[string]SignalRow{}
+	usageSeen := map[string]bool{}
+	modelsSeen := map[string]map[string]bool{}
+	rememberModel := func(id, model string) {
+		if model == "" {
+			return
+		}
+		if modelsSeen[id] == nil {
+			modelsSeen[id] = map[string]bool{}
+		}
+		modelsSeen[id][model] = true
+	}
+	var windowStart *string
+	rng, err := db.readFederationPulseSnapshot(ctx, since, now, func(tx *sql.Tx, start, end time.Time, owners map[string]federationPulseOwner, source reportingDaySource) error {
+		if accumulator == nil {
+			accumulator = newFederationPulseAccumulator(owners)
+		}
+		if windowStart == nil {
+			value := start.Format(time.DateOnly)
+			windowStart = &value
+		}
+		query, err := activity.ResolveQuery(activity.QueryInput{Preset: "custom", From: start.Format(time.RFC3339), To: end.Format(time.RFC3339), Timezone: "UTC"}, end)
+		if err != nil {
+			return err
+		}
+		usage, byID, err := reportingMaterializedUsage(query, source)
+		if err != nil {
+			return err
+		}
+		first, _ := reportingSessionEvidence(start, end, time.Duration(query.GapCapSeconds)*time.Second, mergeReportingSessions(source.activitySessions, source.usageSessions), source.createdAt, source.activityEvents, usage)
+		for _, event := range source.activityEvents {
+			at, err := parseTimestamp(event.Timestamp)
+			if err == nil && !at.Before(start) && at.Before(end) {
+				rememberModel(event.SessionID, event.Model)
+			}
+		}
+		var newIDs []string
+		for id := range first {
+			if _, known := sessions[id]; known {
+				continue
+			}
+			meta, ok := byID[id]
+			if !ok {
+				accumulator.invalid = true
+				continue
+			}
+			sessions[id] = meta
+			newIDs = append(newIDs, id)
+		}
+		stored, err := federationPulseSignals(ctx, tx, newIDs)
+		if err != nil {
+			return err
+		}
+		for id, row := range stored {
+			signals[id] = row
+		}
+		for _, row := range usage {
+			id := row.SessionID
+			owner, ok := owners[id]
+			if !ok {
+				accumulator.invalid = true
+				continue
+			}
+			if row.SourceSessionID != "" {
+				origin, ok := owners[row.SourceSessionID]
+				if !ok || origin.member != owner.member || origin.project != owner.project {
+					accumulator.unsafeProjects[owner.project] = true
+					if ok {
+						accumulator.unsafeProjects[origin.project] = true
+					}
+					continue
+				}
+			}
+			usageSeen[id] = true
+			model := row.Model
+			if model == "" {
+				model = "unknown"
+			}
+			rememberModel(id, model)
+			agent := row.Agent
+			if agent == "" {
+				agent = "unknown"
+			}
+			for _, amount := range []int{row.InputTokens, row.OutputTokens, row.CacheCreationTokens, row.CacheReadTokens} {
+				for _, group := range [][2]string{{"total", ""}, {"agent", agent}, {"model", model}} {
+					accumulator.add(id, group[0], group[1], "tokens", int64(amount))
+				}
+			}
+			if row.Priced || row.Cost.Microdollars != 0 {
+				for _, group := range [][2]string{{"total", ""}, {"agent", agent}, {"model", model}} {
+					accumulator.add(id, group[0], group[1], "cost_microdollars", row.Cost.Microdollars)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return FederationPulse{}, err
+	}
+	if accumulator == nil {
+		accumulator = newFederationPulseAccumulator(nil)
+	}
+	projects := map[string]bool{}
+	for id, meta := range sessions {
+		owner, ok := accumulator.owners[id]
+		if !ok {
+			accumulator.invalid = true
+			continue
+		}
+		accumulator.add(id, "total", "", "sessions", 1)
+		activeProject := int64(0)
+		if !projects[owner.project] {
+			activeProject = 1
+			projects[owner.project] = true
+		}
+		accumulator.add(id, "total", "", "active_projects", activeProject)
+		category := meta.ActivityCategory()
+		automated := int64(0)
+		if category == "automated" {
+			automated = 1
+		}
+		accumulator.add(id, "total", "", "automated_sessions", automated)
+		accumulator.add(id, "category", category, "sessions", 1)
+		agent := meta.Agent
+		if agent == "" {
+			agent = "unknown"
+		}
+		accumulator.add(id, "agent", agent, "sessions", 1)
+		for model := range modelsSeen[id] {
+			accumulator.add(id, "model", model, "sessions", 1)
+		}
+		if usageSeen[id] {
+			accumulator.add(id, "total", "", "usage_observed_sessions", 1)
+			accumulator.add(id, "availability", "usage", "sessions", 1)
+		} else {
+			accumulator.add(id, "availability", "no_usage", "sessions", 1)
+		}
+		signal, ok := signals[id]
+		if !ok {
+			accumulator.invalid = true
+			continue
+		}
+		outcomes, grades := storedSignalDistributions([]SignalRow{signal})
+		for outcome := range outcomes {
+			accumulator.add(id, "outcome", outcome, "sessions", 1)
+			accumulator.add(id, "total", "", "outcome_observed_sessions", 1)
+		}
+		if len(outcomes) == 0 {
+			accumulator.add(id, "availability", "no_outcome", "sessions", 1)
+		}
+		for grade := range grades {
+			accumulator.add(id, "grade", grade, "sessions", 1)
+			accumulator.add(id, "total", "", "health_observed_sessions", 1)
+		}
+		if len(grades) == 0 {
+			accumulator.add(id, "availability", "no_health", "sessions", 1)
+		}
+	}
+	result := accumulator.release(minimum)
+	result.Since = windowStart
+	if since != "" {
+		result.Since = &since
+	}
+	result.ClosedThrough = rng.ClosedThrough
+	return result, nil
 }

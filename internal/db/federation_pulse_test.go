@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -142,4 +143,120 @@ func TestFederationPulseReadsStoredSignalsForSelectedSessions(t *testing.T) {
 	assert.Empty(t, got["missing"].Outcome)
 	assert.Nil(t, got["missing"].HealthGrade)
 	assert.NotContains(t, got, "other")
+}
+
+func TestFederationPulseReleaseWithholdsUnsafeProjectsAndTotals(t *testing.T) {
+	owners := map[string]federationPulseOwner{
+		"session-a": {member: "alice", project: "safe"},
+		"session-b": {member: "bob", project: "safe"},
+		"session-c": {member: "carol", project: "safe"},
+		"session-d": {member: "dave", project: "private-key"},
+	}
+	a := newFederationPulseAccumulator(owners)
+	for _, item := range []struct {
+		id     string
+		tokens int64
+	}{{"session-a", 10}, {"session-b", 20}, {"session-c", 30}, {"session-d", 9}} {
+		a.add(item.id, "total", "", "tokens", item.tokens)
+		a.add(item.id, "model", "model-x", "tokens", item.tokens)
+	}
+	got := a.release(3)
+	require.True(t, got.Suppressed)
+	require.Len(t, got.Projects, 1)
+	assert.Equal(t, "safe", got.Projects[0].Key)
+	assert.Equal(t, Ptr(int64(60)), got.Projects[0].Totals["tokens"].Value)
+	assert.Equal(t, "suppressed", got.Totals["tokens"].State)
+	assert.Nil(t, got.Totals["tokens"].Value)
+	encoded, err := json.Marshal(got)
+	require.NoError(t, err)
+	for _, secret := range []string{"private-key", "session-a", "session-d", "alice", "dave"} {
+		assert.NotContains(t, string(encoded), secret)
+	}
+}
+
+func TestFederationPulseReleaseDistinguishesUnavailableAndCostSupport(t *testing.T) {
+	owners := map[string]federationPulseOwner{
+		"a": {member: "one", project: "p"}, "b": {member: "two", project: "p"},
+		"c": {member: "three", project: "p"},
+	}
+	a := newFederationPulseAccumulator(owners)
+	for _, id := range []string{"a", "b", "c"} {
+		a.add(id, "total", "", "tokens", 10)
+	}
+	a.add("a", "total", "", "cost_microdollars", 7)
+	a.add("b", "total", "", "cost_microdollars", 8)
+	got := a.release(3)
+	assert.True(t, got.Suppressed)
+	assert.Empty(t, got.Projects)
+	assert.Equal(t, "suppressed", got.Totals["tokens"].State)
+	empty := newFederationPulseAccumulator(nil).release(3)
+	assert.Equal(t, "unavailable", empty.Totals["tokens"].State)
+	assert.Nil(t, empty.Totals["tokens"].Value)
+}
+
+func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	for _, item := range []struct {
+		id, member string
+		tokens     int
+	}{{"one", "alice", 10}, {"two", "bob", 20}, {"three", "carol", 30}} {
+		require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr-" + item.id, SpokeArchiveID: "spoke-" + item.id, Member: item.member, CredentialSHA256: "digest-" + item.id}))
+		_, err := d.PutFederationHubShare(ctx, "spoke-"+item.id, FederationHubShare{UID: "share-" + item.id, EnrollmentUID: "enr-" + item.id, Remote: "example/repo", ProjectKey: "project-key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+		require.NoError(t, err)
+		started := "2026-07-28T09:00:00Z"
+		record := FederationHubRecord{UID: item.id, Hash: "hash", Remote: "example/repo", ProjectKey: "project-key", Write: SessionBatchWrite{Session: Session{ID: item.id, Project: "example/repo", Machine: "federated", Agent: "codex", StartedAt: &started}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: item.tokens, OccurredAt: "2026-07-28T09:05:00Z", DedupKey: item.id}}}}
+		_, err = d.CommitFederationBatch(ctx, "enr-"+item.id, "spoke-"+item.id, "share-"+item.id, "policy", 1, 1, "batch", []FederationHubRecord{record})
+		require.NoError(t, err)
+	}
+	got, err := d.readFederationPulse(ctx, "2026-07-28", 3, time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	assert.False(t, got.Suppressed)
+	assert.Equal(t, Ptr(int64(3)), got.Totals["sessions"].Value)
+	assert.Equal(t, Ptr(int64(60)), got.Totals["tokens"].Value)
+	assert.Equal(t, "unavailable", got.Totals["health_observed_sessions"].State)
+	require.Len(t, got.Projects, 1)
+	assert.Equal(t, "project-key", got.Projects[0].Key)
+	assert.Equal(t, Ptr(int64(60)), got.Projects[0].Totals["tokens"].Value)
+	require.Len(t, got.Projects[0].Models, 1)
+	assert.Equal(t, Ptr(int64(3)), got.Projects[0].Models[0].Metrics["sessions"].Value)
+}
+
+func TestFederationPulseIncludesDatedMessageLessSignals(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	for _, name := range []string{"one", "two", "three"} {
+		require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "e-" + name, SpokeArchiveID: "s-" + name, Member: name, CredentialSHA256: "d-" + name}))
+		_, err := d.PutFederationHubShare(ctx, "s-"+name, FederationHubShare{UID: "h-" + name, EnrollmentUID: "e-" + name, Remote: "example/repo", ProjectKey: "project-key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+		require.NoError(t, err)
+		start := "2026-07-28T09:00:00Z"
+		record := FederationHubRecord{UID: name, Hash: "hash", Remote: "example/repo", ProjectKey: "project-key", Write: SessionBatchWrite{Session: Session{ID: name, Project: "example/repo", Agent: "codex", StartedAt: &start}, Signals: SessionSignalUpdate{Outcome: "completed", HealthGrade: Ptr("A")}}}
+		_, err = d.CommitFederationBatch(ctx, "e-"+name, "s-"+name, "h-"+name, "policy", 1, 1, "batch", []FederationHubRecord{record})
+		require.NoError(t, err)
+	}
+	got, err := d.readFederationPulse(ctx, "", 3, time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	assert.Equal(t, Ptr("2026-07-28"), got.Since)
+	assert.Equal(t, Ptr(int64(3)), got.Totals["sessions"].Value)
+	assert.Equal(t, "unavailable", got.Totals["tokens"].State)
+	require.Len(t, got.Projects, 1)
+	assert.Equal(t, Ptr(int64(3)), got.Projects[0].Outcomes[0].Metrics["sessions"].Value)
+	assert.Equal(t, Ptr(int64(3)), got.Projects[0].Grades[0].Metrics["sessions"].Value)
+}
+
+func TestFederationPulseReleaseRatiosAndGlobalDistributions(t *testing.T) {
+	owners := map[string]federationPulseOwner{"a": {member: "one", project: "p"}, "b": {member: "two", project: "p"}, "c": {member: "three", project: "p"}}
+	a := newFederationPulseAccumulator(owners)
+	for _, id := range []string{"a", "b", "c"} {
+		a.add(id, "total", "", "sessions", 1)
+		a.add(id, "total", "", "automated_sessions", 1)
+		a.add(id, "outcome", "unknown", "sessions", 1)
+	}
+	got := a.release(3)
+	require.False(t, got.Suppressed)
+	assert.Equal(t, Ptr(float64(1)), got.Ratios["automation_share"].Value)
+	assert.Equal(t, "unavailable", got.Ratios["health_coverage"].State)
+	require.Len(t, got.Outcomes, 1)
+	assert.Equal(t, "unknown", got.Outcomes[0].Key)
+	assert.Equal(t, Ptr(int64(3)), got.Outcomes[0].Metrics["sessions"].Value)
 }
