@@ -212,3 +212,14 @@ func TestFederationHubDisablesLocalDiscovery(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) { require.EqualError(t, tc.run(), "local discovery is disabled on a federation hub") })
 	}
 }
+
+func TestFederationStatusPrintsStopReceipts(t *testing.T) {
+	var out bytes.Buffer
+	status := federation.Status{ArchiveID: "spoke", History: []federation.DeliveryHistory{
+		{ShareUID: "share-a", HubOrigin: "https://a.example", HubArchiveID: "hub-a", NormalizedRemote: "example.org/a", StopIntent: "remove", StopReceipt: "purged"},
+		{ShareUID: "share-b", HubOrigin: "https://b.example", HubArchiveID: "hub-b", NormalizedRemote: "example.org/b", StopIntent: "leave", StopReceipt: "retained"},
+	}}
+	printFederationStatus(&out, status)
+	assert.Contains(t, out.String(), "Share share-a (current: false): hub https://a.example, archive hub-a, repository example.org/a; sent 0, refused 0, tombstoned 0, unconfirmed 0; stop remove, receipt purged\n")
+	assert.Contains(t, out.String(), "Share share-b (current: false): hub https://b.example, archive hub-b, repository example.org/b; sent 0, refused 0, tombstoned 0, unconfirmed 0; stop leave, receipt retained\n")
+}

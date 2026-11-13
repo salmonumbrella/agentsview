@@ -179,10 +179,7 @@ func newFederationCommand() *cobra.Command {
 		if asJSON {
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(value)
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Archive: %s\nShares: %d\nSent: %d\nRefused: %d\nTombstoned: %d\nUnconfirmed: %d\nQuarantined: %d\n", value.ArchiveID, value.Shares, value.Delivery.Sent, value.Delivery.Refused, value.Delivery.Tombstoned, value.Delivery.Unconfirmed, len(value.Quarantine))
-		for _, h := range value.History {
-			fmt.Fprintf(cmd.OutOrStdout(), "Share %s (current: %t): hub %s, archive %s, repository %s; sent %d, refused %d, tombstoned %d, unconfirmed %d; stop %s, receipt %s\n", h.ShareUID, h.Current, h.HubOrigin, h.HubArchiveID, h.NormalizedRemote, h.Delivery.Sent, h.Delivery.Refused, h.Delivery.Tombstoned, h.Delivery.Unconfirmed, h.StopIntent, h.StopReceipt)
-		}
+		printFederationStatus(cmd.OutOrStdout(), value)
 		for _, q := range value.Quarantine {
 			fmt.Fprintf(cmd.OutOrStdout(), "Quarantine %s at sequence %d: %s\n", q.ShareUID, q.Sequence, q.Error)
 		}
@@ -266,6 +263,13 @@ func printFederationShares(out, diagnostic io.Writer, shares federation.ShareLis
 	}
 	return nil
 }
+func printFederationStatus(out io.Writer, value federation.Status) {
+	fmt.Fprintf(out, "Archive: %s\nShares: %d\nSent: %d\nRefused: %d\nTombstoned: %d\nUnconfirmed: %d\nQuarantined: %d\n", value.ArchiveID, value.Shares, value.Delivery.Sent, value.Delivery.Refused, value.Delivery.Tombstoned, value.Delivery.Unconfirmed, len(value.Quarantine))
+	for _, h := range value.History {
+		fmt.Fprintf(out, "Share %s (current: %t): hub %s, archive %s, repository %s; sent %d, refused %d, tombstoned %d, unconfirmed %d; stop %s, receipt %s\n", h.ShareUID, h.Current, h.HubOrigin, h.HubArchiveID, h.NormalizedRemote, h.Delivery.Sent, h.Delivery.Refused, h.Delivery.Tombstoned, h.Delivery.Unconfirmed, h.StopIntent, h.StopReceipt)
+	}
+}
+
 func newFederationShareCommand() *cobra.Command {
 	root := &cobra.Command{Use: "share", Short: "Manage repository shares"}
 	var g federation.ShareGrant
