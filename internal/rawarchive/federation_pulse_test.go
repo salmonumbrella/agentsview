@@ -40,6 +40,15 @@ func TestManagedCopiesKeepFederationPulseHistory(t *testing.T) {
 			record := db.FederationHubRecord{UID: "a-older", Hash: "initial", Remote: "example/repo", ProjectKey: "project", Write: db.SessionBatchWrite{Session: db.Session{ID: "a-older", Project: "example/repo", Agent: "codex", StartedAt: &older}, Signals: db.SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []db.UsageEvent{{Source: "federation", Model: "model", InputTokens: 7, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: older, DedupKey: "model"}}}}
 			_, err = database.CommitFederationBatch(ctx, "e-a", "s-a", "h-a", "policy", 1, 2, "batch-2", []db.FederationHubRecord{record})
 			require.NoError(t, err)
+			if method == "seed" {
+				// Capture the source before any pulse publication. The later seed
+				// must join the authority that the original creates afterward.
+				require.NoError(t, database.Close())
+				_, err = Capture(ctx, opts)
+				require.NoError(t, err)
+				database, err = db.OpenIsolatedContext(ctx, filepath.Join(opts.DataDir, "sessions.db"))
+				require.NoError(t, err)
+			}
 			first, err := database.FederationPulse(ctx, day.Format("2006-01-02"), 3)
 			require.NoError(t, err)
 			require.NotNil(t, first.Totals["sessions"].Value)
@@ -63,8 +72,6 @@ func TestManagedCopiesKeepFederationPulseHistory(t *testing.T) {
 				require.NoError(t, err)
 			} else {
 				require.NoError(t, database.Close())
-				_, err = Capture(ctx, opts)
-				require.NoError(t, err)
 				_, err = Seed(ctx, filepath.Join(opts.Destination, "capture.json"), target, nil)
 				require.NoError(t, err)
 			}
