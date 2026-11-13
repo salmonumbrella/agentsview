@@ -1072,3 +1072,94 @@ func TestFederationIndividualWithdrawalKeepsOtherSession(t *testing.T) {
 		})
 	}
 }
+
+func TestFederationRestoreReconcilesAndContinuesDeletion(t *testing.T) {
+	for _, mode := range []string{"copied generation", "same identity snapshot"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			hubDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "hub.db"))
+			cfg, err := config.Default()
+			require.NoError(t, err)
+			hub := federation.NewService("hub", "hub-a", cfg.Federation.Hub, hubDB)
+			_, token, err := hub.Enroll(ctx, "spoke-a", "member", "")
+			require.NoError(t, err)
+			peer := httptest.NewServer(New(config.Config{Host: "127.0.0.1", Port: 8080}, hubDB, nil, WithFederation(hub)).Handler())
+			t.Cleanup(peer.Close)
+			file := filepath.Join(testutil.PrivateTempDir(t), "credential")
+			require.NoError(t, os.WriteFile(file, []byte(token), 0600))
+			old, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "old.db"))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, old.Close()) })
+			remote := "github.com/example/repo"
+			key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
+			seed := func(archive *db.DB, ids ...string) {
+				t.Helper()
+				require.NoError(t, archive.Update(ctx, func(tx *sql.Tx) error {
+					if _, e := tx.ExecContext(ctx, `INSERT OR IGNORE INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install')`); e != nil {
+						return e
+					}
+					for _, id := range ids {
+						if _, e := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES(?,'fixture','install','claude',?,'2026-01-02T00:00:00Z',1)`, id, id); e != nil {
+							return e
+						}
+						if _, e := tx.ExecContext(ctx, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES(?,'install','claude',?)`, id, id); e != nil {
+							return e
+						}
+						if _, e := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES(?,'fixture','install','2026-01-01','resolved',1,?,'git_remote',?)`, id, remote, key); e != nil {
+							return e
+						}
+					}
+					return nil
+				}))
+			}
+			seed(old, "a", "c")
+			require.NoError(t, old.ReplaceSessionUsageEvents(ctx, "a", []db.UsageEvent{{SessionID: "a", Source: "fixture", Model: "model", InputTokens: 42, OccurredAt: "2026-01-02T00:00:00Z", DedupKey: "a-usage"}}))
+			spoke := federation.NewService("spoke", "spoke-a", cfg.Federation.Hub, old)
+			require.NoError(t, spoke.Join(ctx, peer.URL, "hub-a", file))
+			preview, err := spoke.PreviewShare(ctx, federation.ShareGrant{Project: remote, Level: "summary", Attribution: "pooled"})
+			require.NoError(t, err)
+			require.NoError(t, spoke.AddShare(ctx, preview))
+			_, err = spoke.Push(ctx)
+			require.NoError(t, err)
+			snapshot := filepath.Join(t.TempDir(), "snapshot.db")
+			require.NoError(t, old.SnapshotTo(ctx, snapshot))
+			seed(old, "b")
+			_, err = spoke.Push(ctx)
+			require.NoError(t, err)
+			require.NoError(t, old.DeleteSession(ctx, "c"))
+			_, err = spoke.Push(ctx)
+			require.NoError(t, err)
+			var beforeA, beforeB int
+			require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='a'),(SELECT count(*) FROM sessions WHERE id='b')`).Scan(&beforeA, &beforeB))
+			require.Equal(t, 1, beforeA)
+			require.Equal(t, 1, beforeB)
+			var restored *db.DB
+			if mode == "copied generation" {
+				restored, err = db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "replacement.db"))
+				require.NoError(t, err)
+				seed(restored, "a")
+				require.NoError(t, restored.CopyFederationStateFrom(ctx, old.Path()))
+			} else {
+				restored, err = db.OpenIsolated(ctx, snapshot)
+				require.NoError(t, err)
+				require.NoError(t, restored.DeleteSession(ctx, "c"))
+			}
+			t.Cleanup(func() { require.NoError(t, restored.Close()) })
+			recovered := federation.NewService("spoke", "spoke-a", cfg.Federation.Hub, restored)
+			for i := 0; i < 3; i++ {
+				_, err = recovered.Push(ctx)
+				require.NoError(t, err)
+			}
+			var countA, countB, complete int
+			require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='a'),(SELECT count(*) FROM sessions WHERE id='b'),(SELECT count(*) FROM federation_hub_shares WHERE completed_epoch=epoch AND epoch>1)`).Scan(&countA, &countB, &complete))
+			assert.Equal(t, 1, countA)
+			assert.Zero(t, countB)
+			assert.Equal(t, 1, complete)
+			require.NoError(t, restored.DeleteSession(ctx, "a"))
+			_, err = recovered.Push(ctx)
+			require.NoError(t, err)
+			require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='a'`).Scan(&countA))
+			assert.Zero(t, countA)
+		})
+	}
+}
