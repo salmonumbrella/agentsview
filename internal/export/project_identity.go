@@ -84,7 +84,7 @@ func NormalizeGitRemote(raw string) (string, bool) {
 
 // NormalizeProjectRemotes validates and canonicalizes a repository push scope.
 func NormalizeProjectRemotes(remotes []string) ([]string, error) {
-	result := make([]string, 0, len(remotes))
+	var result []string
 	for _, raw := range remotes {
 		raw = strings.TrimSpace(raw)
 		if raw == "" || strings.ContainsAny(raw, "*?[]\\") || strings.HasPrefix(raw, ".") {

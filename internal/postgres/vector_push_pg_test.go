@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -16,6 +17,7 @@ import (
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/dbtest"
+	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/storage"
 )
 
@@ -2538,4 +2540,33 @@ func TestUsageOnlyPushEvictsDeletedSessionVectors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestVectorPushRemoteScopeExcludesUnselectedSessions(t *testing.T) {
+	syncer, local, pg := newVectorPushTestSync(t, testPGURL(t), "agentsview_vector_remote_scope_test")
+	ctx := t.Context()
+	seedVectorSessionProject(t, local, "selected", "shared")
+	seedVectorSessionProject(t, local, "personal", "shared")
+	require.NoError(t, local.UpsertProjectIdentityObservation(ctx, export.ProjectIdentityObservation{
+		SessionID: "selected", Project: "shared", Machine: "test-machine", RootPath: "/work/selected",
+		GitRemote: "https://example.com/org/repo.git", RemoteResolution: export.ProjectResolutionResolved, ObservedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+	}))
+	fake := &fakeVectorSource{gen: storage.VectorGenerationInfo{Fingerprint: "remote-scope", Model: "m", Dimension: 4}, hasGen: true,
+		hashes: map[string]string{"selected": "hs", "personal": "hp"},
+		docs: map[string][]storage.VectorPushDoc{
+			"selected": {vdoc("selected", "selected#0", 0, "selected content", "hs", []float32{1, 0, 0, 0})},
+			"personal": {vdoc("personal", "personal#0", 0, "personal content", "hp", []float32{0, 1, 0, 0})},
+		}}
+	syncer.vectorSource = fake
+	syncer.projectRemotes = []string{"example.com/org/repo"}
+	_, err := syncer.Push(ctx, true, nil)
+	require.NoError(t, err)
+	assert.Positive(t, fake.docsCalls["selected"])
+	assert.Zero(t, fake.docsCalls["personal"])
+	var count int
+	require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM vector_documents WHERE doc_key = 'personal#0'`).Scan(&count))
+	assert.Zero(t, count)
+	_, err = syncer.PushWithOptions(ctx, storage.PushOptions{ScopeVectorsToChangedSessions: true, FullVectorSessions: []string{"personal"}}, nil)
+	require.NoError(t, err)
+	assert.Zero(t, fake.docsCalls["personal"])
 }

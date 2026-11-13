@@ -675,6 +675,15 @@ func (s *Sync) vectorSessionsOutOfScope(
 	if !s.isFiltered() {
 		return nil, nil
 	}
+	if len(s.projectRemotes) > 0 {
+		out := make(map[string]struct{})
+		for id := range local {
+			if _, ok := s.selected[id]; !ok {
+				out[id] = struct{}{}
+			}
+		}
+		return out, nil
+	}
 	localIDs := make([]string, 0, len(local))
 	for id := range local {
 		localIDs = append(localIDs, id)
@@ -730,7 +739,7 @@ func (s *Sync) scopeEvictionCandidatesByLocalProject(
 			absent = append(absent, id)
 			continue
 		}
-		if projectFailsFilter(project, s.projects, s.excludeProjects) {
+		if !s.inScope(id, project) {
 			out[id] = struct{}{}
 		}
 	}
@@ -760,7 +769,7 @@ func (s *Sync) localOutOfScopeVectorSessions(
 		if !ok {
 			continue
 		}
-		if projectFailsFilter(project, s.projects, s.excludeProjects) {
+		if !s.inScope(id, project) {
 			out[id] = struct{}{}
 		}
 	}

@@ -83,3 +83,10 @@ func TestBackendNewPusherRejectsPushBatchSize(t *testing.T) {
 	require.EqualError(t, err,
 		"push_batch_size is a ClickHouse setting; PostgreSQL push does not accept it (got 250)")
 }
+
+func TestBackendResolveTargetNormalizesProjectRemotes(t *testing.T) {
+	cfg := config.Config{PG: config.PGConfig{URL: "postgres://localhost/db", ProjectRemotes: []string{"git@example.com:org/repo.git", "example.com/org/repo"}}}
+	target, err := (Backend{}).ResolveTarget(cfg, storage.ReplicaTargetRef{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"example.com/org/repo"}, target.ProjectRemotes)
+}

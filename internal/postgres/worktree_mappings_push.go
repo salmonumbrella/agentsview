@@ -29,9 +29,11 @@ func (s *Sync) syncWorktreeMappings(ctx context.Context, force bool) error {
 		if err != nil {
 			return err
 		}
-		mappings = db.FilterWorktreeMappingsForScope(
-			mappings, s.projects, s.excludeProjects,
-		)
+		if len(s.projectRemotes) > 0 {
+			mappings = nil
+		} else {
+			mappings = db.FilterWorktreeMappingsForScope(mappings, s.projects, s.excludeProjects)
+		}
 		return s.commitWorktreeMappingPublication(
 			ctx, true, mappings, nil,
 		)
@@ -106,7 +108,7 @@ func (s *Sync) commitWorktreeMappingPublication(
 	publicationScope := unfilteredPublicationScope
 	if s.isFiltered() {
 		publicationScope = pushSyncStateScope(
-			"", s.projects, s.excludeProjects,
+			"", s.projects, s.excludeProjects, s.projectRemotes,
 		)
 	}
 	if fullPublication {

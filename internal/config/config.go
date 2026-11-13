@@ -82,6 +82,7 @@ type PGConfig struct {
 	AllowInsecure   bool     `toml:"allow_insecure" json:"allow_insecure"`
 	Projects        []string `toml:"projects" json:"projects,omitempty"`
 	ExcludeProjects []string `toml:"exclude_projects" json:"exclude_projects,omitempty"`
+	ProjectRemotes  []string `toml:"project_remotes" json:"project_remotes,omitempty"`
 	// PushVectors gates the vector phase of pg push. A pointer so an
 	// absent key defaults to enabled without a load-time default pass.
 	PushVectors *bool `toml:"push_vectors" json:"push_vectors,omitempty"`
@@ -116,6 +117,7 @@ var pgConfigKeys = map[string]struct{}{
 	"allow_insecure":   {},
 	"projects":         {},
 	"exclude_projects": {},
+	"project_remotes":  {},
 	"push_vectors":     {},
 }
 
@@ -2160,6 +2162,9 @@ func (c *Config) applyConfigTOML(data string) error {
 		}
 		if legacyPG.Projects != nil {
 			c.PG.Projects = legacyPG.Projects
+		}
+		if legacyPG.ProjectRemotes != nil {
+			c.PG.ProjectRemotes = legacyPG.ProjectRemotes
 		}
 		if legacyPG.ExcludeProjects != nil {
 			c.PG.ExcludeProjects = legacyPG.ExcludeProjects

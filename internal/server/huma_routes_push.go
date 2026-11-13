@@ -16,6 +16,7 @@ import (
 	"go.kenn.io/agentsview/internal/archivesource"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/parser"
 	"go.kenn.io/agentsview/internal/storage"
 	syncpkg "go.kenn.io/agentsview/internal/sync"
@@ -193,6 +194,7 @@ type daemonPushRequest struct {
 	Full            bool     `json:"full"`
 	Projects        []string `json:"projects,omitempty"`
 	ExcludeProjects []string `json:"exclude_projects,omitempty"`
+	ProjectRemotes  []string `json:"project_remotes,omitempty"`
 	// Replica is the remote target a replica push writes to. Omitted, the
 	// daemon pushes to its own default configured target for that backend.
 	Replica *daemonReplicaTarget `json:"replica,omitempty"`
@@ -716,12 +718,24 @@ func (s *Server) humaReplicaPush(
 	in *daemonPushInput,
 ) (*huma.StreamResponse, error) {
 	name := replica.Name()
+	if in.Body.ProjectRemotes != nil && len(in.Body.ProjectRemotes) == 0 {
+		return nil, apiError(http.StatusBadRequest, "project_remotes cannot be empty")
+	}
+	if name != "pg" && len(in.Body.ProjectRemotes) > 0 {
+		return nil, apiError(http.StatusBadRequest, "project_remotes requires PostgreSQL")
+	}
 	if err := storage.ValidateProjectFilters(
 		in.Body.Projects,
 		in.Body.ExcludeProjects,
+		in.Body.ProjectRemotes,
 	); err != nil {
 		return nil, apiError(http.StatusBadRequest, err.Error())
 	}
+	remotes, err := export.NormalizeProjectRemotes(in.Body.ProjectRemotes)
+	if err != nil {
+		return nil, apiError(http.StatusBadRequest, err.Error())
+	}
+	in.Body.ProjectRemotes = remotes
 	local, err := s.localPushTarget(ctx)
 	if err != nil {
 		return nil, err
@@ -772,6 +786,7 @@ func (s *Server) humaReplicaPush(
 					return replica.NewPusher(c, target, local, storage.PusherOptions{
 						Projects:               body.Projects,
 						ExcludeProjects:        body.ExcludeProjects,
+						ProjectRemotes:         body.ProjectRemotes,
 						SyncStateTarget:        body.SyncStateTarget,
 						MigrateLegacySyncState: body.MigrateLegacySyncState,
 						VectorSource:           vectorSource,
@@ -819,9 +834,13 @@ func (s *Server) humaMirrorPush(
 	ctx context.Context,
 	in *daemonPushInput,
 ) (*huma.StreamResponse, error) {
+	if len(in.Body.ProjectRemotes) > 0 {
+		return nil, apiError(http.StatusBadRequest, "project_remotes requires PostgreSQL")
+	}
 	if err := storage.ValidateProjectFilters(
 		in.Body.Projects,
 		in.Body.ExcludeProjects,
+		in.Body.ProjectRemotes,
 	); err != nil {
 		return nil, apiError(http.StatusBadRequest, err.Error())
 	}

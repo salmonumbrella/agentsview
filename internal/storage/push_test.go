@@ -142,3 +142,25 @@ func TestMirrorPushResultDurationWireFormat(t *testing.T) {
 	assert.Equal(t, 750*time.Millisecond, decoded.Duration)
 	assert.True(t, decoded.ArchiveRebuilt)
 }
+
+func TestValidateProjectRemoteFilters(t *testing.T) {
+	for _, tc := range []struct {
+		name                       string
+		projects, exclude, remotes []string
+		wantErr                    bool
+	}{
+		{name: "remote", remotes: []string{"github.com/org/repo"}},
+		{name: "mixed include", projects: []string{"label"}, remotes: []string{"github.com/org/repo"}, wantErr: true},
+		{name: "mixed exclude", exclude: []string{"label"}, remotes: []string{"github.com/org/repo"}, wantErr: true},
+		{name: "invalid", remotes: []string{"/tmp/repo"}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateProjectFilters(tc.projects, tc.exclude, tc.remotes)
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}

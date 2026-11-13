@@ -253,3 +253,14 @@ func TestReadLastPushAtDoesNotMigrateLegacyStateForProjectFilter(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "2026-03-11T12:00:00.000Z", legacyValue)
 }
+
+func TestRemotePushScopeSeparatesCursors(t *testing.T) {
+	plain := pushSyncStateScope("work", nil, nil)
+	label := pushSyncStateScope("work", []string{"alpha"}, nil)
+	assert.Equal(t, "work", plain)
+	assert.Equal(t, "work:project-filter:29def59da1267056", label)
+	remote := pushSyncStateScope("work", nil, nil, []string{"example.com/team/repo"})
+	assert.NotEqual(t, plain, remote)
+	assert.NotEqual(t, label, remote)
+	assert.NotEqual(t, remote, pushSyncStateScope("work", nil, nil, []string{"example.com/team/other"}))
+}

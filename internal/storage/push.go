@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/jsonutil"
 )
 
@@ -145,7 +146,15 @@ type VectorPushResult struct {
 }
 
 // ValidateProjectFilters rejects ambiguous include/exclude project filters.
-func ValidateProjectFilters(projects, excludeProjects []string) error {
+func ValidateProjectFilters(projects, excludeProjects []string, remoteSets ...[]string) error {
+	if len(remoteSets) > 0 && len(remoteSets[0]) > 0 {
+		if len(projects) > 0 || len(excludeProjects) > 0 {
+			return errors.New("project_remotes and project labels are mutually exclusive")
+		}
+		if _, err := export.NormalizeProjectRemotes(remoteSets[0]); err != nil {
+			return err
+		}
+	}
 	if len(projects) > 0 && len(excludeProjects) > 0 {
 		return errors.New("projects and exclude_projects are mutually exclusive")
 	}

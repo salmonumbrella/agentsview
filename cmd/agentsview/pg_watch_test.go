@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/agentsview/internal/apiclient"
 	"go.kenn.io/agentsview/internal/archivepush"
+	"go.kenn.io/agentsview/internal/clickhouse"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/storage"
 	syncpkg "go.kenn.io/agentsview/internal/sync"
@@ -61,10 +62,11 @@ func TestResolvePushProjects(t *testing.T) {
 	}
 	runProjectResolutionCases(t, tests,
 		func(projects, exclude []string, cfg ReplicaPushConfig) ([]string, []string, error) {
-			return resolvePushProjects(storage.ConfiguredReplica{
+			projectsOut, excludeOut, _, err := resolvePushProjects(storage.ConfiguredReplica{
 				Projects:        projects,
 				ExcludeProjects: exclude,
 			}, cfg)
+			return projectsOut, excludeOut, err
 		},
 	)
 }
@@ -869,4 +871,47 @@ func TestPGPusherFullVectorRepairNarrowsToDeferredSessions(t *testing.T) {
 		{sessions: []string{"s1"}},
 		{scoped: true},
 	}, got)
+}
+
+func TestResolvePushProjectRemotes(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		target  storage.ConfiguredReplica
+		cfg     ReplicaPushConfig
+		want    []string
+		wantErr bool
+	}{
+		{name: "configured", target: storage.ConfiguredReplica{ProjectRemotes: []string{"github.com/org/repo"}}, want: []string{"github.com/org/repo"}},
+		{name: "flag normalized", cfg: ReplicaPushConfig{ProjectRemotes: "git@github.com:org/repo.git"}, want: []string{"github.com/org/repo"}},
+		{name: "label flag with remote config", target: storage.ConfiguredReplica{ProjectRemotes: []string{"github.com/org/repo"}}, cfg: ReplicaPushConfig{ProjectsFlag: "label"}, wantErr: true},
+		{name: "remote flag with label config", target: storage.ConfiguredReplica{Projects: []string{"label"}}, cfg: ReplicaPushConfig{ProjectRemotes: "github.com/org/repo"}, wantErr: true},
+		{name: "exclude flag with remote config", target: storage.ConfiguredReplica{ProjectRemotes: []string{"github.com/org/repo"}}, cfg: ReplicaPushConfig{ExcludeProjects: "label"}, wantErr: true},
+		{name: "remote flag with exclusion config", target: storage.ConfiguredReplica{ExcludeProjects: []string{"label"}}, cfg: ReplicaPushConfig{ProjectRemotes: "github.com/org/repo"}, wantErr: true},
+		{name: "explicit empty label with remote", cfg: ReplicaPushConfig{ProjectsSet: true, ProjectRemotes: "github.com/org/repo"}, wantErr: true},
+		{name: "mixed flags", cfg: ReplicaPushConfig{ProjectsFlag: "label", ProjectRemotes: "github.com/org/repo"}, wantErr: true},
+		{name: "mixed configuration", target: storage.ConfiguredReplica{Projects: []string{"label"}, ProjectRemotes: []string{"github.com/org/repo"}}, wantErr: true},
+		{name: "remote flag replaces remote config", target: storage.ConfiguredReplica{ProjectRemotes: []string{"github.com/org/old"}}, cfg: ReplicaPushConfig{ProjectRemotes: "github.com/org/repo"}, want: []string{"github.com/org/repo"}},
+		{name: "explicit empty remote", cfg: ReplicaPushConfig{ProjectRemotesSet: true}, wantErr: true},
+		{name: "all with explicit empty remote", cfg: ReplicaPushConfig{AllProjects: true, ProjectRemotesSet: true}, wantErr: true},
+		{name: "empty remote entry", cfg: ReplicaPushConfig{ProjectRemotes: "github.com/org/repo,"}, wantErr: true},
+		{name: "all clears", target: storage.ConfiguredReplica{ProjectRemotes: []string{"github.com/org/repo"}}, cfg: ReplicaPushConfig{AllProjects: true}},
+		{name: "all with remote flag", cfg: ReplicaPushConfig{AllProjects: true, ProjectRemotes: "github.com/org/repo"}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, remotes, err := resolvePushProjects(tc.target, tc.cfg)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, remotes)
+		})
+	}
+}
+
+func TestProjectRemotesFlagOnlyOnPGPush(t *testing.T) {
+	pg := newReplicaPushCommand(pgReplica{})
+	require.NoError(t, pg.ParseFlags([]string{"--project-remotes", "example.com/org/repo"}))
+	other := newReplicaPushCommand(clickhouse.Backend{})
+	assert.Error(t, other.ParseFlags([]string{"--project-remotes", "example.com/org/repo"}))
 }

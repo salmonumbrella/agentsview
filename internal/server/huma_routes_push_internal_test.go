@@ -1460,3 +1460,39 @@ func TestSyncThenRunForPushRejectsDeferredRebuildWithAttachmentFailure(t *testin
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "local sync processing incomplete")
 }
+
+func TestPushRejectsInvalidProjectRemoteScopes(t *testing.T) {
+	s := testServerWithConfig(config.Config{})
+	for _, tc := range []struct {
+		name string
+		run  func() error
+	}{
+		{"mixed", func() error {
+			_, err := s.humaReplicaPush(t.Context(), postgres.Backend{}, &daemonPushInput{Body: daemonPushRequest{Projects: []string{"label"}, ProjectRemotes: []string{"example.com/org/repo"}}})
+			return err
+		}},
+		{"empty list", func() error {
+			_, err := s.humaReplicaPush(t.Context(), postgres.Backend{}, &daemonPushInput{Body: daemonPushRequest{ProjectRemotes: []string{}}})
+			return err
+		}},
+		{"invalid", func() error {
+			_, err := s.humaReplicaPush(t.Context(), postgres.Backend{}, &daemonPushInput{Body: daemonPushRequest{ProjectRemotes: []string{"/tmp/repo"}}})
+			return err
+		}},
+		{"non pg", func() error {
+			_, err := s.humaReplicaPush(t.Context(), clickhouse.Backend{}, &daemonPushInput{Body: daemonPushRequest{ProjectRemotes: []string{"example.com/org/repo"}}})
+			return err
+		}},
+		{"mirror", func() error {
+			_, err := s.humaMirrorPush(t.Context(), &daemonPushInput{Body: daemonPushRequest{ProjectRemotes: []string{"example.com/org/repo"}}})
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run()
+			var statusErr interface{ GetStatus() int }
+			require.ErrorAs(t, err, &statusErr)
+			assert.Equal(t, http.StatusBadRequest, statusErr.GetStatus())
+		})
+	}
+}

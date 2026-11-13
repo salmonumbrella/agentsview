@@ -10,6 +10,7 @@ import (
 
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/storage"
 )
 
@@ -62,11 +63,16 @@ func (Backend) ResolveTarget(
 	if err != nil {
 		return storage.ConfiguredReplica{}, err
 	}
+	remotes, err := export.NormalizeProjectRemotes(pg.ProjectRemotes)
+	if err != nil {
+		return storage.ConfiguredReplica{}, err
+	}
 	return storage.ConfiguredReplica{
 		ReplicaTargetRef: ref,
 		Target:           ReplicaTarget(pg),
 		Projects:         pg.Projects,
 		ExcludeProjects:  pg.ExcludeProjects,
+		ProjectRemotes:   remotes,
 	}, nil
 }
 
@@ -267,7 +273,7 @@ func (Backend) LastPushAt(
 	}
 	return ReadLastPushAt(
 		ctx, local, target.SyncStateTarget(), projects, excludeProjects,
-		target.MigrateLegacySyncState(),
+		target.MigrateLegacySyncState(), target.ProjectRemotes,
 	)
 }
 

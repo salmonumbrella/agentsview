@@ -28105,6 +28105,7 @@ type DaemonPushRequest struct {
 	LastReconciledVectorGeneration *int64                  `json:"last_reconciled_vector_generation,omitempty"`
 	MigrateLegacySyncState         *bool                   `json:"migrate_legacy_sync_state,omitempty"`
 	NoVectors                      *bool                   `json:"no_vectors,omitempty"`
+	ProjectRemotes                 []string                `json:"project_remotes,omitempty"`
 	Projects                       []string                `json:"projects,omitempty"`
 	Replica                        *DaemonReplicaTarget    `json:"replica,omitempty"`
 	ScopeVectorsToChangedSessions  *bool                   `json:"scope_vectors_to_changed_sessions,omitempty"`

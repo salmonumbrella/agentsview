@@ -1738,3 +1738,42 @@ func TestCopySessionMetadataKeepsFreshIdentityOverEmptyPlaceholder(t *testing.T)
 	require.Len(t, publishable, 1, "an evidence-free placeholder must not replace the fresh identity")
 	assert.Equal(t, root, publishable[0].RootPath)
 }
+
+func TestSessionIDsForProjectRemotesUsesOwnSnapshot(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	for _, id := range []string{"repo", "renamed", "personal", "ambiguous", "none", "child", "missing"} {
+		project := "shared"
+		if id == "renamed" {
+			project = "renamed"
+		}
+		session := Session{ID: id, Project: project, Machine: "local", Agent: "codex"}
+		if id == "child" {
+			session.ParentSessionID = new("repo")
+		}
+		require.NoError(t, d.UpsertSession(ctx, session))
+	}
+	for _, tc := range []struct {
+		id, project, remote string
+		resolution          export.ProjectResolution
+	}{
+		{"repo", "shared", "https://example.com/team/repo.git", export.ProjectResolutionResolved},
+		{"renamed", "renamed", "https://example.com/team/repo.git", export.ProjectResolutionResolved},
+		{"personal", "shared", "https://example.com/personal/repo.git", export.ProjectResolutionResolved},
+		{"ambiguous", "shared", "", export.ProjectResolutionAmbiguous},
+		{"none", "shared", "", export.ProjectResolutionUnknown},
+		{"child", "shared", "https://example.com/other/repo.git", export.ProjectResolutionResolved},
+	} {
+		require.NoError(t, d.UpsertProjectIdentityObservation(ctx, export.ProjectIdentityObservation{
+			SessionID: tc.id, Project: tc.project, Machine: "local", RootPath: "/workspace/" + tc.id,
+			GitRemote: tc.remote, RemoteResolution: tc.resolution, ObservedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+		}))
+	}
+	ids, err := d.SessionIDsForProjectRemotes(ctx, []string{"example.com/team/repo"})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"repo", "renamed"}, ids)
+	require.NoError(t, d.SoftDeleteSession(ctx, "repo"))
+	ids, err = d.SessionIDsForProjectRemotes(ctx, []string{"example.com/team/repo"})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"repo", "renamed"}, ids)
+}

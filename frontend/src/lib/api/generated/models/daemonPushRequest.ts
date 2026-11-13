@@ -14,6 +14,7 @@ export interface DaemonPushRequest {
   last_reconciled_vector_generation?: number;
   migrate_legacy_sync_state?: boolean;
   no_vectors?: boolean;
+  project_remotes?: string[];
   projects?: string[];
   replica?: DaemonReplicaTarget;
   scope_vectors_to_changed_sessions?: boolean;

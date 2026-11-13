@@ -523,6 +523,7 @@ func (b daemonArchiveWriteBackend) ReplicaPush(
 			Full:            cfg.Full,
 			Projects:        projects,
 			ExcludeProjects: excludeProjects,
+			ProjectRemotes:  target.ProjectRemotes,
 			Replica: &apiclient.DaemonReplicaTarget{
 				URL:           target.Target.URL,
 				Schema:        new(target.Target.Schema),
@@ -1196,6 +1197,7 @@ func replicaPusherOptions(
 	return storage.PusherOptions{
 		Projects:               projects,
 		ExcludeProjects:        excludeProjects,
+		ProjectRemotes:         target.ProjectRemotes,
 		SyncStateTarget:        target.SyncStateTarget(),
 		MigrateLegacySyncState: target.MigrateLegacySyncState(),
 		VectorSource:           vectorSource,

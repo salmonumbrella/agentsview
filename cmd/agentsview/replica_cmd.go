@@ -42,6 +42,11 @@ func newReplicaPushCommand(backend storage.Replica) *cobra.Command {
 		SilenceUsage: true,
 		Args:         cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg.ProjectsSet = cmd.Flags().Changed("projects")
+			cfg.ExcludeProjectsSet = cmd.Flags().Changed("exclude-projects")
+			if name == "pg" {
+				cfg.ProjectRemotesSet = cmd.Flags().Changed("project-remotes")
+			}
 			targetName := ""
 			if len(args) == 1 {
 				targetName = args[0]
@@ -95,6 +100,7 @@ func newReplicaPushCommand(backend storage.Replica) *cobra.Command {
 	cmd.Flags().DurationVar(&cfg.Interval, "interval", defaultWatchInterval, "Periodic floor push interval (--watch only)")
 	cmd.Flags().BoolVar(&cfg.NoVectors, "no-vectors", false, "Skip pushing semantic-search vectors")
 	if name == "pg" {
+		cmd.Flags().StringVar(&cfg.ProjectRemotes, "project-remotes", "", "Comma-separated repository remotes to push")
 		cmd.Flags().BoolVar(&cfg.Embed, "embed", false,
 			"Push sessions, then build and push embeddings in the same push; "+
 				"--full repairs vectors too; with --watch, build after syncs in "+
