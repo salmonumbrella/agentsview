@@ -165,7 +165,7 @@ func TestFederationPulseRoute(t *testing.T) {
 		for _, tc := range []struct {
 			query   string
 			wantHub int
-		}{{"?since=not-a-date", http.StatusBadRequest}, {"?since=" + time.Now().UTC().AddDate(0, 0, -1).Format(time.DateOnly), http.StatusOK}} {
+		}{{"?since=2026-02-30", http.StatusBadRequest}, {"?since=2026-7-28", http.StatusBadRequest}, {"?since=" + time.Now().UTC().AddDate(1, 0, 0).Format(time.DateOnly), http.StatusBadRequest}, {"?since=", http.StatusOK}, {"?since=" + time.Now().UTC().AddDate(0, 0, -1).Format(time.DateOnly), http.StatusOK}} {
 			req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/v1/federation/pulse"+tc.query, nil)
 			req.Header.Set("Authorization", "Bearer personal")
 			rec := httptest.NewRecorder()
@@ -175,6 +175,9 @@ func TestFederationPulseRoute(t *testing.T) {
 				want = tc.wantHub
 			}
 			assert.Equal(t, want, rec.Code, "%s %s", role, tc.query)
+			if role == "hub" && want == http.StatusBadRequest {
+				assert.Contains(t, rec.Body.String(), "since must be a non-future date in YYYY-MM-DD format")
+			}
 			if want == http.StatusOK {
 				assert.Contains(t, rec.Body.String(), `"suppressed"`)
 			}

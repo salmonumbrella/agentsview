@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,9 +30,16 @@ func TestPulseRejectsInvalidDateAndWrongRole(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, archive.Close()) })
 	hub := NewService("hub", "hub", config.FederationHubConfig{MinGroupSize: 3}, archive)
-	_, err = hub.Pulse(t.Context(), "2026-02-30")
 	var input *InputError
-	assert.ErrorAs(t, err, &input)
+	for _, date := range []string{"2026-02-30", "2026-7-28", time.Now().UTC().AddDate(1, 0, 0).Format(time.DateOnly)} {
+		_, err = hub.Pulse(t.Context(), date)
+		require.ErrorAs(t, err, &input)
+		assert.EqualError(t, err, "since must be a non-future date in YYYY-MM-DD format")
+	}
+	for _, date := range []string{"", "2020-07-28"} {
+		_, err = hub.Pulse(t.Context(), date)
+		require.NoError(t, err)
+	}
 	spoke := NewService("spoke", "spoke", config.FederationHubConfig{MinGroupSize: 3}, archive)
 	_, err = spoke.Pulse(t.Context(), "")
 	assert.ErrorAs(t, err, &input)

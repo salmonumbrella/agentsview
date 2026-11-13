@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -56,16 +57,18 @@ func federationPulseScope(ctx context.Context, tx *sql.Tx) (map[string]federatio
 	return owners, nil
 }
 
+var ErrFederationPulseSince = errors.New("invalid federation pulse since")
+
 func parseFederationPulseSince(value string, now time.Time) (*time.Time, error) {
 	if value == "" {
 		return nil, nil
 	}
 	date, err := time.Parse(time.DateOnly, value)
 	if err != nil || date.Format(time.DateOnly) != value {
-		return nil, fmt.Errorf("invalid pulse date %q: expected YYYY-MM-DD", value)
+		return nil, fmt.Errorf("%w: expected YYYY-MM-DD", ErrFederationPulseSince)
 	}
 	if date.After(now.UTC().Truncate(24 * time.Hour)) {
-		return nil, fmt.Errorf("pulse date is in the future")
+		return nil, fmt.Errorf("%w: date is in the future", ErrFederationPulseSince)
 	}
 	return &date, nil
 }

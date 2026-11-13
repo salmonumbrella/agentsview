@@ -48,16 +48,14 @@ func (s *Service) Pulse(ctx context.Context, since string) (db.FederationPulse, 
 	if s.role != "hub" {
 		return db.FederationPulse{}, inputError("pulse requires the hub role")
 	}
-	if since != "" {
-		date, err := time.Parse(time.DateOnly, since)
-		if err != nil || date.Format(time.DateOnly) != since || date.After(time.Now().UTC().Truncate(24*time.Hour)) {
-			return db.FederationPulse{}, inputError("since must be a non-future date in YYYY-MM-DD format")
-		}
-	}
 	if s.policy.MinGroupSize < 1 {
 		return db.FederationPulse{}, inputError("pulse requires a positive minimum group size")
 	}
-	return s.db.FederationPulse(ctx, since, s.policy.MinGroupSize)
+	pulse, err := s.db.FederationPulse(ctx, since, s.policy.MinGroupSize)
+	if errors.Is(err, db.ErrFederationPulseSince) {
+		return db.FederationPulse{}, inputError("since must be a non-future date in YYYY-MM-DD format")
+	}
+	return pulse, err
 }
 func randomID(prefix string, n int) (string, error) {
 	b := make([]byte, n)
