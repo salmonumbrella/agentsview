@@ -162,6 +162,11 @@ func TestFederationUserVersion(t *testing.T) {
 		return err
 	}))
 	assert.Equal(t, CurrentDataVersion(), raw())
+	enrollmentOnly := testDB(t)
+	require.NoError(t, enrollmentOnly.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "only-enr", SpokeArchiveID: "only-spoke", Member: "only-member", CredentialSHA256: "only-digest"}))
+	var enrollmentVersion int
+	require.NoError(t, enrollmentOnly.Reader().QueryRow(ctx, `PRAGMA user_version`).Scan(&enrollmentVersion))
+	assert.Equal(t, federationVersionBase+CurrentDataVersion(), enrollmentVersion)
 	link := FederationLink{UID: "link-a", HubOrigin: "https://hub.example", HubArchiveID: "hub-a", EnrollmentUID: "enr-a", Member: "member-a", TokenFile: "/fixture/credential", ProtocolVersion: 1, State: "active"}
 	require.NoError(t, database.PutFederationLink(ctx, link))
 	assert.Equal(t, federationVersionBase+CurrentDataVersion(), raw())
@@ -171,7 +176,9 @@ func TestFederationUserVersion(t *testing.T) {
 	assert.Greater(t, raw()&^(federationVersionBase|federationShareVersionBase|federationDeliveryVersionBase), CurrentDataVersion())
 	_, err = database.GetFederationLink(ctx)
 	assert.ErrorIs(t, err, sql.ErrNoRows)
-	copy := testDB(t)
+	copyPath := filepath.Join(t.TempDir(), "copied.db")
+	copy, err := OpenIsolated(ctx, copyPath)
+	require.NoError(t, err)
 	require.NoError(t, copy.CopyFederationStateFrom(ctx, path))
 	var copiedVersion int
 	require.NoError(t, copy.Reader().QueryRow(ctx, `PRAGMA user_version`).Scan(&copiedVersion))
@@ -183,9 +190,23 @@ func TestFederationUserVersion(t *testing.T) {
 	require.Len(t, links, 1)
 	assert.Equal(t, "https://hub.example", links[0].HubOrigin)
 	assert.Equal(t, "retired", links[0].State)
+	require.NoError(t, copy.Close())
+	require.NoError(t, CheckDataVersion(ctx, copyPath))
+	copy, err = OpenIsolated(ctx, copyPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, copy.Close()) })
+	_, err = copy.GetFederationLink(ctx)
+	assert.ErrorIs(t, err, sql.ErrNoRows)
 	newLink := link
 	newLink.UID, newLink.HubOrigin = "link-copy", "https://other.example"
 	require.NoError(t, copy.PutFederationLink(ctx, newLink))
+	currentCopy, err := copy.GetFederationLink(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "link-copy", currentCopy.UID)
+	links, err = copy.ListFederationLinks(ctx)
+	require.NoError(t, err)
+	require.Len(t, links, 2)
+	assert.Equal(t, "https://hub.example", links[0].HubOrigin)
 	require.NoError(t, database.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr-a", SpokeArchiveID: "spoke-a", Member: "member-a", CredentialSHA256: "digest-a"}))
 	version := raw()
 	assert.Equal(t, federationVersionBase+federationWithdrawalVersionBase+CurrentDataVersion(), version)

@@ -118,6 +118,32 @@ func TestFederationRevokePublishesCommittedPartialCleanup(t *testing.T) {
 	srv.Handler().ServeHTTP(response, req.Clone(ctx))
 	assert.Empty(t, events)
 	assert.EqualValues(t, 2, callbacks.Load())
+	// A retained-only revoke and an unknown enrollment do not report a
+	// session mutation to either consumer.
+	require.NoError(t, database.CreateFederationEnrollment(ctx, db.FederationEnrollment{UID: "retained-enr", SpokeArchiveID: "retained-spoke", Member: "retained", CredentialSHA256: "retained-digest"}))
+	retainedShare := db.FederationHubShare{UID: "retained-share", EnrollmentUID: "retained-enr", Remote: "example.org/repo", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: digest, Epoch: 1, State: "active", Retention: "org-retained"}
+	_, err = database.PutFederationHubShare(ctx, "retained-spoke", retainedShare)
+	require.NoError(t, err)
+	retainedRecord := db.FederationHubRecord{UID: "retained", Hash: "hash", Remote: retainedShare.Remote, ProjectKey: retainedShare.ProjectKey, Write: db.SessionBatchWrite{Session: db.Session{ID: "retained", Project: "fixture", Machine: "federated", Agent: "claude"}}}
+	_, err = database.CommitFederationBatch(ctx, "retained-enr", "retained-spoke", "retained-share", digest, 1, 1, "retained", []db.FederationHubRecord{retainedRecord})
+	require.NoError(t, err)
+	for _, uid := range []string{"retained-enr", "unknown"} {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/federation/enrollments/"+uid+"/revoke", nil)
+		request.Host = "127.0.0.1:8080"
+		request.Header.Set("Origin", "http://127.0.0.1:8080")
+		response = httptest.NewRecorder()
+		srv.Handler().ServeHTTP(response, request)
+		if uid == "retained-enr" {
+			assert.Equal(t, http.StatusOK, response.Code)
+		} else {
+			assert.NotEqual(t, http.StatusOK, response.Code)
+		}
+		assert.Empty(t, events)
+		assert.EqualValues(t, 2, callbacks.Load())
+	}
+	var retainedCount int
+	require.NoError(t, database.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='retained'`).Scan(&retainedCount))
+	assert.Equal(t, 1, retainedCount)
 }
 
 func TestFederationInventoryRejectsChangedPolicyOverHTTP(t *testing.T) {
