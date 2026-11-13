@@ -45,7 +45,7 @@ func TestFederationCredentialIsolation(t *testing.T) {
 				}
 				srv := New(config.Config{Host: "127.0.0.1", Port: 8080, AuthToken: "personal", RequireAuth: requireAuth}, database, nil, options...)
 				type operation struct{ method, path string }
-				ops := []operation{{http.MethodGet, "/"}, {http.MethodGet, "/api/ping"}, {http.MethodGet, "/debug/pprof/"}, {http.MethodGet, "/api/v1/federation/enrollments"}, {http.MethodPost, "/api/v1/federation/enrollments"}, {http.MethodPost, "/api/v1/federation/enrollments/enr-a/revoke"}}
+				ops := []operation{{http.MethodGet, "/"}, {http.MethodGet, "/api/ping"}, {http.MethodGet, "/debug/pprof/"}, {http.MethodGet, "/api/v1/federation/pulse"}, {http.MethodGet, "/api/v1/federation/enrollments"}, {http.MethodPost, "/api/v1/federation/enrollments"}, {http.MethodPost, "/api/v1/federation/enrollments/enr-a/revoke"}}
 				ops = append(ops, operation{http.MethodPost, "/api/v1/federation/shares/preview"}, operation{http.MethodPost, "/api/v1/federation/shares"}, operation{http.MethodGet, "/api/v1/federation/shares"}, operation{http.MethodGet, "/api/v1/federation/shares/x"}, operation{http.MethodPost, "/api/v1/federation/shares/x/pause"}, operation{http.MethodPost, "/api/v1/federation/shares/x/resume"}, operation{http.MethodDelete, "/api/v1/federation/shares/x"}, operation{http.MethodPost, "/api/v1/federation/exclusions"}, operation{http.MethodGet, "/api/v1/federation/dry-run"})
 				ops = append(ops, operation{http.MethodPost, federationHandshakePath}, operation{http.MethodGet, "/api/v1/federation/shares/x/batches"}, operation{http.MethodPut, "/api/v1/federation/shares/"}, operation{http.MethodPost, "/api/v1/federation/shares/x/batches/extra"}, operation{http.MethodPut, "/api/v1/federation/shares/x%2Fy"})
 				for _, peerOp := range []operation{{http.MethodPut, "/api/v1/federation/shares/x"}, {http.MethodPost, "/api/v1/federation/shares/x/batches"}, {http.MethodPost, "/api/v1/federation/shares/x/reconcile"}} {
@@ -146,6 +146,36 @@ func TestFederationCredentialIsolation(t *testing.T) {
 					assert.Equal(t, wrongResult.Header(), rec.Header())
 				}
 			})
+		}
+	}
+}
+
+func TestFederationPulseRoute(t *testing.T) {
+	database := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "archive.db"))
+	_, schemaPresent := OpenAPISpec(VersionInfo{}).Paths["/api/v1/federation/pulse"]
+	assert.True(t, schemaPresent)
+	for _, role := range []string{"off", "spoke", "hub"} {
+		var options []Option
+		if role != "off" {
+			options = append(options, WithFederation(federation.NewService(role, "archive", config.FederationHubConfig{MinGroupSize: 3}, database)))
+		}
+		srv := New(config.Config{Host: "127.0.0.1", Port: 8080, AuthToken: "personal", RequireAuth: true}, database, nil, options...)
+		for _, tc := range []struct {
+			query   string
+			wantHub int
+		}{{"?since=not-a-date", http.StatusBadRequest}, {"?since=2020-01-01", http.StatusOK}} {
+			req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/v1/federation/pulse"+tc.query, nil)
+			req.Header.Set("Authorization", "Bearer personal")
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+			want := http.StatusNotFound
+			if role == "hub" {
+				want = tc.wantHub
+			}
+			assert.Equal(t, want, rec.Code, "%s %s", role, tc.query)
+			if want == http.StatusOK {
+				assert.Contains(t, rec.Body.String(), `"suppressed"`)
+			}
 		}
 	}
 }

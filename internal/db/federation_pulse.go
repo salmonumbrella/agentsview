@@ -610,6 +610,11 @@ func (db *DB) readFederationPulse(ctx context.Context, since string, minimum int
 	return result, nil
 }
 
+// FederationPulse reads a single scoped snapshot and returns only released values.
+func (db *DB) FederationPulse(ctx context.Context, since string, minimum int) (FederationPulse, error) {
+	return db.readFederationPulse(ctx, since, minimum, time.Now())
+}
+
 // federationPulseLinks exposes only contact and sanitized stored refusal facts.
 func federationPulseLinks(ctx context.Context, tx *sql.Tx) ([]FederationPulseLink, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT e.enrollment_uid,e.spoke_name,e.last_handshake_at,e.last_delivery_at,e.revoked_at,h.last_refused

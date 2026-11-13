@@ -19,6 +19,9 @@ type federationHandshakeInput struct {
 	Authorization string `header:"Authorization"`
 	SpokeArchive  string `header:"X-AgentsView-Spoke-Archive"`
 }
+type federationPulseInput struct {
+	Since string `query:"since" doc:"Inclusive UTC start date (YYYY-MM-DD)"`
+}
 type federationEnrollInput struct {
 	Body struct {
 		SpokeArchiveID string `json:"spoke_archive_id"`
@@ -50,6 +53,7 @@ func (s *Server) registerFederationRoutes() {
 	configureRouteGroup(group, "Federation")
 	if s.federationSchemaOnly || s.federation.Role() == "hub" {
 		registerRoute(group, http.MethodGet, "/handshake", "Read federation handshake", s.humaFederationHandshake, s.humaTimeout())
+		registerRoute(group, http.MethodGet, "/pulse", "Read federation pulse", s.humaFederationPulse, s.humaTimeout())
 	}
 	if s.federation == nil {
 		return
@@ -90,6 +94,13 @@ func (s *Server) registerFederationRoutes() {
 		s.stream(group, http.MethodGet, "/dry-run", "Preview records", s.humaDryRun, hidden)
 
 	}
+}
+func (s *Server) humaFederationPulse(ctx context.Context, in *federationPulseInput) (*jsonOutput[db.FederationPulse], error) {
+	result, err := s.federation.Pulse(ctx, in.Since)
+	if err = federationControlError(err); err != nil {
+		return nil, err
+	}
+	return &jsonOutput[db.FederationPulse]{Body: result}, nil
 }
 func (s *Server) humaFederationHandshake(ctx context.Context, _ *federationHandshakeInput) (*jsonOutput[federation.HandshakeResponse], error) {
 	h, ok := ctx.Value(ctxKeyFederationHandshake).(federation.HandshakeResponse)

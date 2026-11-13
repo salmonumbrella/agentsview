@@ -10,6 +10,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
@@ -41,6 +42,23 @@ func NewService(role, archiveID string, policy config.FederationHubConfig, datab
 }
 func (s *Service) Role() string      { return s.role }
 func (s *Service) ArchiveID() string { return s.archiveID }
+
+// Pulse returns the aggregate released under the hub's configured policy.
+func (s *Service) Pulse(ctx context.Context, since string) (db.FederationPulse, error) {
+	if s.role != "hub" {
+		return db.FederationPulse{}, inputError("pulse requires the hub role")
+	}
+	if since != "" {
+		date, err := time.Parse(time.DateOnly, since)
+		if err != nil || date.Format(time.DateOnly) != since || date.After(time.Now().UTC().Truncate(24*time.Hour)) {
+			return db.FederationPulse{}, inputError("since must be a non-future date in YYYY-MM-DD format")
+		}
+	}
+	if s.policy.MinGroupSize < 1 {
+		return db.FederationPulse{}, inputError("pulse requires a positive minimum group size")
+	}
+	return s.db.FederationPulse(ctx, since, s.policy.MinGroupSize)
+}
 func randomID(prefix string, n int) (string, error) {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {

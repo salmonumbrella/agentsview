@@ -24,6 +24,23 @@ func revokeForTest(s *Service, ctx context.Context, uid string) error {
 	return err
 }
 
+func TestPulseRejectsInvalidDateAndWrongRole(t *testing.T) {
+	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, archive.Close()) })
+	hub := NewService("hub", "hub", config.FederationHubConfig{MinGroupSize: 3}, archive)
+	_, err = hub.Pulse(t.Context(), "2026-02-30")
+	var input *InputError
+	assert.ErrorAs(t, err, &input)
+	spoke := NewService("spoke", "spoke", config.FederationHubConfig{MinGroupSize: 3}, archive)
+	_, err = spoke.Pulse(t.Context(), "")
+	assert.ErrorAs(t, err, &input)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = hub.Pulse(ctx, "")
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
 func TestStatusKeepsLocalSharesWhenPeerReturnsHTTPError(t *testing.T) {
 	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
 	require.NoError(t, err)
