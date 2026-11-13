@@ -875,6 +875,15 @@ func TestFederationPulseAndPublicExportShareMessageLessExistence(t *testing.T) {
 	assert.Equal(t, 3, hour.Activity.Totals.NewSessions)
 	assert.Equal(t, 1, hour.Activity.Totals.NewProjects)
 	assert.Equal(t, 3, hour.Activity.Totals.NewUntimedSessions)
+	var daySessions, dayProjects, dayUntimed int
+	for _, item := range day.Hours {
+		daySessions += item.Activity.Totals.NewSessions
+		dayProjects += item.Activity.Totals.NewProjects
+		dayUntimed += item.Activity.Totals.NewUntimedSessions
+	}
+	assert.Equal(t, 3, daySessions)
+	assert.Equal(t, 1, dayProjects)
+	assert.Equal(t, 3, dayUntimed)
 	assert.Zero(t, hour.Activity.Totals.AgentMinutes)
 	assert.Empty(t, hour.Joint.Cells)
 	rng, err := d.ExportReportingRange(ctx, now)
@@ -885,6 +894,7 @@ func TestFederationPulseAndPublicExportShareMessageLessExistence(t *testing.T) {
 	assert.Equal(t, Ptr(int64(3)), pulse.Totals["sessions"].Value)
 	assert.Equal(t, Ptr(int64(1)), pulse.Totals["active_projects"].Value)
 	assert.Equal(t, "unavailable", pulse.Totals["tokens"].State)
+	assert.Equal(t, "unavailable", pulse.Totals["health_observed_sessions"].State)
 	require.Len(t, pulse.Outcomes, 1)
 	assert.Equal(t, "unknown", pulse.Outcomes[0].Key)
 	assert.Equal(t, Ptr(int64(3)), pulse.Outcomes[0].Metrics["sessions"].Value)
