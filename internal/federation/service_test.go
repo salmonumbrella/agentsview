@@ -559,3 +559,42 @@ func TestShareOperationsWithoutLink(t *testing.T) {
 	}))
 	require.NoError(t, svc.Exclude(t.Context(), "session-a", "private"))
 }
+
+func TestLegacyRevokeRequiresMatchingRetentionProof(t *testing.T) {
+	for _, retention := range []string{"member-controlled", "org-retained"} {
+		t.Run(retention, func(t *testing.T) {
+			ctx := t.Context()
+			archive, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "archive.db"))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, archive.Close()) })
+			policy := config.FederationHubConfig{Retention: retention, AllowedLevels: []string{"summary"}, MinGroupSize: 3, SuggestedProjects: []string{}, Processing: "none"}
+			digest, err := export.DigestCanonical(policy)
+			require.NoError(t, err)
+			require.NoError(t, archive.CreateFederationEnrollment(ctx, db.FederationEnrollment{UID: "enr", SpokeArchiveID: "spoke", Member: "member", CredentialSHA256: "digest"}))
+			share := db.FederationHubShare{UID: "share", EnrollmentUID: "enr", Remote: "example.org/repo", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: digest, Epoch: 1, State: "active"}
+			_, err = archive.PutFederationHubShare(ctx, "spoke", share)
+			require.NoError(t, err)
+			record := db.FederationHubRecord{UID: "owned", Hash: "hash", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: db.SessionBatchWrite{Session: db.Session{ID: "owned", Project: "p", Machine: "federated", Agent: "claude"}}}
+			_, err = archive.CommitFederationBatch(ctx, "enr", "spoke", "share", digest, 1, 1, "batch", []db.FederationHubRecord{record})
+			require.NoError(t, err)
+			changed := policy
+			changed.MinGroupSize++
+			err = NewService("hub", "hub", changed, archive).Revoke(ctx, "enr")
+			require.ErrorContains(t, err, "cleanup pending")
+			enrollments, err := archive.ListFederationEnrollments(ctx)
+			require.NoError(t, err)
+			require.Len(t, enrollments, 1)
+			assert.Equal(t, "revoked", enrollments[0].State)
+			var count int
+			require.NoError(t, archive.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='owned'`).Scan(&count))
+			assert.Equal(t, 1, count)
+			require.NoError(t, NewService("hub", "hub", policy, archive).Revoke(ctx, "enr"))
+			require.NoError(t, archive.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='owned'`).Scan(&count))
+			if retention == "member-controlled" {
+				assert.Zero(t, count)
+			} else {
+				assert.Equal(t, 1, count)
+			}
+		})
+	}
+}

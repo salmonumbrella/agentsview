@@ -11,6 +11,12 @@ import (
 var ErrFederationUnauthorized = errors.New("federation unauthorized")
 var ErrFederationEnrollmentExists = errors.New("federation enrollment exists")
 var ErrFederationLinkExists = errors.New("federation link exists")
+var ErrFederationCleanupPending = errors.New("federation cleanup pending: restore the previously accepted policy and retry revoke")
+
+type FederationRetentionProof struct {
+	PolicyDigest string
+	Retention    string
+}
 
 type FederationEnrollment struct {
 	UID              string `json:"enrollment_uid"`
@@ -72,7 +78,8 @@ func (db *DB) ListFederationEnrollments(ctx context.Context) ([]FederationEnroll
 	return result, rows.Err()
 }
 
-func (db *DB) RevokeFederationEnrollment(ctx context.Context, uid string) error {
+func (db *DB) RevokeFederationEnrollment(ctx context.Context, uid string, proof ...FederationRetentionProof) error {
+	var unresolved bool
 	var purged []string
 	var pending recallEvidenceRevocationEvents
 	err := db.Update(ctx, func(tx *sql.Tx) error {
@@ -87,15 +94,15 @@ func (db *DB) RevokeFederationEnrollment(ctx context.Context, uid string) error 
 		if count == 0 {
 			return sql.ErrNoRows
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT share_uid,retention FROM federation_hub_shares WHERE enrollment_uid=?`, uid)
+		rows, err := tx.QueryContext(ctx, `SELECT share_uid,retention,policy_digest FROM federation_hub_shares WHERE enrollment_uid=?`, uid)
 		if err != nil {
 			return err
 		}
-		type ownedShare struct{ uid, retention string }
+		type ownedShare struct{ uid, retention, digest string }
 		var shares []ownedShare
 		for rows.Next() {
 			var s ownedShare
-			if err = rows.Scan(&s.uid, &s.retention); err != nil {
+			if err = rows.Scan(&s.uid, &s.retention, &s.digest); err != nil {
 				rows.Close()
 				return err
 			}
@@ -109,6 +116,15 @@ func (db *DB) RevokeFederationEnrollment(ctx context.Context, uid string) error 
 			return err
 		}
 		for _, share := range shares {
+			if share.retention == "" && len(proof) == 1 && proof[0].PolicyDigest == share.digest && (proof[0].Retention == "member-controlled" || proof[0].Retention == "org-retained") {
+				share.retention = proof[0].Retention
+				if _, err := tx.ExecContext(ctx, `UPDATE federation_hub_shares SET retention=? WHERE share_uid=? AND retention=''`, share.retention, share.uid); err != nil {
+					return err
+				}
+			}
+			if share.retention != "member-controlled" && share.retention != "org-retained" {
+				unresolved = true
+			}
 			if share.retention == "member-controlled" {
 				ids, err := federationOwnedSessionIDsTx(ctx, tx, share.uid, nil)
 				if err != nil {
@@ -129,6 +145,9 @@ func (db *DB) RevokeFederationEnrollment(ctx context.Context, uid string) error 
 	if err == nil {
 		db.notifyUsageSessions(purged)
 		pending.flush()
+		if unresolved {
+			return ErrFederationCleanupPending
+		}
 	}
 	return err
 }

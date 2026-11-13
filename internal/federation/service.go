@@ -121,7 +121,18 @@ func (s *Service) List(ctx context.Context) ([]db.FederationEnrollment, error) {
 	return s.db.ListFederationEnrollments(ctx)
 }
 func (s *Service) Revoke(ctx context.Context, uid string) error {
-	err := s.db.RevokeFederationEnrollment(ctx, uid)
+	var proof []db.FederationRetentionProof
+	if s.policy.Validate() == nil {
+		digest, err := export.DigestCanonical(s.policy)
+		if err != nil {
+			return err
+		}
+		proof = append(proof, db.FederationRetentionProof{PolicyDigest: digest, Retention: s.policy.Retention})
+	}
+	err := s.db.RevokeFederationEnrollment(ctx, uid, proof...)
+	if errors.Is(err, db.ErrFederationCleanupPending) {
+		return inputError(err.Error())
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return inputError("enrollment not found")
 	}

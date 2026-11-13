@@ -113,7 +113,9 @@ The hub operator can use `agentsview federation enrollments list` and
 `agentsview federation revoke <enrollment-uid>`. The list shows `enrolled` for
 a member that has never contacted the hub, `contacted` after any contact, and
 `revoked` after revocation. `last_handshake_at` records the last contact and is
-updated by join and status. A join the spoke refuses still counts as contact.
+updated by join and status. A join the spoke refuses still counts as contact. Revocation takes effect even if cleanup of a legacy share cannot be confirmed.
+If cleanup is pending because its accepted retention is unknown, restore the
+matching accepted hub policy and repeat the existing revoke command.
 The member can run `agentsview federation leave` before setting the role to
 `off`. Leave stops the shares and records hub cleanup for the next push. If
 the hub is offline, cleanup remains pending and is retried when the spoke can
