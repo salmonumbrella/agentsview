@@ -136,6 +136,8 @@ func TestFederationOffPreservesOrdinaryAuth(t *testing.T) {
 			{"/api/ping", "", required},
 			{"/api/ping", "Bearer other", required},
 			{"/api/ping", "Bearer personal", false},
+			{"/api/ping", "Bearer avfc_x", true},
+			{"/api/ping?token=avfc_x", "", true},
 		} {
 			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
 			req.Host = "127.0.0.1:8080"
