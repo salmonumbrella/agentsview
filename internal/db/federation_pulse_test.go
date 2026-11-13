@@ -377,7 +377,7 @@ func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T)
 // These regressions describe the accepted cross-release privacy requirement.
 // The publication policy is still open; no admission bypass is used here.
 func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
-	for _, scenario := range []string{"window", "reverse-window", "update", "copy-before-publication", "cancel-before-admission", "concurrent"} {
+	for _, scenario := range []string{"window", "reverse-window", "update", "copy-before-publication", "cancel-before-admission", "concurrent", "purge-regrant"} {
 		t.Run(scenario, func(t *testing.T) {
 			d := testDB(t)
 			ctx := t.Context()
@@ -385,7 +385,7 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 			for i, name := range []string{"a", "b", "c"} {
 				enrollment, spoke, share := "e-"+name, "s-"+name, "h-"+name
 				require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: name, CredentialSHA256: "digest-" + name}))
-				_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+				_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active", Retention: "member-controlled"})
 				require.NoError(t, err)
 				cost := money.Money{Microdollars: int64((i + 1) * 100)}
 				record := FederationHubRecord{UID: name, Hash: "initial", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: name, Project: "example/repo", Agent: "codex", StartedAt: &start}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: (i + 1) * 10, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: start, DedupKey: name}}}}
@@ -393,7 +393,7 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 				require.NoError(t, err)
 			}
 			now := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
-			if scenario == "window" || scenario == "reverse-window" || scenario == "copy-before-publication" || scenario == "cancel-before-admission" || scenario == "concurrent" {
+			if scenario == "window" || scenario == "reverse-window" || scenario == "copy-before-publication" || scenario == "cancel-before-admission" || scenario == "concurrent" || scenario == "purge-regrant" {
 				older := "2026-07-28T09:00:00Z"
 				cost := money.Money{Microdollars: 70}
 				record := FederationHubRecord{UID: "a-older", Hash: "initial", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: "a-older", Project: "example/repo", Agent: "codex", StartedAt: &older}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: 7, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: older, DedupKey: "a-older"}}}}
@@ -468,6 +468,52 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 				assert.Equal(t, Ptr(int64(3)), first.Totals["sessions"].Value)
 				assert.Equal(t, Ptr(int64(60)), first.Totals["tokens"].Value)
 				assert.Equal(t, Ptr(int64(600)), first.Totals["cost_microdollars"].Value)
+			}
+			if scenario == "purge-regrant" {
+				share := FederationHubShare{UID: "h-a", EnrollmentUID: "e-a", Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 2, State: "stopped", Retention: "member-controlled"}
+				_, err = d.PutFederationHubShare(ctx, "s-a", share)
+				require.NoError(t, err)
+				share.Epoch, share.State, share.Resume = 3, "active", true
+				_, err = d.PutFederationHubShare(ctx, "s-a", share)
+				require.NoError(t, err)
+				oldDate := "2026-07-28T09:00:00Z"
+				records := make([]FederationHubRecord, 0, 2)
+				for _, item := range []struct {
+					id, at string
+					tokens int
+					cost   int64
+				}{{"a", start, 10, 100}, {"a-older", oldDate, 7, 70}} {
+					cost := money.Money{Microdollars: item.cost}
+					records = append(records, FederationHubRecord{UID: item.id, Hash: "regrant", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: item.id, Project: "example/repo", Agent: "codex", StartedAt: &item.at}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: item.tokens, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: item.at, DedupKey: item.id}}}})
+				}
+				ack, err := d.CommitFederationBatch(ctx, "e-a", "s-a", "h-a", "policy", 3, 1, "regrant", records)
+				require.NoError(t, err)
+				assert.Empty(t, ack.Refused)
+				ambiguous, err := d.readFederationPulse(ctx, "2026-07-28", 3, now)
+				require.NoError(t, err)
+				assert.True(t, ambiguous.Suppressed)
+				assert.Empty(t, ambiguous.Projects)
+				assert.Nil(t, ambiguous.Totals["tokens"].Value)
+				freshDate := "2026-07-31T09:00:00Z"
+				for _, item := range []struct {
+					name            string
+					epoch, sequence int64
+					tokens          int
+					cost            int64
+				}{{"a", 3, 2, 17, 170}, {"b", 1, 2, 25, 250}, {"c", 1, 2, 35, 350}} {
+					id := item.name + "-fresh"
+					cost := money.Money{Microdollars: item.cost}
+					record := FederationHubRecord{UID: id, Hash: "fresh", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: id, Project: "example/repo", Agent: "codex", StartedAt: &freshDate}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: item.tokens, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: freshDate, DedupKey: id}}}}
+					ack, err := d.CommitFederationBatch(ctx, "e-"+item.name, "s-"+item.name, "h-"+item.name, "policy", item.epoch, item.sequence, "fresh", []FederationHubRecord{record})
+					require.NoError(t, err)
+					assert.Empty(t, ack.Refused)
+				}
+				fresh, err := d.readFederationPulse(ctx, "2026-07-31", 3, time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC))
+				require.NoError(t, err)
+				assert.Equal(t, Ptr(int64(3)), fresh.Totals["sessions"].Value)
+				assert.Equal(t, Ptr(int64(77)), fresh.Totals["tokens"].Value)
+				assert.Equal(t, Ptr(int64(770)), fresh.Totals["cost_microdollars"].Value)
+				return
 			}
 			if scenario == "copy-before-publication" {
 				later, err := copied.readFederationPulse(ctx, "2026-07-28", 3, now)
