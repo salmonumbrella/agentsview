@@ -340,6 +340,35 @@ func TestFederationPulseCrossProjectScopedExportParity(t *testing.T) {
 	assert.Equal(t, map[string]int64{"example/alpha": 6, "example/beta": 15}, projectCost)
 }
 
+func TestFederationPulseUnionsSessionsAcrossDaysAndClipsCutoff(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	for _, id := range []string{"a", "b", "c"} {
+		enrollment, spoke, share := "enr-"+id, "spoke-"+id, "share-"+id
+		require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: id, CredentialSHA256: "digest-" + id}))
+		_, err := d.PutFederationHubShare(ctx, spoke, FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+		require.NoError(t, err)
+		started := "2026-07-27T08:00:00Z"
+		record := FederationHubRecord{UID: id, Hash: "hash", Remote: "example/repo", ProjectKey: "project", Write: SessionBatchWrite{
+			Session: Session{ID: id, Project: "example/repo", Agent: "codex", StartedAt: &started}, Signals: SessionSignalUpdate{Outcome: "unknown"},
+			UsageEvents: []UsageEvent{
+				{Source: "fixture", Model: "model", InputTokens: 10, OccurredAt: "2026-07-28T09:00:00Z", DedupKey: id + "-first"},
+				{Source: "fixture", Model: "model", InputTokens: 20, OccurredAt: "2026-07-29T11:59:00Z", DedupKey: id + "-second"},
+				{Source: "fixture", Model: "model", InputTokens: 1000, OccurredAt: "2026-07-29T12:00:00Z", DedupKey: id + "-cutoff"},
+			},
+		}}
+		_, err = d.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", []FederationHubRecord{record})
+		require.NoError(t, err)
+	}
+	pulse, err := d.readFederationPulse(ctx, "2026-07-28", 3, time.Date(2026, 7, 29, 12, 25, 0, 0, time.UTC))
+	require.NoError(t, err)
+	assert.False(t, pulse.Suppressed)
+	assert.Equal(t, "2026-07-29T12:00:00Z", pulse.ClosedThrough)
+	assert.Equal(t, Ptr(int64(3)), pulse.Totals["sessions"].Value)
+	assert.Equal(t, Ptr(int64(1)), pulse.Totals["active_projects"].Value)
+	assert.Equal(t, Ptr(int64(90)), pulse.Totals["tokens"].Value)
+}
+
 func TestFederationPulseIncludesDatedMessageLessSignals(t *testing.T) {
 	d := testDB(t)
 	ctx := t.Context()
