@@ -53,6 +53,8 @@ func TestJointReportingUsageSupportFollowsPricedSurvivors(t *testing.T) {
 		assert.Equal(t, []activity.UsageProofRef{102}, contributors[reportingJointContributor{"two", "two"}].proofRefs)
 		assert.Equal(t, []activity.UsageProofRef{103}, contributors[reportingJointContributor{"three", "one"}].proofRefs)
 		assert.Empty(t, contributors[reportingJointContributor{"four", "four"}].proofRefs)
+		assert.False(t, contributors[reportingJointContributor{"one", "one"}].proofIncomplete)
+		assert.True(t, contributors[reportingJointContributor{"four", "four"}].proofIncomplete)
 		assert.True(t, contributors[reportingJointContributor{"one", "one"}].costObserved)
 		assert.True(t, contributors[reportingJointContributor{"two", "two"}].costObserved)
 		assert.False(t, contributors[reportingJointContributor{"three", "one"}].costObserved)
