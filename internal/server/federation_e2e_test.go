@@ -1227,8 +1227,13 @@ func TestFederationRestoreReconcilesAndContinuesDeletion(t *testing.T) {
 }
 
 func TestFederationOfflineStopBeforeNewEpochRegistration(t *testing.T) {
-	for _, retention := range []string{"member-controlled", "org-retained"} {
-		t.Run(retention, func(t *testing.T) {
+	for _, tc := range []struct{ retention, scenario string }{
+		{"member-controlled", "local ahead"}, {"org-retained", "local ahead"},
+		{"member-controlled", "hub ahead"}, {"org-retained", "hub ahead"},
+		{"member-controlled", "resume pending"}, {"org-retained", "resume pending"},
+	} {
+		t.Run(tc.retention+" "+tc.scenario, func(t *testing.T) {
+			retention := tc.retention
 			ctx := t.Context()
 			hubDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "hub.db"))
 			spokeDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "spoke.db"))
@@ -1282,19 +1287,35 @@ func TestFederationOfflineStopBeforeNewEpochRegistration(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, shares.Shares, 1)
 			uid := shares.Shares[0].UID
-			grant.Since = "2026-01-01"
-			preview, err = spoke.PreviewShare(ctx, grant)
-			require.NoError(t, err)
-			require.NoError(t, spoke.AddShare(ctx, preview))
 			var localEpoch, hubEpoch int64
 			link, err := spokeDB.GetFederationLink(ctx)
 			require.NoError(t, err)
+			if tc.scenario == "local ahead" {
+				grant.Since = "2026-01-01"
+				preview, err = spoke.PreviewShare(ctx, grant)
+				require.NoError(t, err)
+				require.NoError(t, spoke.AddShare(ctx, preview))
+			} else if tc.scenario == "resume pending" {
+				require.NoError(t, spoke.PauseShare(ctx, uid))
+				_, err = spoke.Push(ctx)
+				require.NoError(t, err)
+				require.NoError(t, spoke.ResumeShare(ctx, uid))
+			} else {
+				// A restored spoke can lag a rebuild that the hub has accepted.
+				_, err = hubDB.PutFederationHubShare(ctx, "spoke-a", db.FederationHubShare{UID: uid, EnrollmentUID: link.EnrollmentUID, Remote: remote, ProjectKey: key, Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: preview.PolicyDigest, Epoch: 2, State: "active", Retention: retention, Rebuild: true})
+				require.NoError(t, err)
+			}
 			localShare, err := spokeDB.GetFederationShare(ctx, link.UID, uid)
 			require.NoError(t, err)
 			localEpoch = localShare.Epoch
 			require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT epoch FROM federation_hub_shares WHERE share_uid=?`, uid).Scan(&hubEpoch))
-			assert.EqualValues(t, 2, localEpoch)
-			assert.EqualValues(t, 1, hubEpoch)
+			if tc.scenario != "hub ahead" {
+				assert.EqualValues(t, 2, localEpoch)
+				assert.EqualValues(t, 1, hubEpoch)
+			} else {
+				assert.EqualValues(t, 1, localEpoch)
+				assert.EqualValues(t, 2, hubEpoch)
+			}
 			offline.Store(true)
 			require.NoError(t, spoke.RemoveShare(ctx, uid))
 			_, err = spoke.Push(ctx)
@@ -1307,6 +1328,9 @@ func TestFederationOfflineStopBeforeNewEpochRegistration(t *testing.T) {
 			require.NoError(t, err)
 			details, err = spoke.Share(ctx, uid)
 			require.NoError(t, err)
+			if tc.scenario == "hub ahead" {
+				assert.EqualValues(t, 3, details.Share.Epoch)
+			}
 			var a, usage, receipts int
 			require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='a'),(SELECT count(*) FROM usage_events WHERE session_id='a'),(SELECT count(*) FROM federation_records WHERE session_id='a')`).Scan(&a, &usage, &receipts))
 			if retention == "member-controlled" {
