@@ -59,11 +59,20 @@ type reportingCellState struct {
 	usage reportingUsageAccum
 }
 
+// reportingJointSupport stays private to the snapshot. It follows the same
+// surviving, priced and allocated rows used to build each joint cell.
+type reportingJointSupport map[reportingCellKey]map[string]*reportingJointContribution
+
+type reportingJointContribution struct {
+	usage        reportingUsageAccum
+	costObserved bool
+}
+
 func jointReportingHour(
 	start time.Time, bucket time.Duration, activityCells []activity.JointActivityCell, activitySessions []activity.SessionRow, usage []activity.UsageRow,
 	sessions map[string]activity.SessionMeta, projects map[string]export.ProjectMapEntry,
 	references map[string]export.ProjectReference,
-	projectKeys []string,
+	projectKeys []string, support ...*reportingJointSupport,
 ) (*export.ReportingJoint, error) {
 	states := make(map[reportingCellKey]*reportingCellState)
 	contributors := make(map[string]bool)
@@ -121,6 +130,31 @@ func jointReportingHour(
 		state := cellFor(at.UTC().Truncate(bucket), session.Project, projectKey, agent, row.Model, automation)
 		if err := state.usage.add(row); err != nil {
 			return nil, fmt.Errorf("sum joint cell usage: %w", err)
+		}
+		if len(support) > 0 && support[0] != nil {
+			key := reportingCellKey{at.UTC().Truncate(bucket).Format(time.RFC3339), projectKey, agent, row.Model, automation}
+			if key.agent == "" {
+				key.agent = "unknown"
+			}
+			if key.model == "" {
+				key.model = "unknown"
+			}
+			id := row.SourceSessionID
+			if id == "" {
+				id = row.SessionID
+			}
+			cells := *support[0]
+			if cells[key] == nil {
+				cells[key] = map[string]*reportingJointContribution{}
+			}
+			if cells[key][id] == nil {
+				cells[key][id] = &reportingJointContribution{}
+			}
+			contribution := cells[key][id]
+			if err := contribution.usage.add(row); err != nil {
+				return nil, fmt.Errorf("sum joint contributor usage: %w", err)
+			}
+			contribution.costObserved = contribution.costObserved || row.Priced || row.Cost.Microdollars != 0
 		}
 		if !row.Priced {
 			state.cell.Pricing.UnpricedRows++

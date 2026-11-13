@@ -17,6 +17,37 @@ import (
 	"go.kenn.io/agentsview/internal/money"
 )
 
+func TestJointReportingUsageSupportFollowsPricedSurvivors(t *testing.T) {
+	start := time.Date(2026, 7, 28, 9, 0, 0, 0, time.UTC)
+	rows := []activity.UsageRow{
+		{SessionID: "one", SourceSessionID: "one", Timestamp: "2026-07-28T09:05:00Z", Agent: "codex", Model: "m", InputTokens: 10, Priced: true, Cost: money.Money{Microdollars: 4}},
+		{SessionID: "two", SourceSessionID: "two", Timestamp: "2026-07-28T09:10:00Z", Agent: "codex", Model: "m", InputTokens: 20, Priced: true, Cost: money.Money{Microdollars: 6}},
+		{SessionID: "three", SourceSessionID: "three", Timestamp: "2026-07-28T09:15:00Z", Agent: "codex", Model: "m", InputTokens: 30},
+	}
+	sessions := map[string]activity.SessionMeta{
+		"one":   {SessionID: "one", Project: "fixture", Agent: "codex"},
+		"two":   {SessionID: "two", Project: "fixture", Agent: "codex"},
+		"three": {SessionID: "three", Project: "fixture", Agent: "codex"},
+	}
+	sidecar := reportingJointSupport{}
+	joint, err := jointReportingHour(start, time.Hour, nil, nil, rows, sessions,
+		map[string]export.ProjectMapEntry{"fixture": {ProjectKey: "project"}}, nil, nil, &sidecar)
+	require.NoError(t, err)
+	require.Len(t, joint.Cells, 1)
+	assert.EqualValues(t, 60, joint.Cells[0].Usage.InputTokens)
+	assert.EqualValues(t, 10, joint.Cells[0].Usage.Cost.Microdollars)
+	require.Len(t, sidecar, 1)
+	for _, contributors := range sidecar {
+		require.Len(t, contributors, 3)
+		assert.EqualValues(t, 10, contributors["one"].usage.inputTokens)
+		assert.EqualValues(t, 20, contributors["two"].usage.inputTokens)
+		assert.EqualValues(t, 30, contributors["three"].usage.inputTokens)
+		assert.True(t, contributors["one"].costObserved)
+		assert.True(t, contributors["two"].costObserved)
+		assert.False(t, contributors["three"].costObserved)
+	}
+}
+
 // TestReportingHoursMatchPerHourPairing compares every hour produced from the
 // shared daily pairs with the original implementation that paired events
 // separately for each hour.

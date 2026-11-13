@@ -272,14 +272,13 @@ type federationPulseCell struct {
 	sessions map[string]struct{}
 }
 type federationPulseAccumulator struct {
-	owners         map[string]federationPulseOwner
-	projects       map[string]map[federationPulseCellKey]*federationPulseCell
-	unsafeProjects map[string]bool
-	invalid        bool
+	owners   map[string]federationPulseOwner
+	projects map[string]map[federationPulseCellKey]*federationPulseCell
+	invalid  bool
 }
 
 func newFederationPulseAccumulator(owners map[string]federationPulseOwner) *federationPulseAccumulator {
-	return &federationPulseAccumulator{owners: owners, projects: map[string]map[federationPulseCellKey]*federationPulseCell{}, unsafeProjects: map[string]bool{}}
+	return &federationPulseAccumulator{owners: owners, projects: map[string]map[federationPulseCellKey]*federationPulseCell{}}
 }
 
 func (a *federationPulseAccumulator) add(id, kind, key, metric string, value int64) {
@@ -384,10 +383,6 @@ func (a *federationPulseAccumulator) release(minimum int) FederationPulse {
 		}
 	}
 	hidden, suppressGlobal := federationPulseSuppression(support, a.owners, minimum)
-	for project := range a.unsafeProjects {
-		hidden[project] = true
-		suppressGlobal = true
-	}
 	suppressGlobal = suppressGlobal || a.invalid
 	global := map[federationPulseCellKey]*federationPulseCell{}
 	projects := make([]FederationPulseProject, 0, len(a.projects))
@@ -498,44 +493,36 @@ func (db *DB) readFederationPulse(ctx context.Context, since string, minimum int
 		for id, row := range stored {
 			signals[id] = row
 		}
-		for _, row := range usage {
-			id := row.SessionID
-			owner, ok := owners[id]
-			if !ok {
-				accumulator.invalid = true
-				continue
+		// The joint owner selects the same hourly rows and accumulates the same
+		// allocated usage as export, alongside private per-source evidence.
+		for hour := start; hour.Before(end); hour = hour.Add(time.Hour) {
+			support := reportingJointSupport{}
+			_, err := jointReportingHour(hour, time.Hour, nil, nil, usage, byID, source.projects, source.references, nil, &support)
+			if err != nil {
+				return err
 			}
-			if row.SourceSessionID != "" {
-				origin, ok := owners[row.SourceSessionID]
-				if !ok || origin.member != owner.member || origin.project != owner.project {
-					accumulator.unsafeProjects[owner.project] = true
-					if ok {
-						accumulator.unsafeProjects[origin.project] = true
+			for key, contributors := range support {
+				for id, contribution := range contributors {
+					if _, ok := owners[id]; !ok {
+						accumulator.invalid = true
+						continue
 					}
-					continue
-				}
-			}
-			usageSeen[id] = true
-			model := row.Model
-			if model == "" {
-				model = "unknown"
-			}
-			rememberModel(id, model)
-			agent := row.Agent
-			if agent == "" {
-				agent = "unknown"
-			}
-			for _, amount := range []int{row.InputTokens, row.OutputTokens, row.CacheCreationTokens, row.CacheReadTokens} {
-				for _, group := range [][2]string{{"total", ""}, {"agent", agent}, {"model", model}} {
-					accumulator.add(id, group[0], group[1], "tokens", int64(amount))
-				}
-			}
-			if row.Priced || row.Cost.Microdollars != 0 {
-				for _, group := range [][2]string{{"total", ""}, {"agent", agent}, {"model", model}} {
-					accumulator.add(id, group[0], group[1], "cost_microdollars", row.Cost.Microdollars)
+					usageSeen[id] = true
+					rememberModel(id, key.model)
+					for _, amount := range []int64{contribution.usage.inputTokens, contribution.usage.outputTokens, contribution.usage.cacheCreationTokens, contribution.usage.cacheReadTokens} {
+						for _, group := range [][2]string{{"total", ""}, {"agent", key.agent}, {"model", key.model}} {
+							accumulator.add(id, group[0], group[1], "tokens", amount)
+						}
+					}
+					if contribution.costObserved {
+						for _, group := range [][2]string{{"total", ""}, {"agent", key.agent}, {"model", key.model}} {
+							accumulator.add(id, group[0], group[1], "cost_microdollars", contribution.usage.cost.Microdollars)
+						}
+					}
 				}
 			}
 		}
+
 		return nil
 	})
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/agentsview/internal/export"
 )
 
 func TestFederationPulseScopeUsesOwnedLiveRecords(t *testing.T) {
@@ -220,6 +221,24 @@ func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T)
 	assert.Equal(t, Ptr(int64(60)), got.Projects[0].Totals["tokens"].Value)
 	require.Len(t, got.Projects[0].Models, 1)
 	assert.Equal(t, Ptr(int64(3)), got.Projects[0].Models[0].Metrics["sessions"].Value)
+
+	// Compare with the ordinary export owner over the identical lawful scope;
+	// the literal 60 above remains the independent accounting oracle.
+	date := time.Date(2026, 7, 28, 0, 0, 0, 0, time.UTC)
+	tx, err := d.getReader().BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	scope := map[string]struct{}{"one": {}, "two": {}, "three": {}}
+	source, err := d.loadReportingExportSourceScoped(ctx, tx, date, date.Add(24*time.Hour), export.ReportingJointSchemaVersion, scope)
+	require.NoError(t, err)
+	hours, err := reportingHoursFromSource(ctx, source.forDate(date, date.Add(24*time.Hour)), date, 24, export.ReportingJointSchemaVersion, nil, time.Hour)
+	require.NoError(t, err)
+	var exported int64
+	for _, hour := range hours {
+		exported += hour.Usage.Totals.InputTokens
+	}
+	assert.EqualValues(t, 60, exported)
+	assert.Equal(t, exported, *got.Totals["tokens"].Value)
 }
 
 func TestFederationPulseIncludesDatedMessageLessSignals(t *testing.T) {
