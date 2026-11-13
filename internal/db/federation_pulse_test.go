@@ -380,7 +380,7 @@ func TestFederationPulseUsesDistinctDatedSessionsAndReportingUsage(t *testing.T)
 // These regressions describe the accepted cross-release privacy requirement.
 // The publication policy is still open; no admission bypass is used here.
 func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
-	for _, scenario := range []string{"window", "reverse-window", "update", "rolled-back-update", "missing-authority", "traced-exclusion", "copy-before-publication", "copy-after-publication", "cancel-before-admission", "concurrent", "purge-regrant", "untraced-write", "reopen", "second-handle", "closed-writer", "untraced-session", "untraced-record", "untraced-message", "untraced-tool-result", "untraced-exclusion"} {
+	for _, scenario := range []string{"window", "reverse-window", "update", "rolled-back-update", "canceled-commit", "missing-authority", "traced-exclusion", "copy-before-publication", "copy-after-publication", "cancel-before-admission", "concurrent", "purge-regrant", "untraced-write", "reopen", "second-handle", "closed-writer", "untraced-session", "untraced-record", "untraced-message", "untraced-tool-result", "untraced-exclusion"} {
 		t.Run(scenario, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
@@ -511,16 +511,31 @@ func TestFederationPulseProtectsRepeatedWindowsAndUpdates(t *testing.T) {
 				require.NoError(t, err)
 				assert.Equal(t, 4, count)
 			}
-			if scenario == "rolled-back-update" {
-				abort := errors.New("synthetic transaction failure")
-				err := d.Update(ctx, func(tx *sql.Tx) error {
-					_, err := tx.ExecContext(ctx, `UPDATE usage_events SET input_tokens=17,cost_microdollars=170 WHERE session_id='a'`)
-					if err != nil {
-						return err
-					}
-					return abort
-				})
-				require.ErrorIs(t, err, abort)
+			if scenario == "rolled-back-update" || scenario == "canceled-commit" {
+				if scenario == "rolled-back-update" {
+					abort := errors.New("synthetic transaction failure")
+					err := d.Update(ctx, func(tx *sql.Tx) error {
+						_, err := tx.ExecContext(ctx, `UPDATE usage_events SET input_tokens=17,cost_microdollars=170 WHERE session_id='a'`)
+						if err != nil {
+							return err
+						}
+						return abort
+					})
+					require.ErrorIs(t, err, abort)
+				} else {
+					canceled, cancel := context.WithCancel(ctx)
+					defer cancel()
+					cost := money.Money{Microdollars: 170}
+					write := SessionBatchWrite{Session: Session{ID: "a", Project: "example/repo", Agent: "codex", StartedAt: &start}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: 17, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: start, DedupKey: "a"}}}
+					beforeCommit := false
+					_, err := d.WriteSessionBatchAtomic(canceled, []SessionBatchWrite{write}, func() error {
+						beforeCommit = true
+						cancel()
+						return nil
+					})
+					require.True(t, beforeCommit)
+					require.Error(t, err)
+				}
 				repeated, err := d.readFederationPulse(ctx, "2026-07-29", 3, now)
 				require.NoError(t, err)
 				assert.Equal(t, Ptr(int64(60)), repeated.Totals["tokens"].Value)
