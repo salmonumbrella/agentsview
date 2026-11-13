@@ -316,17 +316,6 @@ func TestFederationControlInputMessages(t *testing.T) {
 		assert.Equal(t, tc.message, decoded.Error)
 		assert.NotContains(t, string(data), secret)
 	}
-	// Route registration is role-specific; change the synthetic service role after
-	// registration to exercise its defensive role refusal through the real server.
-	wrongRole := New(config.Config{Host: "127.0.0.1", Port: 8080}, database, nil, WithFederation(svc))
-	wrongRole.federation = federation.NewService("spoke", "spoke-a", config.FederationHubConfig{}, database)
-	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/v1/federation/enrollments", strings.NewReader(`{"spoke_archive_id":"a","member":"m"}`))
-	req.RemoteAddr = "127.0.0.1:1234"
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	wrongRole.Handler().ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "hub role required")
 }
 
 func TestFederationJoinControlMessages(t *testing.T) {

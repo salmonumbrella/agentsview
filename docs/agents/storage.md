@@ -206,13 +206,12 @@ sources and deletion evidence. Seed import and restore permanently enable
 archive-only mode, which disables source sync and publication. These archives
 store `1 << 20` plus their parser version in `PRAGMA user_version`, so older
 builds refuse them. This build decodes that range and preserves pending
-rebuilds; ordinary archives keep their parser version unchanged. An archive holding
-an enrollment or link row stores `1 << 21` plus its parser version in
+rebuilds; ordinary archives keep their parser version unchanged. An archive
+holding an enrollment or link row stores `1 << 21` plus its parser version in
 `PRAGMA user_version`, so older builds refuse it instead of dropping that state
 at full resync, and archives without federation rows keep their parser version
-unchanged. Data version
-173 requires no source reparse; it keeps older binaries from writing archives
-whose image-text index they cannot maintain.
+unchanged. Data version 173 requires no source reparse; it keeps older binaries
+from writing archives whose image-text index they cannot maintain.
 
 ### Artifact checkpoint landings
 
