@@ -1678,6 +1678,10 @@ func TestRetainedSnapshotRecoversHubSequenceWithoutSendingContent(t *testing.T) 
 			for _, id := range []string{"b", "c"} {
 				require.NoError(t, spokeDB.ReplaceSessionUsageEvents(ctx, id, []db.UsageEvent{{SessionID: id, Source: "fixture", Model: "model", InputTokens: 42, OccurredAt: "2026-01-02T00:00:00Z", DedupKey: id}}))
 			}
+			for _, id := range []string{"old-deletion-1", "old-deletion-2"} {
+				require.NoError(t, spokeDB.UpsertSession(ctx, db.Session{ID: id, Project: "fixture", Machine: "install", Agent: "claude"}))
+				require.NoError(t, spokeDB.DeleteSession(ctx, id))
+			}
 			snapshot := filepath.Join(t.TempDir(), "snapshot.db")
 			if mode == "regressed cursors" {
 				// Save the same archive identity before its deletion journal advances.
@@ -1729,6 +1733,13 @@ func TestRetainedSnapshotRecoversHubSequenceWithoutSendingContent(t *testing.T) 
 				}
 				require.NoError(t, replacement.DeleteSession(ctx, "b"))
 				require.NoError(t, replacement.PutFederationExclusion(ctx, "c", "private"))
+				link, err := replacement.GetFederationLink(ctx)
+				require.NoError(t, err)
+				copiedShare, err := replacement.GetFederationShare(ctx, link.UID, uid)
+				require.NoError(t, err)
+				var deletionRevision int64
+				require.NoError(t, replacement.Reader().QueryRow(ctx, `SELECT revision FROM session_deletion_changes WHERE session_id='b' AND deleted=1`).Scan(&deletionRevision))
+				assert.Less(t, deletionRevision, copiedShare.DeletionCursor)
 				recovered := federation.NewService("spoke", "spoke-a", cfg.Federation.Hub, replacement)
 				_, err = recovered.Push(ctx)
 				require.ErrorContains(t, err, "unproven absence remains pending")

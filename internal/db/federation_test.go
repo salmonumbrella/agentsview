@@ -247,6 +247,44 @@ func TestFederationUserVersion(t *testing.T) {
 	assert.Equal(t, archiveOnlyVersionBase+federationVersionBase+CurrentDataVersion(), reverse)
 }
 
+func TestLegacyFederationLinkOpenAndCopyKeepRetirement(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	old, err := sql.Open("sqlite3", path)
+	require.NoError(t, err)
+	_, err = old.ExecContext(ctx, `CREATE TABLE federation_links (
+		link_uid TEXT PRIMARY KEY, hub_origin TEXT NOT NULL,
+		hub_archive_id TEXT NOT NULL, enrollment_uid TEXT NOT NULL,
+		member TEXT NOT NULL, token_file TEXT NOT NULL, protocol_version INTEGER NOT NULL,
+		state TEXT NOT NULL, created_at TEXT NOT NULL);
+		INSERT INTO federation_links VALUES ('old-link','https://hub.example','hub','enr','member','/fixture/token',1,'active','2026-01-01')`)
+	require.NoError(t, err)
+	require.NoError(t, old.Close())
+	copy := testDB(t)
+	require.NoError(t, copy.CopyFederationStateFrom(ctx, path))
+	upgraded, err := OpenIsolated(ctx, path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, upgraded.Close()) })
+	for _, archive := range []*DB{copy, upgraded} {
+		current, err := archive.GetFederationLink(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, "old-link", current.UID)
+		var version int
+		require.NoError(t, archive.Reader().QueryRow(ctx, `PRAGMA user_version`).Scan(&version))
+		assert.Equal(t, federationVersionBase+CurrentDataVersion(), version)
+		require.NoError(t, archive.DeleteFederationLink(ctx))
+		require.NoError(t, archive.Reader().QueryRow(ctx, `PRAGMA user_version`).Scan(&version))
+		assert.Equal(t, federationVersionBase+federationWithdrawalVersionBase+CurrentDataVersion(), version)
+		_, err = archive.GetFederationLink(ctx)
+		assert.ErrorIs(t, err, sql.ErrNoRows)
+		links, err := archive.ListFederationLinks(ctx)
+		require.NoError(t, err)
+		require.Len(t, links, 1)
+		assert.Equal(t, "https://hub.example", links[0].HubOrigin)
+		assert.Equal(t, "retired", links[0].State)
+	}
+}
+
 func TestDecodeFederationUserVersion(t *testing.T) {
 	for _, tc := range []struct {
 		version     int
