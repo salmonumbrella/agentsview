@@ -2,6 +2,7 @@ package federation
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -192,4 +193,156 @@ func TestHubPulseProtectsSummaryUpdatesAndKeepsIndependentProject(t *testing.T) 
 	assert.EqualValues(t, 77, *pTotals["tokens"].Value)
 	require.NotNil(t, pTotals["cost_microdollars"].Value)
 	assert.EqualValues(t, 770, *pTotals["cost_microdollars"].Value)
+}
+
+// The three selections overlap in individual stable origins even though no two
+// complete selected bags are equal. Their combined values reveal one member's
+// difference, so at least one later selection must be withheld.
+func TestHubPulseProtectsPartiallyOverlappingSummaryViews(t *testing.T) {
+	ctx := t.Context()
+	archive, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "hub.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, archive.Close()) })
+	cfg, err := config.Default()
+	require.NoError(t, err)
+	cfg.Federation.Hub.SuggestedProjects = []string{}
+	hub := NewService("hub", "hub", cfg.Federation.Hub, archive)
+	digest, err := export.DigestCanonical(cfg.Federation.Hub)
+	require.NoError(t, err)
+	remote := "github.com/example/overlap"
+	key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
+	enrollments := make([]string, 3)
+	for i, name := range []string{"a", "b", "c"} {
+		spoke, share := "spoke-"+name, "share-"+name
+		enrollment, _, err := hub.Enroll(ctx, spoke, name, "")
+		require.NoError(t, err)
+		enrollments[i] = enrollment.UID
+		_, err = hub.RegisterShare(ctx, enrollment.UID, spoke, share, ShareManifest{Protocol: ProtocolVersion, SpokeInstance: spoke, ShareUID: share, Epoch: 1, Remote: remote, ProjectKey: key, Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: digest})
+		require.NoError(t, err)
+	}
+	inside, outside := "2020-07-29T09:00:00Z", "2020-07-28T09:00:00Z"
+	ids := [][]string{{"a1", "a2", "a3"}, {"b1", "b2", "b3"}, {"c1", "c2", "c3"}}
+	amounts := [][]int{{10, 20, 30}, {40, 50, 60}, {70, 80, 90}}
+	apply := func(sequence int64, selected map[string]bool) {
+		t.Helper()
+		for i, name := range []string{"a", "b", "c"} {
+			spoke, share := "spoke-"+name, "share-"+name
+			var records []BatchRecord
+			for j, id := range ids[i] {
+				started := &outside
+				if selected[id] {
+					started = &inside
+				}
+				payload := SummaryRecord{SessionID: id, Remote: remote, ProjectKey: key, Agent: "codex", StartedAt: started, Outcome: "unknown", ByModel: map[string]db.SessionModelUsageBreakdown{"model": {InputTokens: amounts[i][j], HasCost: true, Cost: money.Money{Microdollars: int64(amounts[i][j] * 10)}}}}
+				hash, err := export.DigestCanonical(payload)
+				require.NoError(t, err)
+				records = append(records, BatchRecord{RecordUID: id, Kind: "session_summary", Hash: hash, Payload: &payload})
+			}
+			ack, err := hub.ApplyBatch(ctx, enrollments[i], spoke, share, Batch{Protocol: ProtocolVersion, SpokeInstance: spoke, ShareUID: share, Epoch: 1, Sequence: sequence, Records: records})
+			require.NoError(t, err)
+			assert.Empty(t, ack.Refused)
+			assert.Equal(t, sequence, ack.Committed)
+		}
+	}
+	apply(1, map[string]bool{"a1": true, "b1": true, "c1": true})
+	first, err := hub.Pulse(ctx, "2020-07-29")
+	require.NoError(t, err)
+	require.NotNil(t, first.Totals["sessions"].Value)
+	assert.EqualValues(t, 3, *first.Totals["sessions"].Value)
+	require.NotNil(t, first.Totals["tokens"].Value)
+	assert.EqualValues(t, 120, *first.Totals["tokens"].Value)
+	require.NotNil(t, first.Totals["cost_microdollars"].Value)
+	assert.EqualValues(t, 1200, *first.Totals["cost_microdollars"].Value)
+	apply(2, map[string]bool{"a2": true, "b2": true, "c2": true})
+	second, err := hub.Pulse(ctx, "2020-07-29")
+	require.NoError(t, err)
+	if !second.Suppressed {
+		require.NotNil(t, second.Totals["tokens"].Value)
+		assert.EqualValues(t, 150, *second.Totals["tokens"].Value)
+		require.NotNil(t, second.Totals["cost_microdollars"].Value)
+		assert.EqualValues(t, 1500, *second.Totals["cost_microdollars"].Value)
+	}
+	apply(3, map[string]bool{"a1": true, "a3": true, "b1": true, "b2": true, "c1": true, "c2": true})
+	third, err := hub.Pulse(ctx, "2020-07-29")
+	require.NoError(t, err)
+	if !third.Suppressed {
+		require.NotNil(t, third.Totals["sessions"].Value)
+		assert.EqualValues(t, 6, *third.Totals["sessions"].Value)
+		require.NotNil(t, third.Totals["tokens"].Value)
+		assert.EqualValues(t, 280, *third.Totals["tokens"].Value)
+		require.NotNil(t, third.Totals["cost_microdollars"].Value)
+		assert.EqualValues(t, 2800, *third.Totals["cost_microdollars"].Value)
+	}
+	assert.True(t, second.Suppressed || third.Suppressed, "all three views expose one member's difference")
+}
+
+// All windows are ordinary summary replacements. A separate correspondence per
+// result would permit collecting a system that identifies one member.
+func TestHubPulseProtectsJointSevenMemberHistory(t *testing.T) {
+	ctx := t.Context()
+	archive, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "hub.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, archive.Close()) })
+	cfg, err := config.Default()
+	require.NoError(t, err)
+	cfg.Federation.Hub.SuggestedProjects = []string{}
+	hub := NewService("hub", "hub", cfg.Federation.Hub, archive)
+	digest, err := export.DigestCanonical(cfg.Federation.Hub)
+	require.NoError(t, err)
+	remote := "github.com/example/joint"
+	key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
+	names := []string{"a", "b", "c", "d", "e", "f", "g"}
+	enrollments := make([]string, len(names))
+	for i, name := range names {
+		spoke, share := "spoke-"+name, "share-"+name
+		enrollment, _, err := hub.Enroll(ctx, spoke, name, "")
+		require.NoError(t, err)
+		enrollments[i] = enrollment.UID
+		_, err = hub.RegisterShare(ctx, enrollment.UID, spoke, share, ShareManifest{Protocol: ProtocolVersion, SpokeInstance: spoke, ShareUID: share, Epoch: 1, Remote: remote, ProjectKey: key, Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: digest})
+		require.NoError(t, err)
+	}
+	inside, outside := "2020-07-29T09:00:00Z", "2020-07-28T09:00:00Z"
+	apply := func(sequence int64, selected string) {
+		t.Helper()
+		for i, name := range names {
+			spoke, share := "spoke-"+name, "share-"+name
+			started := &outside
+			if strings.Contains(selected, name) {
+				started = &inside
+			}
+			payload := SummaryRecord{SessionID: name, Remote: remote, ProjectKey: key, Agent: "codex", StartedAt: started, Outcome: "unknown", ByModel: map[string]db.SessionModelUsageBreakdown{"model": {InputTokens: i + 1, HasCost: true, Cost: money.Money{Microdollars: int64((i + 1) * 10)}}}}
+			hash, err := export.DigestCanonical(payload)
+			require.NoError(t, err)
+			ack, err := hub.ApplyBatch(ctx, enrollments[i], spoke, share, Batch{Protocol: ProtocolVersion, SpokeInstance: spoke, ShareUID: share, Epoch: 1, Sequence: sequence, Records: []BatchRecord{{RecordUID: name, Kind: "session_summary", Hash: hash, Payload: &payload}}})
+			require.NoError(t, err)
+			assert.Empty(t, ack.Refused)
+			assert.Equal(t, sequence, ack.Committed)
+		}
+	}
+	apply(1, "abcdefg")
+	all, err := hub.Pulse(ctx, "2020-07-29")
+	require.NoError(t, err)
+	require.NotNil(t, all.Totals["tokens"].Value)
+	assert.EqualValues(t, 28, *all.Totals["tokens"].Value)
+	windows := []struct {
+		members string
+		tokens  int64
+	}{{"abc", 6}, {"ade", 10}, {"afg", 14}, {"bdf", 12}, {"beg", 14}, {"cdg", 14}, {"cef", 14}}
+	firstThreeWithheld := false
+	for i, window := range windows {
+		apply(int64(i+2), window.members)
+		got, err := hub.Pulse(ctx, "2020-07-29")
+		require.NoError(t, err)
+		if got.Suppressed {
+			if i < 3 {
+				firstThreeWithheld = true
+			}
+			continue
+		}
+		require.NotNil(t, got.Totals["sessions"].Value)
+		assert.EqualValues(t, 3, *got.Totals["sessions"].Value)
+		require.NotNil(t, got.Totals["tokens"].Value)
+		assert.Equal(t, window.tokens, *got.Totals["tokens"].Value)
+	}
+	assert.True(t, firstThreeWithheld, "28 plus 6, 10 and 14 exposes the first member")
 }
