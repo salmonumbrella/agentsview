@@ -417,6 +417,20 @@ func TestFederationPulseDirtyProjectKeepsIndependentProject(t *testing.T) {
 	assert.Equal(t, Ptr(int64(3)), later.Projects[0].Totals["sessions"].Value)
 	assert.Equal(t, Ptr(int64(150)), later.Projects[0].Totals["tokens"].Value)
 	assert.Equal(t, Ptr(int64(1500)), later.Projects[0].Totals["cost_microdollars"].Value)
+	// A traced update to Q must not validate P's earlier untraced write.
+	cost := money.Money{Microdollars: 400}
+	record := FederationHubRecord{UID: "d", Hash: "metadata-only", Remote: "example/q", ProjectKey: "q", Write: SessionBatchWrite{Session: Session{ID: "d", Project: "example/q", Agent: "codex", StartedAt: &start, DisplayName: Ptr("updated")}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "federation", Model: "model", InputTokens: 40, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: start, DedupKey: "model"}}}}
+	_, err = d.CommitFederationBatch(ctx, "e-d", "s-d", "h-d", "policy", 1, 2, "metadata-only", []FederationHubRecord{record})
+	require.NoError(t, err)
+	afterUpdate, err := d.readFederationPulse(ctx, "2026-07-29", 3, now)
+	require.NoError(t, err)
+	assert.True(t, afterUpdate.Suppressed)
+	assert.Nil(t, afterUpdate.Totals["tokens"].Value)
+	assert.Nil(t, afterUpdate.Totals["cost_microdollars"].Value)
+	require.Len(t, afterUpdate.Projects, 1)
+	assert.Equal(t, "q", afterUpdate.Projects[0].Key)
+	assert.Equal(t, Ptr(int64(150)), afterUpdate.Projects[0].Totals["tokens"].Value)
+	assert.Equal(t, Ptr(int64(1500)), afterUpdate.Projects[0].Totals["cost_microdollars"].Value)
 }
 
 // These regressions describe the accepted cross-release privacy requirement.
