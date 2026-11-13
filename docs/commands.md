@@ -2931,12 +2931,16 @@ the hub bearer token can read stored records.
 
 Use `federation share list`, `show`, `pause`, `resume`, or `remove` to manage
 shares. A changed hub policy pauses affected shares; run `share add` again to
-review and accept it. Resume works without the hub; add and push dry-run need a
-live hub policy. A share can be removed with no records sent.
+review and accept it. Resume works without the hub; add and push need a live
+hub policy. Removing a share stops future delivery; previously delivered records
+remain on the hub until withdrawal is supported.
 `federation exclude <session-id> [--reason text]` keeps a session out of all
 shares in this archive, including after removal or rejoining.
-`federation push --dry-run` prints the selected summaries locally. This release
-records consent only and sends no session records.
+`federation push --dry-run` prints the selected summaries locally. Run
+`federation push` to deliver active shares now; the spoke also retries on a
+schedule. `federation status` and `federation share show` report delivery and
+quarantine counts. Shares confirmed with the earlier notice that nothing is sent
+must be removed and added again before delivery.
 
 Selection requires the session's own unambiguous repository identity and proof
 that it came from this installation. Imported and uncertain sessions are

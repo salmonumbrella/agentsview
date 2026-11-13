@@ -7,6 +7,11 @@ import (
 	"sort"
 )
 
+const federationLocalOrigin = `(s.machine NOT IN ('', 'local') AND s.machine = COALESCE((SELECT value FROM pg_sync_state WHERE key='artifact_local_installation_id'),'')
+   AND EXISTS (SELECT 1 FROM local_session_source_baselines b WHERE b.session_id=s.id AND b.machine=s.machine AND b.agent=s.agent AND b.file_path=s.file_path)
+   AND NOT EXISTS (SELECT 1 FROM archive_session_provenance p WHERE p.session_id=s.id)
+   AND NOT EXISTS (SELECT 1 FROM artifact_imported_sessions i WHERE i.imported_session_id=s.id))`
+
 // FederationSelection is a single archive snapshot, selected by each session's
 // own repository identity and machine-local ownership evidence.
 type FederationSelection struct {
@@ -83,10 +88,7 @@ func (db *DB) selectFederationSessionIDs(ctx context.Context, tx *sql.Tx, remote
 		selectedIDs[id] = true
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT s.id, snap.key,
-  (s.machine NOT IN ('', 'local') AND s.machine = COALESCE((SELECT value FROM pg_sync_state WHERE key='artifact_local_installation_id'),'')
-   AND EXISTS (SELECT 1 FROM local_session_source_baselines b WHERE b.session_id=s.id AND b.machine=s.machine AND b.agent=s.agent AND b.file_path=s.file_path)
-   AND NOT EXISTS (SELECT 1 FROM archive_session_provenance p WHERE p.session_id=s.id)
-   AND NOT EXISTS (SELECT 1 FROM artifact_imported_sessions i WHERE i.imported_session_id=s.id)),
+  `+federationLocalOrigin+`,
   EXISTS (SELECT 1 FROM federation_exclusions e WHERE e.session_id=s.id),
   (? = '' OR julianday(s.started_at) >= julianday(?)),
   (SELECT count(*) FROM tool_calls t WHERE t.session_id=s.id),s.outcome,s.health_grade

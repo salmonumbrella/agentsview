@@ -229,7 +229,7 @@ func startServeBackground(ctx context.Context,
 	var result backgroundLaunchResult
 	operation := policy.operation()
 	cfg.PersistentDaemon = cfg.PersistentDaemon || policy.Persistent
-	if policy.ConfigOnly {
+	if policy.ConfigOnly && cfg.Federation.Role != "hub" {
 		cfg.NoSync = false
 	}
 	replacementCheckStarted := time.Now()
@@ -436,7 +436,7 @@ func prepareAutoStartReplacement(ctx context.Context, cfg *config.Config, rt *Da
 	// NoSync adoption must reach the child arguments after validation.
 	effective.DBPath = cfg.DBPath
 	effective.AuthToken = cfg.AuthToken
-	effective.NoSync = cfg.NoSync
+	effective.NoSync = cfg.NoSync || effective.Federation.Role == "hub"
 	effective.PersistentDaemon = cfg.PersistentDaemon
 	if err := prepareBackgroundReplacement(ctx, &effective, rt, true); err != nil {
 		return err

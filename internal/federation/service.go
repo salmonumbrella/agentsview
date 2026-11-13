@@ -27,6 +27,7 @@ const (
 )
 
 type Service struct {
+	pushSem         chan struct{}
 	role, archiveID string
 	policy          config.FederationHubConfig
 	db              *db.DB
@@ -36,7 +37,7 @@ func NewService(role, archiveID string, policy config.FederationHubConfig, datab
 	if policy.SuggestedProjects == nil {
 		policy.SuggestedProjects = []string{}
 	}
-	return &Service{role: role, archiveID: archiveID, policy: policy, db: database}
+	return &Service{role: role, archiveID: archiveID, policy: policy, db: database, pushSem: make(chan struct{}, 1)}
 }
 func (s *Service) Role() string      { return s.role }
 func (s *Service) ArchiveID() string { return s.archiveID }
@@ -127,11 +128,20 @@ func (s *Service) Revoke(ctx context.Context, uid string) error {
 	return err
 }
 func (s *Service) Authenticate(ctx context.Context, token, archive string) (HandshakeResponse, error) {
+	return s.AuthenticatePeer(ctx, token, archive, true)
+}
+func (s *Service) AuthenticatePeer(ctx context.Context, token, archive string, stamp bool) (HandshakeResponse, error) {
 	var out HandshakeResponse
 	if !strings.HasPrefix(token, "avfc_") {
 		return out, db.ErrFederationUnauthorized
 	}
-	e, err := s.db.AuthenticateFederationCredential(ctx, credentialDigest(token), archive)
+	var e db.FederationEnrollment
+	var err error
+	if stamp {
+		e, err = s.db.AuthenticateFederationCredential(ctx, credentialDigest(token), archive)
+	} else {
+		e, err = s.db.LookupFederationCredential(ctx, credentialDigest(token), archive)
+	}
 	if err != nil {
 		return out, err
 	}
@@ -139,7 +149,7 @@ func (s *Service) Authenticate(ctx context.Context, token, archive string) (Hand
 	if err != nil {
 		return out, err
 	}
-	return HandshakeResponse{HubArchiveID: s.archiveID, ProtocolVersions: []int{ProtocolVersion}, EnrollmentUID: e.UID, Member: e.Member, EnrollmentState: "enrolled", Policy: s.policy, PolicyDigest: digest}, nil
+	return HandshakeResponse{HubArchiveID: s.archiveID, SpokeArchiveID: e.SpokeArchiveID, ProtocolVersions: []int{ProtocolVersion}, EnrollmentUID: e.UID, Member: e.Member, EnrollmentState: "enrolled", Policy: s.policy, PolicyDigest: digest}, nil
 }
 func validateHandshake(h HandshakeResponse, expected string) error {
 	if h.HubArchiveID != expected || h.EnrollmentUID == "" || h.Member == "" {
@@ -207,10 +217,12 @@ func (s *Service) Join(ctx context.Context, origin, hubID, tokenFile string) err
 }
 
 type Status struct {
-	ArchiveID string             `json:"archive_id"`
-	Link      *db.FederationLink `json:"link,omitempty"`
-	Shares    int                `json:"shares"`
-	Hub       *HubStatus         `json:"hub,omitempty"`
+	ArchiveID  string                    `json:"archive_id"`
+	Link       *db.FederationLink        `json:"link,omitempty"`
+	Shares     int                       `json:"shares"`
+	Delivery   DeliveryCounts            `json:"delivery"`
+	Quarantine []db.FederationQuarantine `json:"quarantine"`
+	Hub        *HubStatus                `json:"hub,omitempty"`
 }
 type HubStatus struct {
 	State        string                      `json:"state"`
@@ -234,6 +246,23 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 		return out, err
 	}
 	out.Shares = len(shares)
+	for _, share := range shares {
+		ledger, e := s.db.FederationLedger(ctx, share.UID)
+		if e != nil {
+			return out, e
+		}
+		for _, d := range ledger {
+			if d.State == "sent" {
+				out.Delivery.Sent++
+			} else if d.State == "refused" {
+				out.Delivery.Refused++
+			}
+		}
+	}
+	out.Quarantine, err = s.db.FederationQuarantines(ctx)
+	if err != nil {
+		return out, err
+	}
 	out.Hub = &HubStatus{}
 	if link.State == LinkBlocked {
 		out.Hub.State = HubBlocked

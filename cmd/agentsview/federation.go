@@ -175,7 +175,10 @@ func newFederationCommand() *cobra.Command {
 		if asJSON {
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(value)
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Archive: %s\nShares: %d\n", value.ArchiveID, value.Shares)
+		fmt.Fprintf(cmd.OutOrStdout(), "Archive: %s\nShares: %d\nSent: %d\nRefused: %d\nQuarantined: %d\n", value.ArchiveID, value.Shares, value.Delivery.Sent, value.Delivery.Refused, len(value.Quarantine))
+		for _, q := range value.Quarantine {
+			fmt.Fprintf(cmd.OutOrStdout(), "Quarantine %s at sequence %d: %s\n", q.ShareUID, q.Sequence, q.Error)
+		}
 		if value.Link != nil {
 			fmt.Fprintf(cmd.OutOrStdout(), "Hub: %s\nHub archive: %s\nMember: %s\nState: %s\n", value.Link.HubOrigin, value.Link.HubArchiveID, value.Link.Member, value.Link.State)
 		}
@@ -299,7 +302,7 @@ func newFederationShareCommand() *cobra.Command {
 				return err
 			}
 			if action == "remove" {
-				_, err = fmt.Fprintln(cmd.OutOrStdout(), "Share removed; no records were sent.")
+				_, err = fmt.Fprintln(cmd.OutOrStdout(), "Share removed; future delivery stopped. Previously delivered records remain on the hub.")
 			}
 			return err
 		}})
@@ -321,15 +324,24 @@ func newFederationExcludeCommand() *cobra.Command {
 func newFederationPushCommand() *cobra.Command {
 	var dry bool
 	cmd := &cobra.Command{Use: "push", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		if !dry {
-			return errors.New("--dry-run is required; delivery is not available yet")
-		}
 		tr, cfg, err := federationTransport(cmd, "spoke")
 		if err != nil {
 			return err
 		}
-		return streamFederationDryRun(cmd.Context(), tr.URL, cfg.AuthToken, cmd.OutOrStdout())
+		if dry {
+			return streamFederationDryRun(cmd.Context(), tr.URL, cfg.AuthToken, cmd.OutOrStdout())
+		}
+		return pushFederation(cmd.Context(), tr.URL, cfg.AuthToken, cmd.OutOrStdout())
 	}}
 	cmd.Flags().BoolVar(&dry, "dry-run", false, "Print records without sending")
 	return cmd
+}
+
+func pushFederation(ctx context.Context, base, token string, out io.Writer) error {
+	var result federation.PushResult
+	if err := federationRequest(ctx, base, token, http.MethodPost, "/api/v1/federation/push", nil, &result); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(out, "Sent: %d; unchanged: %d; refused: %d; quarantined: %d\n", result.Sent, result.Unchanged, result.Refused, result.Quarantined)
+	return err
 }

@@ -425,7 +425,7 @@ func applyCustomPricing(database *db.DB, cfg config.Config) {
 func ensureFreshData(
 	ctx context.Context, appCfg config.Config, database *db.DB, skip bool,
 ) {
-	if skip {
+	if skip || appCfg.NoSync {
 		return
 	}
 	if ctx == nil {

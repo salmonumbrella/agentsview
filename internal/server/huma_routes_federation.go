@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"log"
 	"net/http"
@@ -65,11 +66,15 @@ func (s *Server) registerFederationRoutes() {
 		})
 	}
 	if s.federation.Role() == "hub" {
+		peer := func(op *huma.Operation) { op.Hidden = true }
+		registerRoute(group, http.MethodPut, "/shares/{uid}", "Register share", s.humaFederationPutShare, peer, maxBodyBytes(16<<20))
+		registerRoute(group, http.MethodPost, "/shares/{uid}/batches", "Deliver batch", s.humaFederationBatch, peer, maxBodyBytes(16<<20))
 		registerRoute(group, http.MethodPost, "/enrollments", "Enroll a spoke", s.humaFederationEnroll, hidden)
 		registerRoute(group, http.MethodGet, "/enrollments", "List enrollments", s.humaFederationList, hidden)
 		registerRoute(group, http.MethodPost, "/enrollments/{uid}/revoke", "Revoke an enrollment", s.humaFederationRevoke, hidden)
 	}
 	if s.federation.Role() == "spoke" {
+		registerRoute(group, http.MethodPost, "/push", "Deliver shares", s.humaFederationPush, hidden)
 		registerRoute(group, http.MethodPost, "/link", "Join a hub", s.humaFederationJoin, hidden)
 		registerRoute(group, http.MethodGet, "/link", "Read federation status", s.humaFederationStatus, hidden)
 		registerRoute(group, http.MethodDelete, "/link", "Leave a hub", s.humaFederationLeave, hidden)
@@ -226,4 +231,64 @@ func (s *Server) humaDryRun(ctx context.Context, _ *emptyInput) (*huma.StreamRes
 			}
 		}
 	}}, nil
+}
+
+type federationPeerInput struct {
+	UID     string `path:"uid"`
+	RawBody []byte `contentType:"application/json"`
+}
+type federationBatchOutput struct {
+	Status int
+	Body   federation.BatchAck
+}
+
+func peerIdentity(ctx context.Context) (federation.HandshakeResponse, error) {
+	h, ok := ctx.Value(ctxKeyFederationHandshake).(federation.HandshakeResponse)
+	if !ok {
+		return h, huma.Error401Unauthorized("Unauthorized")
+	}
+	return h, nil
+}
+func (s *Server) humaFederationPutShare(ctx context.Context, in *federationPeerInput) (*jsonOutput[federation.ShareView], error) {
+	h, err := peerIdentity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var m federation.ShareManifest
+	if err = jsonv2.Unmarshal(in.RawBody, &m, jsonv2.RejectUnknownMembers(true)); err != nil {
+		return nil, huma.Error400BadRequest("invalid federation share")
+	}
+	v, err := s.federation.RegisterShare(ctx, h.EnrollmentUID, h.SpokeArchiveID, in.UID, m)
+	if err = federationControlError(err); err != nil {
+		return nil, err
+	}
+	return &jsonOutput[federation.ShareView]{Body: v}, nil
+}
+func (s *Server) humaFederationBatch(ctx context.Context, in *federationPeerInput) (*federationBatchOutput, error) {
+	h, err := peerIdentity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	b, err := federation.DecodeBatch(in.RawBody)
+	if err != nil {
+		return nil, huma.Error400BadRequest("invalid federation batch")
+	}
+	v, err := s.federation.ApplyBatch(ctx, h.EnrollmentUID, h.SpokeArchiveID, in.UID, b)
+	if errors.Is(err, db.ErrFederationInvalidBatch) {
+		return nil, huma.Error400BadRequest("invalid federation batch")
+	}
+	if errors.Is(err, db.ErrFederationSequence) {
+		return &federationBatchOutput{Status: http.StatusConflict, Body: v}, nil
+	}
+	if err = federationControlError(err); err != nil {
+		return nil, err
+	}
+	return &federationBatchOutput{Status: http.StatusOK, Body: v}, nil
+}
+func (s *Server) humaFederationPush(ctx context.Context, _ *emptyInput) (*jsonOutput[federation.PushResult], error) {
+	v, err := s.federation.Push(ctx)
+	if err = federationControlError(err); err != nil {
+		return nil, err
+	}
+	return &jsonOutput[federation.PushResult]{Body: v}, nil
 }

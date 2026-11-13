@@ -271,6 +271,30 @@ func (db *DB) WriteSessionBatchAtomic(ctx context.Context,
 		return result, fmt.Errorf("beginning batch tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	result, writtenUsageIDs, pendingRecallRevocations, err := db.writeSessionBatchAtomicTx(ctx, tx, writes, true)
+	if err != nil {
+		return result, err
+	}
+
+	if len(beforeCommit) > 0 && beforeCommit[0] != nil {
+		if err := beforeCommit[0](); err != nil {
+			result.WrittenSessions = 0
+			result.WrittenMessages = 0
+			result.WrittenIndexes = nil
+			return result, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return result, fmt.Errorf("committing batch tx: %w", err)
+	}
+	db.notifyUsageSessions(writtenUsageIDs)
+	pendingRecallRevocations.flush()
+	return result, nil
+}
+
+func (db *DB) writeSessionBatchAtomicTx(ctx context.Context, tx *sql.Tx, writes []SessionBatchWrite, linkParents bool) (SessionBatchResult, []string, recallEvidenceRevocationEvents, error) {
+	var result SessionBatchResult
 	var pendingRecallRevocations recallEvidenceRevocationEvents
 	var writtenUsageIDs []string
 
@@ -303,7 +327,7 @@ func (db *DB) WriteSessionBatchAtomic(ctx context.Context,
 				result.FailedSessions++
 				result.Errors = append(result.Errors, err)
 			}
-			return result, err
+			return result, nil, nil, err
 		}
 		result.WrittenSessions++
 		result.WrittenMessages += messagesWritten
@@ -311,25 +335,13 @@ func (db *DB) WriteSessionBatchAtomic(ctx context.Context,
 		writtenUsageIDs = append(writtenUsageIDs, write.Session.ID)
 	}
 
-	if _, err := linkSubagentSessionsForSessionsTx(ctx, tx, writtenUsageIDs); err != nil {
-		return result, err
-	}
-
-	if len(beforeCommit) > 0 && beforeCommit[0] != nil {
-		if err := beforeCommit[0](); err != nil {
-			result.WrittenSessions = 0
-			result.WrittenMessages = 0
-			result.WrittenIndexes = nil
-			return result, err
+	if linkParents {
+		if _, err := linkSubagentSessionsForSessionsTx(ctx, tx, writtenUsageIDs); err != nil {
+			return result, nil, nil, err
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return result, fmt.Errorf("committing batch tx: %w", err)
-	}
-	db.notifyUsageSessions(writtenUsageIDs)
-	pendingRecallRevocations.flush()
-	return result, nil
+	return result, writtenUsageIDs, pendingRecallRevocations, nil
 }
 
 func sanitizeSessionBatchWriteContext(

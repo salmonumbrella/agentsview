@@ -325,9 +325,12 @@ func (b localArchiveQueryBackend) SessionUsage(
 	applyCustomPricing(b.database, b.cfg)
 	ensureUsagePricing(ctx, b.database, b.offline, b.cfg.CustomModelPricing)
 
-	resolvedID, known := resolveRawSessionID(
-		ctx, b.database, b.cfg.AgentDirs, query.SessionID,
-	)
+	query.NoSync = query.NoSync || b.cfg.NoSync
+	dirs := b.cfg.AgentDirs
+	if b.cfg.Federation.Role == "hub" {
+		dirs = nil
+	}
+	resolvedID, known := resolveRawSessionID(ctx, b.database, dirs, query.SessionID)
 
 	stale := b.database.NeedsResync()
 	refreshIncomplete := stale && !b.skipFreshData && !query.NoSync

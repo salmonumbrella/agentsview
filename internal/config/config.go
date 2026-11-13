@@ -2920,6 +2920,9 @@ func splitFlagList(value string) []string {
 }
 
 func finalize(cfg *Config) error {
+	if cfg.Federation.Role == "hub" {
+		cfg.NoSync = true
+	}
 	if err := expandLocalPaths(cfg); err != nil {
 		return err
 	}

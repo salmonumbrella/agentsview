@@ -19,7 +19,7 @@ const (
 	shareOmits             = "Content, paths, titles, tool inputs and results, and tool categories"
 	shareDisclosure        = "Anyone holding the hub bearer token can read everything the hub stores"
 	shareAttributionNotice = "Member attribution is a request for a later release"
-	shareDeliveryNotice    = "This release records the share only; nothing is sent"
+	shareDeliveryNotice    = "Summary records are delivered to the hub; removing a share stops future delivery but does not yet delete delivered records"
 )
 
 type ShareGrant struct {
@@ -29,23 +29,24 @@ type ShareGrant struct {
 	Attribution string `json:"attribution"`
 }
 type SummaryRecord struct {
-	SessionID             string       `json:"session_id"`
-	ProjectKey            string       `json:"project_key"`
-	Remote                string       `json:"normalized_remote"`
-	Agent                 string       `json:"agent"`
-	Models                []string     `json:"models"`
-	StartedAt             *string      `json:"started_at"`
-	EndedAt               *string      `json:"ended_at"`
-	MessageCount          int          `json:"message_count"`
-	UserMessageCount      int          `json:"user_message_count"`
-	AssistantMessageCount int          `json:"assistant_message_count"`
-	ToolCount             int          `json:"total_tool_count"`
-	Usage                 SummaryUsage `json:"usage"`
-	Automated             bool         `json:"is_automated"`
-	Outcome               string       `json:"outcome"`
-	Health                *string      `json:"health"`
-	ParentID              *string      `json:"parent_session_id,omitempty"`
-	Relationship          *string      `json:"relationship_type,omitempty"`
+	SessionID             string                                   `json:"session_id"`
+	ProjectKey            string                                   `json:"project_key"`
+	Remote                string                                   `json:"normalized_remote"`
+	Agent                 string                                   `json:"agent"`
+	Models                []string                                 `json:"models"`
+	StartedAt             *string                                  `json:"started_at"`
+	EndedAt               *string                                  `json:"ended_at"`
+	MessageCount          int                                      `json:"message_count"`
+	UserMessageCount      int                                      `json:"user_message_count"`
+	AssistantMessageCount int                                      `json:"assistant_message_count"`
+	ToolCount             int                                      `json:"total_tool_count"`
+	Usage                 SummaryUsage                             `json:"usage"`
+	ByModel               map[string]db.SessionModelUsageBreakdown `json:"by_model"`
+	Automated             bool                                     `json:"is_automated"`
+	Outcome               string                                   `json:"outcome"`
+	Health                *string                                  `json:"health"`
+	ParentID              *string                                  `json:"parent_session_id,omitempty"`
+	Relationship          *string                                  `json:"relationship_type,omitempty"`
 }
 type SummaryUsage struct {
 	InputTokens              int         `json:"input_tokens"`
@@ -163,7 +164,7 @@ func (s *Service) previewWithPolicy(ctx context.Context, g ShareGrant, hub *HubS
 			return p, sumErr
 		}
 		p.Usage.HasCost = p.Usage.HasCost && u.HasCost
-		record := SummaryRecord{SessionID: row.ID, ProjectKey: selected.ProjectKeys[row.ID], Remote: g.Project, Agent: row.Agent, Models: row.ModelUsage.Models, StartedAt: row.StartedAt, EndedAt: row.EndedAt, MessageCount: row.MessageCount, UserMessageCount: row.UserMessageCount, AssistantMessageCount: row.AssistantMessageCount, ToolCount: selected.ToolCounts[row.ID], Usage: SummaryUsage{InputTokens: row.ModelUsage.InputTokens, OutputTokens: row.ModelUsage.OutputTokens, CacheCreationInputTokens: row.ModelUsage.CacheCreationInputTokens, CacheReadInputTokens: row.ModelUsage.CacheReadInputTokens, ReasoningTokens: row.ModelUsage.ReasoningTokens, Cost: row.ModelUsage.Cost, HasCost: row.ModelUsage.HasCost}, Automated: row.IsAutomated, Outcome: selected.Outcomes[row.ID], Health: selected.Health[row.ID]}
+		record := SummaryRecord{SessionID: row.ID, ProjectKey: selected.ProjectKeys[row.ID], Remote: g.Project, Agent: row.Agent, Models: row.ModelUsage.Models, StartedAt: row.StartedAt, EndedAt: row.EndedAt, MessageCount: row.MessageCount, UserMessageCount: row.UserMessageCount, AssistantMessageCount: row.AssistantMessageCount, ToolCount: selected.ToolCounts[row.ID], Usage: SummaryUsage{InputTokens: row.ModelUsage.InputTokens, OutputTokens: row.ModelUsage.OutputTokens, CacheCreationInputTokens: row.ModelUsage.CacheCreationInputTokens, CacheReadInputTokens: row.ModelUsage.CacheReadInputTokens, ReasoningTokens: row.ModelUsage.ReasoningTokens, Cost: row.ModelUsage.Cost, HasCost: row.ModelUsage.HasCost}, ByModel: row.ModelUsage.ByModel, Automated: row.IsAutomated, Outcome: selected.Outcomes[row.ID], Health: selected.Health[row.ID]}
 		if row.ParentSessionID != nil && selectedIDs[*row.ParentSessionID] {
 			record.ParentID = row.ParentSessionID
 			record.Relationship = row.RelationshipType
@@ -291,8 +292,14 @@ func (s *Service) Shares(ctx context.Context) (ShareList, error) {
 	return out, nil
 }
 
+type DeliveryCounts struct {
+	Sent    int `json:"sent"`
+	Refused int `json:"refused"`
+}
 type ShareDetails struct {
-	Share db.FederationShare `json:"share"`
+	Share      db.FederationShare       `json:"share"`
+	Delivery   DeliveryCounts           `json:"delivery"`
+	Quarantine *db.FederationQuarantine `json:"quarantine,omitempty"`
 }
 
 func (s *Service) Share(ctx context.Context, uid string) (ShareDetails, error) {
@@ -304,6 +311,28 @@ func (s *Service) Share(ctx context.Context, uid string) (ShareDetails, error) {
 	out.Share, err = s.db.GetFederationShare(ctx, link.UID, uid)
 	if err != nil {
 		return out, err
+	}
+	ledger, err := s.db.FederationLedger(ctx, uid)
+	if err != nil {
+		return out, err
+	}
+	for _, d := range ledger {
+		if d.State == "sent" {
+			out.Delivery.Sent++
+		} else if d.State == "refused" {
+			out.Delivery.Refused++
+		}
+	}
+	quarantines, err := s.db.FederationQuarantines(ctx)
+	if err != nil {
+		return out, err
+	}
+	for _, q := range quarantines {
+		if q.ShareUID == uid {
+			copy := q
+			out.Quarantine = &copy
+			break
+		}
 	}
 	return out, nil
 }

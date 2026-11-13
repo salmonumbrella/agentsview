@@ -41,6 +41,24 @@ func TestFederationCredentialIsolation(t *testing.T) {
 				type operation struct{ method, path string }
 				ops := []operation{{http.MethodGet, "/"}, {http.MethodGet, "/api/ping"}, {http.MethodGet, "/debug/pprof/"}, {http.MethodGet, "/api/v1/federation/enrollments"}, {http.MethodPost, "/api/v1/federation/enrollments"}, {http.MethodPost, "/api/v1/federation/enrollments/enr-a/revoke"}}
 				ops = append(ops, operation{http.MethodPost, "/api/v1/federation/shares/preview"}, operation{http.MethodPost, "/api/v1/federation/shares"}, operation{http.MethodGet, "/api/v1/federation/shares"}, operation{http.MethodGet, "/api/v1/federation/shares/x"}, operation{http.MethodPost, "/api/v1/federation/shares/x/pause"}, operation{http.MethodPost, "/api/v1/federation/shares/x/resume"}, operation{http.MethodDelete, "/api/v1/federation/shares/x"}, operation{http.MethodPost, "/api/v1/federation/exclusions"}, operation{http.MethodGet, "/api/v1/federation/dry-run"})
+				ops = append(ops, operation{http.MethodPost, federationHandshakePath}, operation{http.MethodGet, "/api/v1/federation/shares/x/batches"}, operation{http.MethodPut, "/api/v1/federation/shares/"}, operation{http.MethodPost, "/api/v1/federation/shares/x/batches/extra"}, operation{http.MethodPut, "/api/v1/federation/shares/x%2Fy"})
+				for _, peerOp := range []operation{{http.MethodPut, "/api/v1/federation/shares/x"}, {http.MethodPost, "/api/v1/federation/shares/x/batches"}} {
+					req := httptest.NewRequest(peerOp.method, peerOp.path, strings.NewReader(`{}`))
+					req.Header.Set("Authorization", "Bearer "+token)
+					req.Header.Set(federation.SpokeArchiveHeader, "spoke-a")
+					req.Header.Set("Content-Type", "application/json")
+					rec := httptest.NewRecorder()
+					srv.Handler().ServeHTTP(rec, req)
+					if role == "hub" {
+						assert.Equal(t, http.StatusBadRequest, rec.Code)
+					} else {
+						assert.Equal(t, http.StatusUnauthorized, rec.Code)
+					}
+					req = httptest.NewRequest(peerOp.method, peerOp.path+"?token="+token, strings.NewReader(`{}`))
+					rec = httptest.NewRecorder()
+					srv.Handler().ServeHTTP(rec, req)
+					assert.Equal(t, http.StatusUnauthorized, rec.Code)
+				}
 				for path, item := range srv.api.OpenAPI().Paths {
 					if path == federationHandshakePath {
 						continue
@@ -419,5 +437,17 @@ func TestFederationJoinControlMessages(t *testing.T) {
 			assert.NotContains(t, string(data), credential)
 			assert.NotContains(t, string(data), tc.path)
 		})
+	}
+}
+
+func TestFederationPeerOperationBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		method, path string
+		want         bool
+	}{
+		{"GET", "/api/v1/federation/handshake", true}, {"PUT", "/api/v1/federation/shares/x", true}, {"POST", "/api/v1/federation/shares/x/batches", true},
+		{"GET", "/api/v1/federation/shares/x", false}, {"POST", "/api/v1/federation/shares/x", false}, {"PUT", "/api/v1/federation/shares/", false}, {"PUT", "/api/v1/federation/shares/a/b", false}, {"POST", "/api/v1/federation/shares/x/batches/extra", false},
+	} {
+		assert.Equal(t, tc.want, federationPeerOperation(tc.method, tc.path), "%s %s", tc.method, tc.path)
 	}
 }

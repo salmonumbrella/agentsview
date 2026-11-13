@@ -700,6 +700,9 @@ const federationVersionBase = 1 << 21
 // read a version above dataVersion and refuse the archive.
 const federationShareVersionBase = 1 << 22
 
+// Delivery ownership must survive archive rebuilds and older binaries.
+const federationDeliveryVersionBase = 1 << 23
+
 const tokenCoverageRepairStatsKey = "token_coverage_repair_v1"
 
 const toolCallFieldBackfillStatsKey = "tool_call_field_backfill_v1"
@@ -2426,7 +2429,7 @@ func readUserVersion(ctx context.Context, conn interface {
 
 // DecodeUserVersion returns the parser version and permanent archive-only mode.
 func DecodeUserVersion(version int) (int, bool) {
-	version &^= federationVersionBase | federationShareVersionBase
+	version &^= federationVersionBase | federationShareVersionBase | federationDeliveryVersionBase
 	if version >= archiveOnlyVersionBase {
 		return version - archiveOnlyVersionBase, true
 	}
@@ -2460,6 +2463,13 @@ func writeUserVersion(ctx context.Context, tx *sql.Tx, version int) error {
 	}
 	if hasShares {
 		version += federationShareVersionBase
+	}
+	hasDelivery, err := federationTablesHaveRows(ctx, tx, []string{"federation_deliveries", "federation_quarantine", "federation_hub_shares", "federation_records"})
+	if err != nil {
+		return err
+	}
+	if hasDelivery {
+		version += federationDeliveryVersionBase
 	}
 	_, err = tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", version))
 	return err

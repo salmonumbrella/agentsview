@@ -1512,4 +1512,10 @@ an archive instead of dropping them on a full resync. Resync copies federation
 state with the link. Summary selection requires the exact local installation
 ID, a matching local source baseline, and no attached-archive or
 imported-artifact provenance. It uses each session's own repository snapshot in
-the same read transaction as its summary.
+the same read transaction as its summary. Delivery ledger and quarantine rows
+live on the spoke. Hub share and record rows bind each stored session to one
+share; a conflicting existing session ID is refused without changing it. Batch
+commit checks enrollment and share state in the writer transaction. Version bit
+`1 << 23` protects these four tables, which are copied during a rebuild.
+Federated summaries store usage events but no messages or tool calls; orphan
+copy preserves the sessions and their usage events during a rebuild.

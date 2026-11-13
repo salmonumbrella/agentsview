@@ -28,3 +28,15 @@ func TestFederationHubPolicyOnlyValidatedForHub(t *testing.T) {
 		}
 	}
 }
+
+func TestFederationHubDisablesDiscovery(t *testing.T) {
+	for _, tc := range []struct {
+		role string
+		want bool
+	}{{"hub", true}, {"spoke", false}, {"off", false}} {
+		t.Run(tc.role, func(t *testing.T) {
+			cfg := loadMinimalWithConfig(t, map[string]any{"federation": map[string]any{"role": tc.role}})
+			assert.Equal(t, tc.want, cfg.NoSync)
+		})
+	}
+}

@@ -89,6 +89,14 @@ func (db *DB) RevokeFederationEnrollment(ctx context.Context, uid string) error 
 }
 
 func (db *DB) AuthenticateFederationCredential(ctx context.Context, digest, archive string) (FederationEnrollment, error) {
+	return db.authenticateFederationCredential(ctx, digest, archive, true)
+}
+
+func (db *DB) LookupFederationCredential(ctx context.Context, digest, archive string) (FederationEnrollment, error) {
+	return db.authenticateFederationCredential(ctx, digest, archive, false)
+}
+
+func (db *DB) authenticateFederationCredential(ctx context.Context, digest, archive string, stamp bool) (FederationEnrollment, error) {
 	var e FederationEnrollment
 	err := db.getReader().QueryRowContext(ctx, `SELECT enrollment_uid,spoke_archive_id,member,spoke_name FROM federation_enrollments WHERE credential_sha256 = ? AND spoke_archive_id = ? AND revoked_at = ''`, digest, archive).Scan(&e.UID, &e.SpokeArchiveID, &e.Member, &e.SpokeName)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -96,6 +104,9 @@ func (db *DB) AuthenticateFederationCredential(ctx context.Context, digest, arch
 	}
 	if err != nil {
 		return e, err
+	}
+	if !stamp {
+		return e, nil
 	}
 	err = db.Update(ctx, func(tx *sql.Tx) error {
 		result, err := tx.ExecContext(ctx, `UPDATE federation_enrollments SET last_handshake_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE enrollment_uid = ? AND revoked_at = ''`, e.UID)
@@ -179,7 +190,7 @@ func (db *DB) CopyFederationStateFrom(ctx context.Context, sourcePath string) er
 		return err
 	}
 	defer tx.Rollback()
-	for table, columns := range map[string]string{"federation_enrollments": "enrollment_uid,spoke_archive_id,member,spoke_name,credential_sha256,created_at,last_handshake_at,revoked_at", "federation_links": "link_uid,hub_origin,hub_archive_id,enrollment_uid,member,token_file,protocol_version,state,created_at", "federation_shares": "share_uid,link_uid,normalized_remote,level,attribution,since,audience,state,consent_json,policy_digest,created_at", "federation_exclusions": "session_id,reason,created_at"} {
+	for table, columns := range map[string]string{"federation_enrollments": "enrollment_uid,spoke_archive_id,member,spoke_name,credential_sha256,created_at,last_handshake_at,revoked_at", "federation_links": "link_uid,hub_origin,hub_archive_id,enrollment_uid,member,token_file,protocol_version,state,created_at", "federation_shares": "share_uid,link_uid,normalized_remote,level,attribution,since,audience,state,consent_json,policy_digest,created_at", "federation_exclusions": "session_id,reason,created_at", "federation_deliveries": "share_uid,record_uid,session_id,hash,state", "federation_quarantine": "share_uid,error,sequence", "federation_hub_shares": "share_uid,enrollment_uid,normalized_remote,project_key,level,attribution,audience,policy_digest,epoch,sequence,last_batch_digest,last_refused,state", "federation_records": "share_uid,record_uid,session_id,hash,assistant_count,tool_count"} {
 		var present int
 		if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM federation_old.sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&present); err != nil {
 			return err
@@ -311,4 +322,71 @@ func (db *DB) DeleteFederationShare(ctx context.Context, linkUID, uid string) er
 		}
 		return stampFederationVersion(ctx, tx)
 	})
+}
+
+type FederationDelivery struct {
+	ShareUID  string `json:"share_uid"`
+	RecordUID string `json:"record_uid"`
+	SessionID string `json:"session_id"`
+	Hash      string `json:"hash"`
+	State     string `json:"state"`
+}
+type FederationQuarantine struct {
+	ShareUID string `json:"share_uid"`
+	Error    string `json:"error"`
+	Sequence int64  `json:"sequence"`
+}
+
+func (db *DB) FederationLedger(ctx context.Context, share string) (map[string]FederationDelivery, error) {
+	rows, err := db.getReader().QueryContext(ctx, `SELECT share_uid,record_uid,session_id,hash,state FROM federation_deliveries WHERE share_uid=?`, share)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]FederationDelivery{}
+	for rows.Next() {
+		var d FederationDelivery
+		if err = rows.Scan(&d.ShareUID, &d.RecordUID, &d.SessionID, &d.Hash, &d.State); err != nil {
+			return nil, err
+		}
+		out[d.RecordUID] = d
+	}
+	return out, rows.Err()
+}
+func (db *DB) RecordFederationDelivery(ctx context.Context, share string, deliveries []FederationDelivery) error {
+	return db.Update(ctx, func(tx *sql.Tx) error {
+		for _, d := range deliveries {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO federation_deliveries(share_uid,record_uid,session_id,hash,state) VALUES(?,?,?,?,?) ON CONFLICT(share_uid,record_uid) DO UPDATE SET session_id=excluded.session_id,hash=excluded.hash,state=excluded.state`, share, d.RecordUID, d.SessionID, d.Hash, d.State); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM federation_quarantine WHERE share_uid=?`, share); err != nil {
+			return err
+		}
+		return stampFederationVersion(ctx, tx)
+	})
+}
+func (db *DB) PutFederationQuarantine(ctx context.Context, q FederationQuarantine) error {
+	return db.Update(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO federation_quarantine(share_uid,error,sequence) VALUES(?,?,?) ON CONFLICT(share_uid) DO UPDATE SET error=excluded.error,sequence=excluded.sequence`, q.ShareUID, q.Error, q.Sequence); err != nil {
+			return err
+		}
+		return stampFederationVersion(ctx, tx)
+	})
+}
+func (db *DB) FederationQuarantines(ctx context.Context) ([]FederationQuarantine, error) {
+	rows, err := db.getReader().QueryContext(ctx, `SELECT share_uid,error,sequence FROM federation_quarantine ORDER BY share_uid`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []FederationQuarantine
+	for rows.Next() {
+		var q FederationQuarantine
+		if err = rows.Scan(&q.ShareUID, &q.Error, &q.Sequence); err != nil {
+			return nil, err
+		}
+		out = append(out, q)
+	}
+	return out, rows.Err()
 }

@@ -117,11 +117,16 @@ func TestFederationDryRunStreamsLargeResponse(t *testing.T) {
 	assert.Equal(t, body, out.String())
 }
 
-func TestFederationPushRequiresDryRun(t *testing.T) {
-	cmd := newFederationPushCommand()
-	cmd.SetArgs(nil)
-	err := cmd.ExecuteContext(t.Context())
-	assert.ErrorContains(t, err, "--dry-run is required")
+func TestFederationPushCallsDaemon(t *testing.T) {
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/api/v1/federation/push", r.URL.Path)
+		_, _ = io.WriteString(w, `{"sent":2,"unchanged":1,"refused":0,"quarantined":1}`)
+	}))
+	t.Cleanup(daemon.Close)
+	var output bytes.Buffer
+	require.NoError(t, pushFederation(t.Context(), daemon.URL, "", &output))
+	assert.Equal(t, "Sent: 2; unchanged: 1; refused: 0; quarantined: 1\n", output.String())
 }
 
 type failingShareWriter struct{}

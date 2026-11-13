@@ -291,7 +291,7 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 	preview, err := svc.PreviewShare(t.Context(), grant)
 	require.NoError(t, err)
 	assert.Contains(t, preview.Disclosure, "bearer token")
-	assert.Contains(t, preview.DeliveryNotice, "nothing is sent")
+	assert.Contains(t, preview.DeliveryNotice, "delivered to the hub")
 	assert.Contains(t, preview.Omits, "content")
 	link, err := archive.GetFederationLink(t.Context())
 	require.NoError(t, err)

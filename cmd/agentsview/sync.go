@@ -876,6 +876,9 @@ func coordinateLocalSync(
 	prepare func() (sync.RebuildOptions, sync.RebuildCleanup, error),
 	work func(forceFull, rebuilt bool) error,
 ) (didResync bool, stats sync.SyncStats, err error) {
+	if appCfg.Federation.Role == "hub" {
+		return false, stats, errors.New("local discovery is disabled on a federation hub")
+	}
 	didResync = full || database.NeedsResync()
 	for _, def := range parser.Registry {
 		if !appCfg.IsUserConfigured(def.Type) {

@@ -216,6 +216,9 @@ func runServe(ctx context.Context, cfg config.Config, opts serveOptions, restart
 		return
 	}
 	defer releaseForegroundServeLaunch()
+	if cfg.Federation.Role == "hub" {
+		cfg.NoSync = true
+	}
 	rotateLogFile(filepath.Join(cfg.DataDir, "debug.log"), maxLogSize)
 
 	// Acquire the daemon start lock immediately after config setup,
@@ -297,6 +300,13 @@ func runServe(ctx context.Context, cfg config.Config, opts serveOptions, restart
 		fatal("opening writable database: %v", err)
 	}
 	databaseProgress.Finish()
+	if cfg.Federation.Role == "hub" {
+		origins, err := database.FederationSessionOrigins(ctx)
+		if err != nil {
+			fatal("reading federation session origins: %v", err)
+		}
+		log.Printf("federation hub sessions: federated=%d hub-host=%d other=%d", origins.Federated, origins.HubHost, origins.Other)
+	}
 	runtimeRecordDataDir := ""
 	defer func() {
 		closeWriteDB(database, writeLock)
@@ -559,7 +569,7 @@ func runServe(ctx context.Context, cfg config.Config, opts serveOptions, restart
 	}
 
 	var identityBackfillFailure atomic.Pointer[string]
-	if !archiveOnly {
+	if !archiveOnly && cfg.Federation.Role != "hub" {
 		identityBackfillEngine := engine
 		if identityBackfillEngine == nil {
 			identityBackfillEngine = sync.NewEngine(ctx, database, sync.EngineConfig{
@@ -597,7 +607,18 @@ func runServe(ctx context.Context, cfg config.Config, opts serveOptions, restart
 	codexCloudSync := newCodexCloudSyncer(cfg, config.LoadReadOnly, codexCloudStatus)
 	codexCloudTrigger := &codexCloudTrigger{}
 	codexCloudMonitor := newCodexCloudMonitor(codexCloudSync, codexCloudTrigger, idleTracker)
+	var federationService *federation.Service
+	if cfg.Federation.Role != "off" {
+		archiveID, err := database.GetArchiveID(ctx)
+		if err != nil {
+			fatal("federation archive identity: %v", err)
+		}
+		federationService = federation.NewService(cfg.Federation.Role, archiveID, cfg.Federation.Hub, database)
+	}
 	jobs := []poller.Job{pricingRefreshJob(database, pricingRefreshRunner), codexCloudSyncJob(codexCloudSync, idleTracker), codexCloudLiveJob(codexCloudMonitor, idleTracker)}
+	if cfg.Federation.Role == "spoke" {
+		jobs = append(jobs, federationPushJob(federationService))
+	}
 	if imageTextManager != nil {
 		jobs = append(jobs, imageTextJob(imageTextManager, idleTracker))
 	}
@@ -643,12 +664,8 @@ func runServe(ctx context.Context, cfg config.Config, opts serveOptions, restart
 		server.WithPprof(opts.Pprof),
 		server.WithTelemetryCapture(telemetryCapture),
 	}
-	if cfg.Federation.Role != "off" {
-		archiveID, err := database.GetArchiveID(ctx)
-		if err != nil {
-			fatal("federation archive identity: %v", err)
-		}
-		srvOpts = append(srvOpts, server.WithFederation(federation.NewService(cfg.Federation.Role, archiveID, cfg.Federation.Hub, database)))
+	if federationService != nil {
+		srvOpts = append(srvOpts, server.WithFederation(federationService))
 	}
 	if rtOpts.BasePath != "" {
 		srvOpts = append(srvOpts, server.WithBasePath(rtOpts.BasePath))

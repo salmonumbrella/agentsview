@@ -181,6 +181,9 @@ func runSyncWorkerStartup(
 	emit func(workerLine),
 	onProgress func(sync.Progress),
 ) error {
+	if cfg.Federation.Role == "hub" {
+		return fmt.Errorf("local discovery is disabled on a federation hub")
+	}
 	mode := request.Mode
 	reportOpening := func(p db.OpenProgress) {
 		onProgress(sync.Progress{Phase: sync.PhaseOpeningDatabase, Detail: p.Detail, Resync: p.ResyncRequired})
@@ -286,6 +289,9 @@ func runSyncWorkerResyncBuild(
 	emit func(workerLine),
 	onProgress func(sync.Progress),
 ) error {
+	if cfg.Federation.Role == "hub" {
+		return fmt.Errorf("local discovery is disabled on a federation hub")
+	}
 	// Remove a stale temp DB from a prior crashed resync before building a fresh
 	// one, matching runServe's startup cleanup and the in-process build.
 	cleanResyncTemp(cfg.DBPath)

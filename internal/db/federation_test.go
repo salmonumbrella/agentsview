@@ -296,3 +296,30 @@ func TestFederationExclusionRequiresExistingSession(t *testing.T) {
 	require.NoError(t, d.Reader().QueryRow(ctx, `SELECT count(*) FROM pragma_table_info('federation_exclusions') WHERE name='share_uid'`).Scan(&count))
 	assert.Zero(t, count)
 }
+
+func TestFederationDeliveryStateSurvivesCopyAndMarksVersion(t *testing.T) {
+	source, target := testDB(t), testDB(t)
+	ctx := t.Context()
+	require.NoError(t, source.Update(ctx, func(tx *sql.Tx) error {
+		for _, q := range []string{
+			`INSERT INTO federation_deliveries VALUES ('share','record','session','hash','sent')`,
+			`INSERT INTO federation_quarantine VALUES ('share','invalid batch',1)`,
+			`INSERT INTO federation_hub_shares VALUES ('share','enrollment','example.org/repo','key','summary','pooled','operators','digest',1,1,'batch','{}','active')`,
+			`INSERT INTO federation_records (share_uid,record_uid,session_id,hash) VALUES ('share','record','session','hash')`,
+		} {
+			if _, err := tx.ExecContext(ctx, q); err != nil {
+				return err
+			}
+		}
+		return stampFederationVersion(ctx, tx)
+	}))
+	var version int
+	require.NoError(t, source.rawReader().QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version))
+	assert.NotZero(t, version&(1<<23))
+	require.NoError(t, target.CopyFederationStateFrom(ctx, source.Path()))
+	for _, table := range []string{"federation_deliveries", "federation_quarantine", "federation_hub_shares", "federation_records"} {
+		var count int
+		require.NoError(t, target.rawReader().QueryRowContext(ctx, `SELECT count(*) FROM `+table).Scan(&count))
+		assert.Equal(t, 1, count, table)
+	}
+}

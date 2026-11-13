@@ -1120,6 +1120,9 @@ func (b *localArchiveWriteBackend) ReplicaPushWatch(
 func (b *localArchiveWriteBackend) startWatchEngine(
 	ctx context.Context, emitter syncpkg.Emitter,
 ) (*syncpkg.Engine, error) {
+	if b.appCfg.Federation.Role == "hub" {
+		return nil, errors.New("local discovery is disabled on a federation hub")
+	}
 	if err := b.database.RequireSourceSync(ctx); err != nil {
 		return nil, err
 	}

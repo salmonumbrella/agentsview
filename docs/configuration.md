@@ -2806,14 +2806,14 @@ and search modes.
 Federation is off by default. Set `[federation] role` to `"hub"` on a
 shared SQLite daemon or `"spoke"` on a member's installation, then restart the
 daemon. Joining does not share any sessions or projects. The hub role adds the
-enrollment and handshake routes only; local session discovery continues, and
-anyone holding the hub's bearer token can read everything in its archive. Use a
-dedicated data directory for the hub and start it with
-`agentsview serve --no-sync`.
+enrollment and summary delivery routes and disables local session discovery.
+Existing archive rows remain readable. Anyone holding the hub's bearer token
+can read everything in its archive, so use a dedicated data directory for the
+hub.
 
 Every role, including `off`, rejects federation credentials (`avfc_` values)
-on every route except the hub handshake, so a personal auth token must not begin
-with `avfc_`.
+except the hub handshake, share registration, and batch delivery operations.
+A personal auth token must not begin with `avfc_`.
 
 ```toml
 [federation]

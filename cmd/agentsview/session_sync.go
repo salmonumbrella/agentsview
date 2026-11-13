@@ -71,6 +71,9 @@ func classifySyncArgForCommand(
 func syncService(ctx context.Context,
 	cfg config.Config, tr transport,
 ) (service.SessionService, func(), error) {
+	if cfg.Federation.Role == "hub" {
+		return nil, nil, fmt.Errorf("local discovery is disabled on a federation hub")
+	}
 	if tr.Mode == transportHTTP {
 		return servicehttp.NewHTTPBackend(tr.URL, cfg.AuthToken, tr.ReadOnly, tr.BrowserURL),
 			func() {}, nil

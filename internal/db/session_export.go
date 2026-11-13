@@ -832,11 +832,9 @@ SELECT
 	` + activitySortColumn + ` AS last_activity_sort,
 	sessions.message_count,
 	sessions.user_message_count,
-	(SELECT COUNT(*)
-	 FROM messages m
-	 WHERE m.session_id = sessions.id
-	   AND m.role = 'assistant'
-	   AND m.is_system = 0) AS assistant_message_count,
+	COALESCE((SELECT assistant_count FROM federation_records fr WHERE fr.session_id=sessions.id),
+        (SELECT COUNT(*) FROM messages m WHERE m.session_id = sessions.id
+           AND m.role = 'assistant' AND m.is_system = 0)) AS assistant_message_count,
 	sessions.is_automated AS is_automated,
 	sessions.parent_session_id,
 	sessions.relationship_type,

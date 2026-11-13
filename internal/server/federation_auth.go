@@ -12,12 +12,28 @@ import (
 
 const federationHandshakePath = "/api/v1/federation/handshake"
 
+func federationPeerOperation(method, path string) bool {
+	if method == http.MethodGet && path == federationHandshakePath {
+		return true
+	}
+	const prefix = "/api/v1/federation/shares/"
+	rest, ok := strings.CutPrefix(path, prefix)
+	if !ok {
+		return false
+	}
+	parts := strings.Split(rest, "/")
+	if len(parts) == 1 && parts[0] != "" && method == http.MethodPut {
+		return true
+	}
+	return len(parts) == 2 && parts[0] != "" && parts[1] == "batches" && method == http.MethodPost
+}
+
 // federationAuth returns true when it has handled the request; a nil service
 // still refuses federation credentials.
 func (s *Server) federationAuth(w http.ResponseWriter, r *http.Request, next http.Handler) bool {
 	token, hasBearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	unauthorized := func() { setCORSOnAuthError(w, r); http.Error(w, "Unauthorized", http.StatusUnauthorized) }
-	if s.federation == nil || r.URL.Path != federationHandshakePath || s.federation.Role() != "hub" {
+	if s.federation == nil || !federationPeerOperation(r.Method, r.URL.Path) || r.URL.EscapedPath() != r.URL.Path || s.federation.Role() != "hub" {
 		queryCredential := false
 		for _, value := range r.URL.Query()["token"] {
 			if strings.HasPrefix(value, "avfc_") {
@@ -30,7 +46,13 @@ func (s *Server) federationAuth(w http.ResponseWriter, r *http.Request, next htt
 		}
 		return false
 	}
-	if !hasBearer || r.Method != http.MethodGet {
+	queryCredential := false
+	for _, v := range r.URL.Query()["token"] {
+		if strings.HasPrefix(v, "avfc_") {
+			queryCredential = true
+		}
+	}
+	if !hasBearer || queryCredential {
 		unauthorized()
 		return true
 	}
@@ -43,7 +65,7 @@ func (s *Server) federationAuth(w http.ResponseWriter, r *http.Request, next htt
 		authCtx, cancel = context.WithTimeout(authCtx, timeout)
 	}
 	defer cancel()
-	result, err := s.federation.Authenticate(authCtx, token, r.Header.Get(federation.SpokeArchiveHeader))
+	result, err := s.federation.AuthenticatePeer(authCtx, token, r.Header.Get(federation.SpokeArchiveHeader), r.URL.Path == federationHandshakePath)
 	if err != nil {
 		if errors.Is(err, db.ErrWriterClosed) {
 			http.Error(w, "archive temporarily unavailable", http.StatusServiceUnavailable)

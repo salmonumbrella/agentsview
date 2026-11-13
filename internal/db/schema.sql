@@ -1885,3 +1885,24 @@ CREATE TABLE IF NOT EXISTS federation_exclusions (
     reason TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
+
+CREATE TABLE IF NOT EXISTS federation_deliveries (
+    share_uid TEXT NOT NULL, record_uid TEXT NOT NULL, session_id TEXT NOT NULL,
+    hash TEXT NOT NULL, state TEXT NOT NULL,
+    PRIMARY KEY (share_uid, record_uid)
+);
+CREATE TABLE IF NOT EXISTS federation_quarantine (
+    share_uid TEXT PRIMARY KEY, error TEXT NOT NULL, sequence INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS federation_hub_shares (
+    share_uid TEXT PRIMARY KEY, enrollment_uid TEXT NOT NULL,
+    normalized_remote TEXT NOT NULL, project_key TEXT NOT NULL,
+    level TEXT NOT NULL, attribution TEXT NOT NULL, audience TEXT NOT NULL,
+    policy_digest TEXT NOT NULL, epoch INTEGER NOT NULL, sequence INTEGER NOT NULL DEFAULT 0,
+    last_batch_digest TEXT NOT NULL DEFAULT '', last_refused TEXT NOT NULL DEFAULT '{}', state TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS federation_records (
+    share_uid TEXT NOT NULL, record_uid TEXT NOT NULL, session_id TEXT NOT NULL UNIQUE,
+    hash TEXT NOT NULL, assistant_count INTEGER NOT NULL DEFAULT 0,
+    tool_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (share_uid, record_uid)
+);
