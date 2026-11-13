@@ -228,7 +228,7 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 	require.NoError(t, archive.Update(t.Context(), func(tx *sql.Tx) error {
 		for _, q := range []string{
 			`INSERT INTO pg_sync_state (key,value) VALUES ('artifact_local_installation_id','install-a')`,
-			`INSERT INTO sessions (id,project,machine,agent,file_path,cwd,git_branch,first_message,display_name) VALUES ('session-a','fixture','install-a','claude','fixture','CANARY-cwd','CANARY-branch','CANARY-first','CANARY-title')`,
+			`INSERT INTO sessions (id,project,machine,agent,file_path,cwd,git_branch,first_message,display_name,started_at) VALUES ('session-a','fixture','install-a','claude','fixture','CANARY-cwd','CANARY-branch','CANARY-first','CANARY-title','2026-01-02T00:00:00Z')`,
 			`INSERT INTO local_session_source_baselines (session_id,machine,agent,file_path) VALUES ('session-a','install-a','claude','fixture')`,
 			`INSERT INTO session_project_identity_snapshots (session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES ('session-a','fixture','install-a','2026-01-01T00:00:00Z','resolved',1,'github.com/example/api','git_remote','key')`,
 			`INSERT INTO messages (id,session_id,ordinal,role,content) VALUES (100,'session-a',0,'assistant','CANARY-message')`,
@@ -238,13 +238,49 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 				return err
 			}
 		}
+		for _, id := range []string{"unshared", "ambiguous", "repo-less", "imported", "child", "before"} {
+			machine := "install-a"
+			started := "2026-01-02T00:00:00Z"
+			if id == "before" {
+				started = "2026-01-01T23:59:59Z"
+			}
+			if _, err := tx.ExecContext(t.Context(), `INSERT INTO sessions (id,project,machine,agent,file_path,cwd,git_branch,first_message,display_name,started_at,parent_session_id) VALUES (?,'fixture',?,'claude',?,'CANARY-cwd','CANARY-branch','CANARY-first','CANARY-title',?,'session-a')`, id, machine, id, started); err != nil {
+				return err
+			}
+			if id != "imported" {
+				if _, err := tx.ExecContext(t.Context(), `INSERT INTO local_session_source_baselines (session_id,machine,agent,file_path) VALUES (?,?,'claude',?)`, id, machine, id); err != nil {
+					return err
+				}
+			}
+			remote := "github.com/example/api"
+			if id == "unshared" || id == "child" {
+				remote = "github.com/example/private"
+			}
+			count := 1
+			if id == "ambiguous" {
+				count = 2
+			}
+			keySource := "git_remote"
+			if id == "repo-less" {
+				keySource = "root_path"
+			}
+			if _, err := tx.ExecContext(t.Context(), `INSERT INTO session_project_identity_snapshots (session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES (?,'fixture',?,'2026-01-01T00:00:00Z','resolved',?,?,?,'key')`, id, machine, count, remote, keySource); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(t.Context(), `INSERT INTO messages (session_id,ordinal,role,content) VALUES (?,0,'assistant','CANARY-message')`, id); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(t.Context(), `INSERT INTO tool_calls (message_id,session_id,tool_name,category,input_json,result_content) SELECT id,session_id,'fixture','CANARY-category','CANARY-input','CANARY-result' FROM messages WHERE session_id=? AND ordinal=0`, id); err != nil {
+				return err
+			}
+		}
 		return nil
 	}))
 	listed, err := svc.Shares(t.Context())
 	require.NoError(t, err)
 	assert.Empty(t, listed.Shares)
-	assert.Equal(t, []string{"github.com/example/api"}, listed.Suggestions)
-	grant := ShareGrant{Project: "github.com/example/api", Level: "summary", Attribution: "pooled"}
+	assert.Contains(t, listed.Suggestions, "github.com/example/api")
+	grant := ShareGrant{Project: "github.com/example/api", Level: "summary", Attribution: "pooled", Since: "2026-01-02"}
 	preview, err := svc.PreviewShare(t.Context(), grant)
 	require.NoError(t, err)
 	assert.Contains(t, preview.Disclosure, "bearer token")
@@ -262,6 +298,7 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 	records, err := svc.DryRun(t.Context())
 	require.NoError(t, err)
 	require.Len(t, records, 1)
+	assert.Equal(t, "session-a", records[0].SessionID)
 	assert.Equal(t, 1, records[0].ToolCount)
 	encoded, err := json.Marshal(records)
 	require.NoError(t, err)
