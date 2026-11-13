@@ -1,7 +1,7 @@
 name: Retained module diagnostic
 on:
-  push:
-    branches: [diagnostic/2510-retained-module]
+  pull_request:
+    branches: [diagnostic/2510-retained-base]
 permissions:
   contents: read
 jobs:
