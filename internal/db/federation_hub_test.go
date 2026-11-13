@@ -468,12 +468,14 @@ func TestRetainedStoppedShareAllowsOnlyTombstoneNarrowing(t *testing.T) {
 	share.State = "stopped"
 	_, err = d.PutFederationHubShare(ctx, "spoke", share)
 	require.NoError(t, err)
-	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 2, "mixed", []FederationHubRecord{{UID: "owned", Tombstone: true}, record})
+	// A policy change grants no new content under the old retained stop.
+	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "changed-policy", 1, 2, "mixed", []FederationHubRecord{{UID: "owned", Tombstone: true}, record})
 	require.ErrorIs(t, err, ErrFederationInvalidBatch)
 	var count int
 	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE id='owned'`).Scan(&count))
 	assert.Equal(t, 1, count)
-	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 2, "delete", []FederationHubRecord{{UID: "owned", Tombstone: true}})
+	// The accepted retained stop still permits an identified tombstone.
+	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "changed-policy", 1, 2, "delete", []FederationHubRecord{{UID: "owned", Tombstone: true}})
 	require.NoError(t, err)
 	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE id='owned'`).Scan(&count))
 	assert.Zero(t, count)

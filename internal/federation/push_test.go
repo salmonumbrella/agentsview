@@ -691,4 +691,11 @@ func TestRetainedPendingTombstoneIsNotReplayedAfterRestore(t *testing.T) {
 	err = svc.processRetainedNarrowing(ctx, db.FederationLink{HubOrigin: hub.URL, HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: file}, []db.FederationShare{share}, &PushResult{})
 	require.ErrorContains(t, err, "unresolved deletion after restore")
 	assert.Zero(t, batches)
+	// Restored content envelopes are also left pending on a stopped grant.
+	content, err := json.Marshal(Batch{Protocol: ProtocolVersion, SpokeInstance: "spoke", ShareUID: "share", Epoch: 1, Sequence: 1, Records: []BatchRecord{{RecordUID: "restored", Kind: "session_summary", Hash: "hash", Payload: &SummaryRecord{SessionID: "restored"}}}})
+	require.NoError(t, err)
+	share.PendingBatch = string(content)
+	err = svc.processRetainedNarrowing(ctx, db.FederationLink{HubOrigin: hub.URL, HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: file}, []db.FederationShare{share}, &PushResult{})
+	require.ErrorContains(t, err, "unresolved delivery")
+	assert.Zero(t, batches)
 }
