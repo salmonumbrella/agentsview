@@ -354,8 +354,8 @@ func printFederationPulse(out io.Writer, pulse db.FederationPulse) error {
 			delivery = *link.LastDeliveryAt
 		}
 		fmt.Fprintf(&b, "Spoke: %s; state: %s; last contact: %s; last accepting batch: %s; backlog lag: unavailable\n", link.SpokeName, link.State, contact, delivery)
-		if len(link.LatestBatchRefusals) > 0 {
-			fmt.Fprintf(&b, "  Latest stored batch refusals: %s\n", strings.Join(link.LatestBatchRefusals, ", "))
+		if len(link.StoredShareBatchRefusals) > 0 {
+			fmt.Fprintf(&b, "  Stored per-share batch refusals: %s\n", strings.Join(link.StoredShareBatchRefusals, ", "))
 		}
 	}
 	_, err := io.WriteString(out, b.String())

@@ -589,4 +589,8 @@ released cells could expose a smaller group. Withheld values are null with a
 `suppressed` state; unavailable values have a separate state. Hidden project
 and dimension keys, support counts and member usage are not returned. Spoke
 contact and delivery observations describe the link separately from session
-health; backlog and earlier delivery history may be unavailable.
+health; backlog and earlier delivery history may be unavailable. The
+`stored_share_batch_refusals` categories are the sorted union of each share's
+stored batch-refusal categories. They are not a latest batch across shares,
+lifetime errors, or network or spoke error history. An empty union does not
+establish that the spoke is healthy or live.

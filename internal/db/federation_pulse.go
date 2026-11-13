@@ -252,12 +252,12 @@ type FederationPulseProject struct {
 }
 
 type FederationPulseLink struct {
-	SpokeName           string                `json:"spoke_name"`
-	State               string                `json:"state"`
-	LastContactAt       *string               `json:"last_contact_at"`
-	LastDeliveryAt      *string               `json:"last_delivery_at"`
-	BacklogLagSeconds   FederationPulseMetric `json:"backlog_lag_seconds"`
-	LatestBatchRefusals []string              `json:"latest_batch_refusals"`
+	SpokeName                string                `json:"spoke_name"`
+	State                    string                `json:"state"`
+	LastContactAt            *string               `json:"last_contact_at"`
+	LastDeliveryAt           *string               `json:"last_delivery_at"`
+	BacklogLagSeconds        FederationPulseMetric `json:"backlog_lag_seconds"`
+	StoredShareBatchRefusals []string              `json:"stored_share_batch_refusals"`
 }
 
 type FederationPulse struct {
@@ -651,7 +651,7 @@ func federationPulseLinks(ctx context.Context, tx *sql.Tx) ([]FederationPulseLin
 		}
 		index, found := indices[uid]
 		if !found {
-			link := FederationPulseLink{SpokeName: name, State: "enrolled", BacklogLagSeconds: FederationPulseMetric{State: "unavailable"}, LatestBatchRefusals: []string{}}
+			link := FederationPulseLink{SpokeName: name, State: "enrolled", BacklogLagSeconds: FederationPulseMetric{State: "unavailable"}, StoredShareBatchRefusals: []string{}}
 			if contact != "" {
 				link.LastContactAt = &contact
 				link.State = "contacted"
@@ -687,9 +687,9 @@ func federationPulseLinks(ctx context.Context, tx *sql.Tx) ([]FederationPulseLin
 	}
 	for uid, index := range indices {
 		for category := range categories[uid] {
-			links[index].LatestBatchRefusals = append(links[index].LatestBatchRefusals, category)
+			links[index].StoredShareBatchRefusals = append(links[index].StoredShareBatchRefusals, category)
 		}
-		slices.Sort(links[index].LatestBatchRefusals)
+		slices.Sort(links[index].StoredShareBatchRefusals)
 	}
 	return links, nil
 }

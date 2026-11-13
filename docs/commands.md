@@ -143,7 +143,10 @@ Spoke observations are separate from session health. Last contact records an
 authenticated contact; last delivery is the last newly committed batch that
 accepted a record or tombstone. It does not mean every offered record arrived.
 Historical delivery time and backlog lag can be unavailable. Refusal categories
-describe the latest stored batch refusals, not network error history.
+are the sorted union of each share's stored batch-refusal categories. They do
+not describe a latest batch across shares, lifetime errors, or network or spoke
+error history. An empty union does not establish that the spoke is healthy or
+live.
 
 ### Find a command by task
 
