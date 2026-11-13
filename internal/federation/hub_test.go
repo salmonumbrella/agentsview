@@ -114,7 +114,7 @@ func TestHubPulseProtectsSummaryUpdatesAndKeepsIndependentProject(t *testing.T) 
 	started := "2020-07-29T09:00:00Z"
 	type peer struct {
 		name, remote, key, enrollment string
-		tokens                        int
+		tokens, tools                 int
 		cost                          int64
 	}
 	peers := []peer{
@@ -127,7 +127,7 @@ func TestHubPulseProtectsSummaryUpdatesAndKeepsIndependentProject(t *testing.T) 
 	}
 	apply := func(p peer, seq int64) {
 		t.Helper()
-		payload := SummaryRecord{SessionID: p.name, Remote: p.remote, ProjectKey: p.key, Agent: "codex", StartedAt: &started, Outcome: "unknown", ByModel: map[string]db.SessionModelUsageBreakdown{"model": {InputTokens: p.tokens, HasCost: true, Cost: money.Money{Microdollars: p.cost}}}}
+		payload := SummaryRecord{SessionID: p.name, Remote: p.remote, ProjectKey: p.key, Agent: "codex", StartedAt: &started, Outcome: "unknown", ToolCount: p.tools, ByModel: map[string]db.SessionModelUsageBreakdown{"model": {InputTokens: p.tokens, HasCost: true, Cost: money.Money{Microdollars: p.cost}}}}
 		hash, err := export.DigestCanonical(payload)
 		require.NoError(t, err)
 		ack, err := hub.ApplyBatch(ctx, p.enrollment, "spoke-"+p.name, "share-"+p.name, Batch{Protocol: ProtocolVersion, SpokeInstance: "spoke-" + p.name, ShareUID: "share-" + p.name, Epoch: 1, Sequence: seq, Records: []BatchRecord{{RecordUID: p.name, Kind: "session_summary", Hash: hash, Payload: &payload}}})
@@ -155,6 +155,10 @@ func TestHubPulseProtectsSummaryUpdatesAndKeepsIndependentProject(t *testing.T) 
 	assert.EqualValues(t, 2100, *first.Totals["cost_microdollars"].Value)
 	peers[0].tokens, peers[0].cost = 17, 170
 	apply(peers[0], 2)
+	// The summary hashes of b and c change, but their consumed usage does not.
+	peers[1].tools, peers[2].tools = 3, 3
+	apply(peers[1], 2)
+	apply(peers[2], 2)
 	day, err := archive.ExportReportingDay(ctx, db.ReportingExportOptions{Date: time.Date(2020, 7, 29, 0, 0, 0, 0, time.UTC), Now: time.Date(2020, 7, 30, 0, 0, 0, 0, time.UTC), SchemaVersion: export.ReportingJointSchemaVersion})
 	require.NoError(t, err)
 	assert.EqualValues(t, 217, day.Hours[9].Usage.Totals.InputTokens)
@@ -176,8 +180,8 @@ func TestHubPulseProtectsSummaryUpdatesAndKeepsIndependentProject(t *testing.T) 
 
 	peers[1].tokens, peers[1].cost = 25, 250
 	peers[2].tokens, peers[2].cost = 35, 350
-	apply(peers[1], 2)
-	apply(peers[2], 2)
+	apply(peers[1], 3)
+	apply(peers[2], 3)
 	matched, err := hub.Pulse(ctx, "2020-07-29")
 	require.NoError(t, err)
 	var pTotals map[string]db.FederationPulseMetric
