@@ -5,14 +5,16 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
-
-	"go.kenn.io/agentsview/internal/export"
 )
 
 const federationLocalOrigin = `(s.machine NOT IN ('', 'local') AND s.machine = COALESCE((SELECT value FROM pg_sync_state WHERE key='artifact_local_installation_id'),'')
    AND EXISTS (SELECT 1 FROM local_session_source_baselines b WHERE b.session_id=s.id AND b.machine=s.machine AND b.agent=s.agent AND b.file_path=s.file_path)
    AND NOT EXISTS (SELECT 1 FROM archive_session_provenance p WHERE p.session_id=s.id)
    AND NOT EXISTS (SELECT 1 FROM artifact_imported_sessions i WHERE i.imported_session_id=s.id))`
+
+// The same grant applies to pages, candidates, parents, and usage peers.
+const federationIdentityEligible = `(snap.normalized_remote<>'' AND snap.remote_resolution='resolved' AND snap.key_source='git_remote' AND snap.remote_candidate_count<=1)`
+const federationGrantEligible = `(` + federationIdentityEligible + ` AND ` + federationLocalOrigin + ` AND NOT EXISTS (SELECT 1 FROM federation_exclusions e WHERE e.session_id=s.id) AND (?='' OR julianday(s.started_at)>=julianday(?)))`
 
 // FederationSelection is a single archive snapshot, selected by each session's
 // own repository identity and machine-local ownership evidence.
@@ -37,7 +39,7 @@ func (db *DB) SelectFederationSessions(ctx context.Context, remote, since string
 		return FederationSelection{}, err
 	}
 	defer tx.Rollback()
-	out, err := db.selectFederationSessionIDs(ctx, tx, remote, since)
+	out, err := db.selectFederationSessionIDs(ctx, tx, remote, since, "", 0, nil)
 	if err != nil {
 		return out, err
 	}
@@ -79,7 +81,7 @@ func (db *DB) SelectFederationSessionIDs(ctx context.Context, remote, since stri
 		return FederationSelection{}, err
 	}
 	defer tx.Rollback()
-	out, err := db.selectFederationSessionIDs(ctx, tx, remote, since)
+	out, err := db.selectFederationSessionIDs(ctx, tx, remote, since, "", 0, nil)
 	if err != nil {
 		return out, err
 	}
@@ -89,35 +91,49 @@ func (db *DB) SelectFederationSessionIDs(ctx context.Context, remote, since stri
 	return out, nil
 }
 
-func (db *DB) selectFederationSessionIDs(ctx context.Context, tx *sql.Tx, remote, since string) (FederationSelection, error) {
-	out := FederationSelection{IDs: []string{}, ProjectKeys: map[string]string{}, ToolCounts: map[string]int{}, Outcomes: map[string]string{}, Health: map[string]*string{}}
-	remotes := []string{remote}
-	rows, err := tx.QueryContext(ctx, `SELECT s.id, snap.key, snap.remote_resolution, snap.key_source, snap.normalized_remote, snap.remote_candidate_count,
-  `+federationLocalOrigin+`,
-  EXISTS (SELECT 1 FROM federation_exclusions e WHERE e.session_id=s.id),
-  (? = '' OR julianday(s.started_at) >= julianday(?)),
-  (SELECT count(*) FROM tool_calls t WHERE t.session_id=s.id),s.outcome,s.health_grade
- FROM sessions s JOIN session_project_identity_snapshots snap ON snap.session_id=s.id
- WHERE s.deleted_at IS NULL AND snap.normalized_remote=? ORDER BY s.id`, since, since, remote)
+// selectFederationSessionIDs is the single grant owner. A zero limit retains
+// preview diagnostics; bounded calls filter before applying the keyset limit.
+func (db *DB) selectFederationSessionIDs(ctx context.Context, tx *sql.Tx, remote, since, after string, limit int, candidates []string) (FederationSelection, error) {
+	out := FederationSelection{IDs: []string{}, ProjectKeys: map[string]string{}, ToolCounts: map[string]int{}, Outcomes: map[string]string{}, Health: map[string]*string{}, EligibleParents: map[string]bool{}}
+	query := `SELECT s.id,snap.key,` + federationIdentityEligible + `,` + federationLocalOrigin + `,
+		EXISTS (SELECT 1 FROM federation_exclusions e WHERE e.session_id=s.id),
+		(?='' OR julianday(s.started_at)>=julianday(?)),
+		(SELECT count(*) FROM tool_calls t WHERE t.session_id=s.id),s.outcome,s.health_grade
+		FROM sessions s JOIN session_project_identity_snapshots snap ON snap.session_id=s.id
+		WHERE s.deleted_at IS NULL AND snap.normalized_remote=?`
+	args := []any{since, since, remote}
+	if limit > 0 {
+		query += ` AND s.id>? AND ` + federationGrantEligible
+		args = append(args, after, since, since)
+		if candidates != nil {
+			placeholders, values := InPlaceholders(candidates)
+			query += ` AND s.id IN ` + placeholders
+			args = append(args, values...)
+		}
+	}
+	query += ` ORDER BY s.id`
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return out, err
 	}
+	defer rows.Close()
 	for rows.Next() {
 		var id, key, outcome string
-		var obs export.ProjectIdentityObservation
-		var local, excluded bool
+		var identity, local, excluded bool
 		var inRange sql.NullBool
 		var tools int
 		var health sql.NullString
-		if err = rows.Scan(&id, &key, &obs.RemoteResolution, &obs.KeySource, &obs.NormalizedRemote, &obs.RemoteCandidateCount, &local, &excluded, &inRange, &tools, &outcome, &health); err != nil {
-			rows.Close()
+		if err = rows.Scan(&id, &key, &identity, &local, &excluded, &inRange, &tools, &outcome, &health); err != nil {
 			return out, err
 		}
 		if !inRange.Valid || !inRange.Bool {
 			continue
 		}
-		obs.SessionID = id
-		if !IdentitySelectedByRemotes(obs, remotes) {
+		if !identity {
 			out.NotIdentifiable++
 			continue
 		}
@@ -130,13 +146,9 @@ func (db *DB) selectFederationSessionIDs(ctx context.Context, tx *sql.Tx, remote
 			continue
 		}
 		out.IDs = append(out.IDs, id)
-		out.ProjectKeys[id] = key
-		out.ToolCounts[id] = tools
-		out.Outcomes[id] = outcome
-		out.Health[id] = nullStringPtr(health)
+		out.ProjectKeys[id], out.ToolCounts[id], out.Outcomes[id], out.Health[id] = key, tools, outcome, nullStringPtr(health)
 	}
 	if err = rows.Err(); err != nil {
-		rows.Close()
 		return out, err
 	}
 	if err = rows.Close(); err != nil {
@@ -184,40 +196,8 @@ func (db *DB) selectFederationPage(ctx context.Context, remote, since, after str
 		return FederationSelection{}, err
 	}
 	defer tx.Rollback()
-	out := FederationSelection{IDs: []string{}, ProjectKeys: map[string]string{}, ToolCounts: map[string]int{}, Outcomes: map[string]string{}, Health: map[string]*string{}, EligibleParents: map[string]bool{}}
-	whereIDs := ""
-	args := []any{after, remote, since, since}
-	if candidates != nil {
-		placeholders, idArgs := InPlaceholders(candidates)
-		whereIDs = " AND s.id IN " + placeholders
-		args = append(args, idArgs...)
-	}
-	args = append(args, limit)
-	rows, err := tx.QueryContext(ctx, `SELECT s.id,snap.key,(SELECT count(*) FROM tool_calls t WHERE t.session_id=s.id),s.outcome,s.health_grade
-		FROM sessions s JOIN session_project_identity_snapshots snap ON snap.session_id=s.id
-		WHERE s.id>? AND s.deleted_at IS NULL AND snap.normalized_remote=? AND snap.remote_resolution='resolved'
-		AND snap.key_source='git_remote' AND snap.remote_candidate_count<=1 AND `+federationLocalOrigin+`
-		AND NOT EXISTS (SELECT 1 FROM federation_exclusions e WHERE e.session_id=s.id)
-		AND (?='' OR julianday(s.started_at)>=julianday(?))`+whereIDs+` ORDER BY s.id LIMIT ?`, args...)
+	out, err := db.selectFederationSessionIDs(ctx, tx, remote, since, after, limit, candidates)
 	if err != nil {
-		return out, err
-	}
-	for rows.Next() {
-		var id, key, outcome string
-		var tools int
-		var health sql.NullString
-		if err = rows.Scan(&id, &key, &tools, &outcome, &health); err != nil {
-			rows.Close()
-			return out, err
-		}
-		out.IDs = append(out.IDs, id)
-		out.ProjectKeys[id], out.ToolCounts[id], out.Outcomes[id], out.Health[id] = key, tools, outcome, nullStringPtr(health)
-	}
-	if err = rows.Err(); err != nil {
-		rows.Close()
-		return out, err
-	}
-	if err = rows.Close(); err != nil {
 		return out, err
 	}
 	if len(out.IDs) > 0 {
@@ -229,46 +209,34 @@ func (db *DB) selectFederationPage(ctx context.Context, remote, since, after str
 		filterPeers := func(ids []string) (map[string]bool, error) {
 			allowed := make(map[string]bool)
 			err := QueryChunkedSize(ids, 400, func(chunk []string) error {
-				placeholders, idArgs := InPlaceholders(chunk)
-				args := []any{remote, since, since}
-				args = append(args, idArgs...)
-				rows, err := tx.QueryContext(ctx, `SELECT s.id FROM sessions s JOIN session_project_identity_snapshots snap ON snap.session_id=s.id
-					WHERE s.deleted_at IS NULL AND snap.normalized_remote=? AND snap.remote_resolution='resolved'
-					AND snap.key_source='git_remote' AND snap.remote_candidate_count<=1 AND `+federationLocalOrigin+`
-					AND NOT EXISTS (SELECT 1 FROM federation_exclusions e WHERE e.session_id=s.id)
-					AND (?='' OR julianday(s.started_at)>=julianday(?)) AND s.id IN `+placeholders, args...)
+				selected, err := db.selectFederationSessionIDs(ctx, tx, remote, since, "", len(chunk), chunk)
 				if err != nil {
 					return err
 				}
-				defer rows.Close()
-				for rows.Next() {
-					var id string
-					if err := rows.Scan(&id); err != nil {
-						return err
-					}
+				for _, id := range selected.IDs {
 					allowed[id] = true
 				}
-				return rows.Err()
+				return nil
 			})
 			return allowed, err
 		}
 		if _, err = db.attachSessionExportUsageFiltered(ctx, tx, out.Rows, nil, filterPeers); err != nil {
 			return out, err
 		}
+		var parents []string
 		for _, row := range out.Rows {
-			if row.ParentSessionID == nil {
-				continue
+			if row.ParentSessionID != nil {
+				parents = append(parents, *row.ParentSessionID)
 			}
-			var eligible bool
-			err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sessions s JOIN session_project_identity_snapshots snap ON snap.session_id=s.id
-				WHERE s.id=? AND s.deleted_at IS NULL AND snap.normalized_remote=? AND snap.remote_resolution='resolved'
-				AND snap.key_source='git_remote' AND snap.remote_candidate_count<=1 AND `+federationLocalOrigin+`
-				AND NOT EXISTS (SELECT 1 FROM federation_exclusions e WHERE e.session_id=s.id)
-				AND (?='' OR julianday(s.started_at)>=julianday(?)))`, *row.ParentSessionID, remote, since, since).Scan(&eligible)
+		}
+		if len(parents) > 0 {
+			eligible, err := filterPeers(parents)
 			if err != nil {
 				return out, err
 			}
-			out.EligibleParents[*row.ParentSessionID] = eligible
+			for _, id := range parents {
+				out.EligibleParents[id] = eligible[id]
+			}
 		}
 	}
 	sort.Slice(out.Rows, func(i, j int) bool { return out.Rows[i].ID < out.Rows[j].ID })

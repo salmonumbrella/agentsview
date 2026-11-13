@@ -63,6 +63,8 @@ func TestFederationSelectionRequiresOwnSnapshotAndLocalProof(t *testing.T) {
 			`INSERT INTO messages (id,session_id,ordinal,role,content) VALUES (100,'selected',0,'assistant','fixture-content')`,
 			`INSERT INTO tool_calls (message_id,session_id,tool_name,category,input_json) VALUES (100,'selected','fixture','fixture-category','fixture-input')`,
 			`UPDATE sessions SET parent_session_id='selected',relationship_type='subagent' WHERE id='child'`,
+			`UPDATE sessions SET parent_session_id='selected',relationship_type='subagent' WHERE id='boundary'`,
+			`UPDATE sessions SET parent_session_id='excluded',relationship_type='subagent' WHERE id='selected'`,
 			`UPDATE sessions SET project='personal', cwd='/fixture/private/work' WHERE id='renamed'`,
 		} {
 			if _, err := tx.ExecContext(ctx, q); err != nil {
@@ -93,9 +95,16 @@ func TestFederationSelectionRequiresOwnSnapshotAndLocalProof(t *testing.T) {
 	first, err := database.SelectFederationPage(ctx, "github.com/example/api", "2026-01-02", "", 1)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"boundary"}, first.IDs)
+	assert.True(t, first.EligibleParents["selected"])
 	second, err := database.SelectFederationPage(ctx, "github.com/example/api", "2026-01-02", first.IDs[0], 1)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"selected"}, second.IDs)
+	assert.False(t, second.EligibleParents["excluded"])
+	candidates, err := database.SelectFederationCandidates(ctx, "github.com/example/api", "2026-01-02", []string{"boundary", "selected", "excluded", "attached", "ambiguous", "before", "no-snapshot", "trashed"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"boundary", "selected"}, candidates.IDs)
+	assert.True(t, candidates.EligibleParents["selected"])
+	assert.False(t, candidates.EligibleParents["excluded"])
 	last, err := database.SelectFederationPage(ctx, "github.com/example/api", "2026-01-02", second.IDs[0], 1)
 	require.NoError(t, err)
 	assert.Empty(t, last.IDs)
