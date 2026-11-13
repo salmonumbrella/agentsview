@@ -391,17 +391,17 @@ func TestFederationReconcileIsShareScopedAndRejectsOutOfOrderPages(t *testing.T)
 		return err
 	}))
 	page := FederationInventoryPage{Round: "round", Epoch: 1, Sequence: 0, Items: []FederationInventoryItem{{UID: "missing", Hash: "x"}}, Final: true}
-	result, err := d.ReconcileFederationPage(ctx, "enr", "spoke", "share", page)
+	result, err := d.ReconcileFederationPage(ctx, "enr", "spoke", "share", "policy", page)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"missing"}, result.Missing)
 	assert.Equal(t, []string{"owned"}, result.Extra)
 	assert.NotContains(t, result.Extra, "private")
 	page.After = "wrong"
-	_, err = d.ReconcileFederationPage(ctx, "enr", "spoke", "share", page)
+	_, err = d.ReconcileFederationPage(ctx, "enr", "spoke", "share", "policy", page)
 	require.ErrorIs(t, err, ErrFederationSequence)
-	_, err = d.ReconcileFederationPage(ctx, "enr", "spoke", "unknown", page)
+	_, err = d.ReconcileFederationPage(ctx, "enr", "spoke", "unknown", "policy", page)
 	require.ErrorIs(t, err, sql.ErrNoRows)
-	_, err = d.ReconcileFederationPage(ctx, "foreign", "spoke", "share", page)
+	_, err = d.ReconcileFederationPage(ctx, "foreign", "spoke", "share", "policy", page)
 	require.ErrorIs(t, err, sql.ErrNoRows)
 }
 
@@ -505,11 +505,25 @@ func TestFederationRebuildKeepsOldRowsUntilAllRangesRepaired(t *testing.T) {
 	_, err = d.PutFederationHubShare(ctx, "spoke", share)
 	require.NoError(t, err)
 	first := FederationInventoryPage{Round: "round", Epoch: 2, Through: "a", Items: []FederationInventoryItem{{UID: "a", Hash: "same"}}}
-	result, err := d.ReconcileFederationPage(ctx, "enr", "spoke", "share", first)
+	result, err := d.ReconcileFederationPage(ctx, "enr", "spoke", "share", "policy", first)
 	require.NoError(t, err)
 	assert.Equal(t, "a", result.Boundary)
+	// A changed hub policy must reveal no inventory and must not complete the
+	// epoch or purge the older row, including for an empty final page.
+	stale := FederationInventoryPage{Round: "round", Epoch: 2, After: "a", Final: true}
+	refused, err := d.ReconcileFederationPage(ctx, "enr", "spoke", "share", "changed-policy", stale)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+	assert.Empty(t, refused.Missing)
+	assert.Empty(t, refused.Extra)
+	var boundary string
+	var completed int64
+	var retained int
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT reconcile_boundary,completed_epoch,(SELECT count(*) FROM sessions WHERE id='z') FROM federation_hub_shares WHERE share_uid='share'`).Scan(&boundary, &completed, &retained))
+	assert.Equal(t, "a", boundary)
+	assert.Less(t, completed, int64(2))
+	assert.Equal(t, 1, retained)
 	last := FederationInventoryPage{Round: "round", Epoch: 2, After: "a", Final: true, Items: []FederationInventoryItem{{UID: "b", Hash: "new"}}}
-	result, err = d.ReconcileFederationPage(ctx, "enr", "spoke", "share", last)
+	result, err = d.ReconcileFederationPage(ctx, "enr", "spoke", "share", "policy", last)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"b"}, result.Missing)
 	var old int
@@ -518,10 +532,10 @@ func TestFederationRebuildKeepsOldRowsUntilAllRangesRepaired(t *testing.T) {
 	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 2, 1, "repair", []FederationHubRecord{record("b", "new")})
 	require.NoError(t, err)
 	last.Sequence = 1
-	result, err = d.ReconcileFederationPage(ctx, "enr", "spoke", "share", last)
+	result, err = d.ReconcileFederationPage(ctx, "enr", "spoke", "share", "policy", last)
 	require.NoError(t, err)
 	assert.False(t, result.Complete)
-	result, err = d.ReconcileFederationPage(ctx, "enr", "spoke", "share", last)
+	result, err = d.ReconcileFederationPage(ctx, "enr", "spoke", "share", "policy", last)
 	require.NoError(t, err)
 	assert.True(t, result.Complete)
 	var same, repaired int
@@ -561,10 +575,10 @@ func TestFederationInventoryRejectsOversizedAndCompletesEmpty(t *testing.T) {
 	_, err := d.PutFederationHubShare(ctx, "spoke", FederationHubShare{UID: "share", EnrollmentUID: "enr", Remote: "example.org/repo", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
 	require.NoError(t, err)
 	page := FederationInventoryPage{Round: "round", Epoch: 1, Final: true, Items: make([]FederationInventoryItem, 1001)}
-	_, err = d.ReconcileFederationPage(ctx, "enr", "spoke", "share", page)
+	_, err = d.ReconcileFederationPage(ctx, "enr", "spoke", "share", "policy", page)
 	require.ErrorIs(t, err, ErrFederationInvalidBatch)
 	page.Items = nil
-	result, err := d.ReconcileFederationPage(ctx, "enr", "spoke", "share", page)
+	result, err := d.ReconcileFederationPage(ctx, "enr", "spoke", "share", "policy", page)
 	require.NoError(t, err)
 	assert.True(t, result.Complete)
 	assert.Empty(t, result.Missing)
@@ -619,9 +633,21 @@ func TestFederationSameHashAttachesLaterOwnedParent(t *testing.T) {
 	parentRecord := FederationHubRecord{UID: parent, Hash: "parent-hash", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: SessionBatchWrite{Session: Session{ID: parent, Project: "p", Machine: "federated", Agent: "claude"}}}
 	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 2, "parent", []FederationHubRecord{parentRecord})
 	require.NoError(t, err)
+	// A later relationship repair must republish the surviving child to mirrors.
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE sessions SET sync_marker='2001-01-01T00:00:00.000Z' WHERE id='a-child'`)
+		return err
+	}))
 	result, err := d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 3, "repair", []FederationHubRecord{child})
 	require.NoError(t, err)
 	assert.True(t, result.Changed)
+	candidates, err := d.ListSessionsForMirrorWindow(ctx, "2002-01-01T00:00:00Z", nil, nil)
+	require.NoError(t, err)
+	var candidateIDs []string
+	for _, candidate := range candidates {
+		candidateIDs = append(candidateIDs, candidate.ID)
+	}
+	assert.Contains(t, candidateIDs, "a-child")
 	var gotParent, relationship string
 	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT coalesce(parent_session_id,''),relationship_type FROM sessions WHERE id='a-child'`).Scan(&gotParent, &relationship))
 	assert.Equal(t, "z-parent", gotParent)

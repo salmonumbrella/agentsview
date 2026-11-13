@@ -210,7 +210,7 @@ func (db *DB) CommitFederationBatch(ctx context.Context, enrollment, spoke, shar
 			if _, err = tx.ExecContext(ctx, `UPDATE federation_records SET epoch=? WHERE share_uid=? AND record_uid=?`, epoch, share, record.UID); err != nil {
 				return result, err
 			}
-			changed, err := tx.ExecContext(ctx, `UPDATE sessions SET parent_session_id=?,relationship_type=? WHERE id=? AND (parent_session_id IS NOT ? OR relationship_type<>?)`, record.Write.Session.ParentSessionID, record.Write.Session.RelationshipType, id, record.Write.Session.ParentSessionID, record.Write.Session.RelationshipType)
+			changed, err := tx.ExecContext(ctx, `UPDATE sessions SET parent_session_id=?,relationship_type=?,sync_marker=MAX(COALESCE(sync_marker,''),strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE id=? AND (parent_session_id IS NOT ? OR relationship_type<>?)`, record.Write.Session.ParentSessionID, record.Write.Session.RelationshipType, id, record.Write.Session.ParentSessionID, record.Write.Session.RelationshipType)
 			if err != nil {
 				return result, err
 			}
@@ -346,7 +346,7 @@ func purgeFederationRecordsTx(ctx context.Context, tx *sql.Tx, share string, ids
 			}
 		}
 		// Only relationships within this share are federation-owned.
-		if _, err := tx.ExecContext(ctx, `UPDATE sessions SET parent_session_id=NULL,relationship_type='' WHERE parent_session_id=? AND id IN (SELECT session_id FROM federation_records WHERE share_uid=?)`, id, share); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE sessions SET parent_session_id=NULL,relationship_type='',sync_marker=MAX(COALESCE(sync_marker,''),strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE parent_session_id=? AND id IN (SELECT session_id FROM federation_records WHERE share_uid=?)`, id, share); err != nil {
 			return nil, err
 		}
 		if _, err := deleteSessionPhysicalTx(ctx, tx, id); err != nil {
@@ -384,7 +384,7 @@ type FederationInventoryResult struct {
 
 // ReconcileFederationPage compares only the authenticated share's records.
 // A range advances only when a repeated comparison observes no repairs needed.
-func (db *DB) ReconcileFederationPage(ctx context.Context, enrollment, spoke, share string, page FederationInventoryPage) (FederationInventoryResult, error) {
+func (db *DB) ReconcileFederationPage(ctx context.Context, enrollment, spoke, share, policyDigest string, page FederationInventoryPage) (FederationInventoryResult, error) {
 	result := FederationInventoryResult{Missing: []string{}, Extra: []string{}}
 	if page.Round == "" || len(page.Round) > 128 || len(page.Items) > 1000 || page.Epoch < 1 || page.Sequence < 0 || len(page.After) > 4096 || len(page.Through) > 4096 || (!page.Final && page.Through == "") || (page.Through != "" && page.Through <= page.After) {
 		return result, ErrFederationInvalidBatch
@@ -401,7 +401,7 @@ func (db *DB) ReconcileFederationPage(ctx context.Context, enrollment, spoke, sh
 	err := db.Update(ctx, func(tx *sql.Tx) error {
 		var round, boundary string
 		var epoch, sequence, completed int64
-		err := tx.QueryRowContext(ctx, `SELECT h.reconcile_round,h.reconcile_boundary,h.epoch,h.sequence,h.completed_epoch FROM federation_hub_shares h JOIN federation_enrollments e ON e.enrollment_uid=h.enrollment_uid WHERE h.share_uid=? AND h.enrollment_uid=? AND h.state='active' AND e.spoke_archive_id=? AND e.revoked_at=''`, share, enrollment, spoke).Scan(&round, &boundary, &epoch, &sequence, &completed)
+		err := tx.QueryRowContext(ctx, `SELECT h.reconcile_round,h.reconcile_boundary,h.epoch,h.sequence,h.completed_epoch FROM federation_hub_shares h JOIN federation_enrollments e ON e.enrollment_uid=h.enrollment_uid WHERE h.share_uid=? AND h.enrollment_uid=? AND h.state='active' AND e.spoke_archive_id=? AND e.revoked_at='' AND h.policy_digest=?`, share, enrollment, spoke, policyDigest).Scan(&round, &boundary, &epoch, &sequence, &completed)
 		if err != nil {
 			return err
 		}

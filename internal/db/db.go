@@ -2474,7 +2474,17 @@ func writeUserVersion(ctx context.Context, tx *sql.Tx, version int) error {
 	if hasDelivery {
 		version += federationDeliveryVersionBase
 	}
-	if hasShares || hasDelivery {
+	var hasRetiredLinks bool
+	var linksExist bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='federation_links')`).Scan(&linksExist); err != nil {
+		return err
+	}
+	if linksExist {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM federation_links WHERE state='retired')`).Scan(&hasRetiredLinks); err != nil {
+			return err
+		}
+	}
+	if hasShares || hasDelivery || hasRetiredLinks {
 		version += federationWithdrawalVersionBase
 	}
 	_, err = tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", version))

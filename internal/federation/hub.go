@@ -119,5 +119,9 @@ func (s *Service) Reconcile(ctx context.Context, enrollment, spoke, uid string, 
 	if s.role != "hub" || request.Protocol != ProtocolVersion || request.SpokeInstance != spoke || request.ShareUID != uid {
 		return db.FederationInventoryResult{}, inputError("invalid federation inventory")
 	}
-	return s.db.ReconcileFederationPage(ctx, enrollment, spoke, uid, request.FederationInventoryPage)
+	digest, err := export.DigestCanonical(s.policy)
+	if err != nil {
+		return db.FederationInventoryResult{}, err
+	}
+	return s.db.ReconcileFederationPage(ctx, enrollment, spoke, uid, digest, request.FederationInventoryPage)
 }

@@ -63,6 +63,31 @@ func TestStatusKeepsLocalSharesWhenPeerReturnsHTTPError(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 }
 
+func TestReconcileRequiresCurrentHubPolicy(t *testing.T) {
+	ctx := t.Context()
+	archive, err := db.OpenIsolated(ctx, filepath.Join(t.TempDir(), "archive.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, archive.Close()) })
+	policy := config.FederationHubConfig{Retention: "member-controlled", AllowedLevels: []string{"summary"}, MinGroupSize: 3, SuggestedProjects: []string{}, Processing: "none"}
+	digest, err := export.DigestCanonical(policy)
+	require.NoError(t, err)
+	require.NoError(t, archive.CreateFederationEnrollment(ctx, db.FederationEnrollment{UID: "enr", SpokeArchiveID: "spoke", Member: "member", CredentialSHA256: "digest"}))
+	_, err = archive.PutFederationHubShare(ctx, "spoke", db.FederationHubShare{UID: "share", EnrollmentUID: "enr", Remote: "example.org/repo", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: digest, Epoch: 1, State: "active", Retention: policy.Retention})
+	require.NoError(t, err)
+	request := ReconcileRequest{Protocol: ProtocolVersion, SpokeInstance: "spoke", ShareUID: "share", FederationInventoryPage: db.FederationInventoryPage{Round: "round", Epoch: 1, Final: true}}
+	changed := policy
+	changed.Processing = "aggregated"
+	// Stale consent must not reveal inventory or complete its epoch.
+	result, err := NewService("hub", "hub", changed, archive).Reconcile(ctx, "enr", "spoke", "share", request)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+	assert.Empty(t, result.Missing)
+	assert.Empty(t, result.Extra)
+	assert.False(t, result.Complete)
+	result, err = NewService("hub", "hub", policy, archive).Reconcile(ctx, "enr", "spoke", "share", request)
+	require.NoError(t, err)
+	assert.True(t, result.Complete)
+}
+
 func TestJoinPinsHubAndBlocksChangedIdentity(t *testing.T) {
 	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
 	require.NoError(t, err)

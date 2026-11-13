@@ -1533,4 +1533,5 @@ status and share lookup. Tombstoned history keeps confirmed and uncertain
 attempt hashes separately.
 After a source generation changes, retained shares may send explicit
 exclusions as tombstones; missing rows alone do not prove deletion.
-The additive `1 << 24` archive bit protects withdrawal state from older writers.
+The additive `1 << 24` archive bit protects withdrawal state, including retired
+links without shares, from older writers.
