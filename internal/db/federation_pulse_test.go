@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"encoding/json/jsontext"
+	"math"
 	"testing"
 	"time"
 
@@ -1429,4 +1430,28 @@ func TestFederationPulseStoredRefusalsUnionAcrossShares(t *testing.T) {
 	_, err = d.CommitFederationBatch(ctx, "e", "spoke", "a", "policy", 1, 2, "batch-a-clean", []FederationHubRecord{clean})
 	require.NoError(t, err)
 	assert.Empty(t, read().StoredShareBatchRefusals)
+}
+
+func TestFederationPulseRejectsCrossContributorCostOverflow(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "e", SpokeArchiveID: "spoke", Member: "member", CredentialSHA256: "digest"}))
+	_, err := d.PutFederationHubShare(ctx, "spoke", FederationHubShare{UID: "h", EnrollmentUID: "e", Remote: "example/a", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+	require.NoError(t, err)
+	start := "2026-07-28T09:00:00Z"
+	var records []FederationHubRecord
+	for _, item := range []struct {
+		id   string
+		cost int64
+	}{{"a", math.MaxInt64}, {"b", 1}} {
+		cost := money.Money{Microdollars: item.cost}
+		records = append(records, FederationHubRecord{UID: item.id, Hash: "hash", Remote: "example/a", ProjectKey: "project", Write: SessionBatchWrite{Session: Session{ID: item.id, Project: "example/a", Agent: "codex", StartedAt: &start}, Signals: SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []UsageEvent{{Source: "fixture", Model: "model", InputTokens: 1, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: start, DedupKey: item.id}}}})
+	}
+	_, err = d.CommitFederationBatch(ctx, "e", "spoke", "h", "policy", 1, 1, "batch", records)
+	require.NoError(t, err)
+	now := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	_, err = d.readFederationPulse(ctx, "2026-07-28", 1, now)
+	require.ErrorIs(t, err, money.ErrOverflow)
+	_, err = d.ExportReportingDay(ctx, ReportingExportOptions{Date: now.AddDate(0, 0, -1), Now: now, SchemaVersion: export.ReportingJointSchemaVersion})
+	require.ErrorIs(t, err, money.ErrOverflow)
 }
