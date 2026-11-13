@@ -13,10 +13,12 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/agentsview/internal/config"
+	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/dbtest"
 	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/federation"
@@ -208,6 +210,48 @@ func TestFederationPulseUsesOrdinaryHostAndOperatorAuth(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestFederationPulseHTTPReleasesOnlySafeProjects(t *testing.T) {
+	database := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "archive.db"))
+	ctx := t.Context()
+	date := time.Now().UTC().AddDate(0, 0, -2).Format(time.DateOnly)
+	for _, f := range []struct {
+		id, project string
+		tokens      int
+	}{{"a", "safe", 10}, {"b", "safe", 20}, {"c", "safe", 30}, {"private-session", "private-project", 9}} {
+		enrollment, spoke, share := "enr-"+f.id, "spoke-"+f.id, "share-"+f.id
+		remote := "example/" + f.project
+		require.NoError(t, database.CreateFederationEnrollment(ctx, db.FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: f.id, CredentialSHA256: "digest-" + f.id}))
+		_, err := database.PutFederationHubShare(ctx, spoke, db.FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: remote, ProjectKey: f.project, Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+		require.NoError(t, err)
+		started := date + "T09:00:00Z"
+		record := db.FederationHubRecord{UID: f.id, Hash: "hash", Remote: remote, ProjectKey: f.project, Write: db.SessionBatchWrite{
+			Session: db.Session{ID: f.id, Project: remote, Agent: "codex", StartedAt: &started}, Signals: db.SessionSignalUpdate{Outcome: "unknown"},
+			UsageEvents: []db.UsageEvent{{Source: "fixture", Model: "model", InputTokens: f.tokens, OccurredAt: started, DedupKey: f.id}},
+		}}
+		_, err = database.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", []db.FederationHubRecord{record})
+		require.NoError(t, err)
+	}
+	svc := federation.NewService("hub", "archive", config.FederationHubConfig{MinGroupSize: 3}, database)
+	srv := New(config.Config{Host: "127.0.0.1", Port: 8080, AuthToken: "personal", RequireAuth: true}, database, nil, WithFederation(svc))
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/v1/federation/pulse?since="+date, nil)
+	req.Header.Set("Authorization", "Bearer personal")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var pulse db.FederationPulse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pulse))
+	assert.True(t, pulse.Suppressed)
+	assert.Nil(t, pulse.Totals["tokens"].Value)
+	assert.Equal(t, "suppressed", pulse.Totals["tokens"].State)
+	require.Len(t, pulse.Projects, 1)
+	assert.Equal(t, "safe", pulse.Projects[0].Key)
+	require.NotNil(t, pulse.Projects[0].Totals["tokens"].Value)
+	assert.EqualValues(t, 60, *pulse.Projects[0].Totals["tokens"].Value)
+	for _, secret := range []string{"private-project", "private-session", "enr-a", "share-a", "digest-a"} {
+		assert.NotContains(t, rec.Body.String(), secret)
 	}
 }
 
