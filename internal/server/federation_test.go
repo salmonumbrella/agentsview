@@ -637,3 +637,49 @@ func TestFederationPulseHTTPReleasesPartialKnownCost(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"cost_microdollars":{"value":600,"state":"partial"}`)
 	assert.NotContains(t, rec.Body.String(), "digest-a")
 }
+
+func TestFederationPulseHTTPProtectsHistoryAfterUpdate(t *testing.T) {
+	database := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "archive.db"))
+	ctx := t.Context()
+	started := "2020-07-29T09:00:00Z"
+	for i, name := range []string{"a", "b", "c"} {
+		enrollment, spoke, share := "e-"+name, "s-"+name, "h-"+name
+		require.NoError(t, database.CreateFederationEnrollment(ctx, db.FederationEnrollment{UID: enrollment, SpokeArchiveID: spoke, Member: name, CredentialSHA256: "digest-" + name}))
+		_, err := database.PutFederationHubShare(ctx, spoke, db.FederationHubShare{UID: share, EnrollmentUID: enrollment, Remote: "example/repo", ProjectKey: "project", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+		require.NoError(t, err)
+		cost := money.Money{Microdollars: int64((i + 1) * 100)}
+		record := db.FederationHubRecord{UID: name, Hash: "initial", Remote: "example/repo", ProjectKey: "project", Write: db.SessionBatchWrite{Session: db.Session{ID: name, Project: "example/repo", Agent: "codex", StartedAt: &started}, Signals: db.SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []db.UsageEvent{{Source: "fixture", Model: "model", InputTokens: (i + 1) * 10, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: started, DedupKey: name}}}}
+		_, err = database.CommitFederationBatch(ctx, enrollment, spoke, share, "policy", 1, 1, "batch", []db.FederationHubRecord{record})
+		require.NoError(t, err)
+	}
+	svc := federation.NewService("hub", "archive", config.FederationHubConfig{MinGroupSize: 3}, database)
+	srv := New(config.Config{Host: "127.0.0.1", Port: 8080, AuthToken: "personal", RequireAuth: true}, database, nil, WithFederation(svc))
+	read := func() (db.FederationPulse, string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/v1/federation/pulse?since=2020-07-29", nil)
+		req.Header.Set("Authorization", "Bearer personal")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var pulse db.FederationPulse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pulse))
+		return pulse, rec.Body.String()
+	}
+	first, _ := read()
+	require.NotNil(t, first.Totals["tokens"].Value)
+	assert.EqualValues(t, 60, *first.Totals["tokens"].Value)
+	require.NotNil(t, first.Totals["cost_microdollars"].Value)
+	assert.EqualValues(t, 600, *first.Totals["cost_microdollars"].Value)
+	cost := money.Money{Microdollars: 170}
+	record := db.FederationHubRecord{UID: "a", Hash: "changed", Remote: "example/repo", ProjectKey: "project", Write: db.SessionBatchWrite{Session: db.Session{ID: "a", Project: "example/repo", Agent: "codex", StartedAt: &started}, Signals: db.SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []db.UsageEvent{{Source: "fixture", Model: "model", InputTokens: 17, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: started, DedupKey: "a"}}}}
+	_, err := database.CommitFederationBatch(ctx, "e-a", "s-a", "h-a", "policy", 1, 2, "changed", []db.FederationHubRecord{record})
+	require.NoError(t, err)
+	later, body := read()
+	assert.True(t, later.Suppressed)
+	assert.Empty(t, later.Projects)
+	assert.Equal(t, "suppressed", later.Totals["tokens"].State)
+	assert.Nil(t, later.Totals["tokens"].Value)
+	assert.Nil(t, later.Totals["cost_microdollars"].Value)
+	assert.NotContains(t, body, `"key":"project"`)
+	assert.NotContains(t, body, "digest-a")
+}
