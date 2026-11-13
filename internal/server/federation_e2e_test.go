@@ -1163,3 +1163,117 @@ func TestFederationRestoreReconcilesAndContinuesDeletion(t *testing.T) {
 		})
 	}
 }
+
+func TestFederationOfflineStopBeforeNewEpochRegistration(t *testing.T) {
+	for _, retention := range []string{"member-controlled", "org-retained"} {
+		t.Run(retention, func(t *testing.T) {
+			ctx := t.Context()
+			hubDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "hub.db"))
+			spokeDB := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "spoke.db"))
+			cfg, err := config.Default()
+			require.NoError(t, err)
+			cfg.Federation.Hub.Retention = retention
+			hub := federation.NewService("hub", "hub-a", cfg.Federation.Hub, hubDB)
+			_, token, err := hub.Enroll(ctx, "spoke-a", "member", "")
+			require.NoError(t, err)
+			handler := New(config.Config{Host: "127.0.0.1", Port: 8080}, hubDB, nil, WithFederation(hub)).Handler()
+			var offline atomic.Bool
+			peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if offline.Load() {
+					http.Error(w, "offline", http.StatusServiceUnavailable)
+					return
+				}
+				handler.ServeHTTP(w, r)
+			}))
+			t.Cleanup(peer.Close)
+			file := filepath.Join(testutil.PrivateTempDir(t), "credential")
+			require.NoError(t, os.WriteFile(file, []byte(token), 0600))
+			spoke := federation.NewService("spoke", "spoke-a", cfg.Federation.Hub, spokeDB)
+			require.NoError(t, spoke.Join(ctx, peer.URL, "hub-a", file))
+			remote := "github.com/example/repo"
+			key := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: remote}).Key
+			seed := func(id string) {
+				t.Helper()
+				require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
+					if _, e := tx.ExecContext(ctx, `INSERT OR IGNORE INTO pg_sync_state(key,value) VALUES('artifact_local_installation_id','install')`); e != nil {
+						return e
+					}
+					if _, e := tx.ExecContext(ctx, `INSERT INTO sessions(id,project,machine,agent,file_path,started_at,message_count) VALUES(?,'fixture','install','claude',?,'2026-01-02T00:00:00Z',1)`, id, id); e != nil {
+						return e
+					}
+					if _, e := tx.ExecContext(ctx, `INSERT INTO local_session_source_baselines(session_id,machine,agent,file_path) VALUES(?,'install','claude',?)`, id, id); e != nil {
+						return e
+					}
+					_, e := tx.ExecContext(ctx, `INSERT INTO session_project_identity_snapshots(session_id,project,machine,observed_at,remote_resolution,remote_candidate_count,normalized_remote,key_source,key) VALUES(?,'fixture','install','2026-01-01','resolved',1,?,'git_remote',?)`, id, remote, key)
+					return e
+				}))
+			}
+			seed("a")
+			require.NoError(t, spokeDB.ReplaceSessionUsageEvents(ctx, "a", []db.UsageEvent{{SessionID: "a", Source: "fixture", Model: "model", InputTokens: 42, OccurredAt: "2026-01-02T00:00:00Z", DedupKey: "a-usage"}}))
+			grant := federation.ShareGrant{Project: remote, Level: "summary", Attribution: "pooled"}
+			preview, err := spoke.PreviewShare(ctx, grant)
+			require.NoError(t, err)
+			require.NoError(t, spoke.AddShare(ctx, preview))
+			_, err = spoke.Push(ctx)
+			require.NoError(t, err)
+			shares, err := spoke.Shares(ctx)
+			require.NoError(t, err)
+			require.Len(t, shares.Shares, 1)
+			uid := shares.Shares[0].UID
+			grant.Since = "2026-01-01"
+			preview, err = spoke.PreviewShare(ctx, grant)
+			require.NoError(t, err)
+			require.NoError(t, spoke.AddShare(ctx, preview))
+			var localEpoch, hubEpoch int64
+			link, err := spokeDB.GetFederationLink(ctx)
+			require.NoError(t, err)
+			localShare, err := spokeDB.GetFederationShare(ctx, link.UID, uid)
+			require.NoError(t, err)
+			localEpoch = localShare.Epoch
+			require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT epoch FROM federation_hub_shares WHERE share_uid=?`, uid).Scan(&hubEpoch))
+			assert.EqualValues(t, 2, localEpoch)
+			assert.EqualValues(t, 1, hubEpoch)
+			offline.Store(true)
+			require.NoError(t, spoke.RemoveShare(ctx, uid))
+			_, err = spoke.Push(ctx)
+			require.Error(t, err)
+			details, err := spoke.Share(ctx, uid)
+			require.NoError(t, err)
+			assert.Equal(t, "pending", details.Share.StopReceipt)
+			offline.Store(false)
+			_, err = spoke.Push(ctx)
+			require.NoError(t, err)
+			details, err = spoke.Share(ctx, uid)
+			require.NoError(t, err)
+			var a, usage, receipts int
+			require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='a'),(SELECT count(*) FROM usage_events WHERE session_id='a'),(SELECT count(*) FROM federation_records WHERE session_id='a')`).Scan(&a, &usage, &receipts))
+			if retention == "member-controlled" {
+				assert.Equal(t, "purged", details.Share.StopReceipt)
+				assert.Zero(t, a)
+				assert.Zero(t, usage)
+				assert.Zero(t, receipts)
+			} else {
+				assert.Equal(t, "retained", details.Share.StopReceipt)
+				assert.Equal(t, 1, a)
+				assert.Greater(t, usage, 0)
+				assert.Equal(t, 1, receipts)
+				require.NoError(t, spokeDB.Update(ctx, func(tx *sql.Tx) error {
+					_, e := tx.ExecContext(ctx, `UPDATE sessions SET message_count=9 WHERE id='a'`)
+					return e
+				}))
+				seed("b")
+				_, err = spoke.Push(ctx)
+				require.NoError(t, err)
+				var count, b int
+				require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT (SELECT message_count FROM sessions WHERE id='a'),(SELECT count(*) FROM sessions WHERE id='b')`).Scan(&count, &b))
+				assert.Equal(t, 1, count)
+				assert.Zero(t, b)
+				require.NoError(t, spoke.Exclude(ctx, "a", "private"))
+				_, err = spoke.Push(ctx)
+				require.NoError(t, err)
+				require.NoError(t, hubDB.Reader().QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id='a'`).Scan(&a))
+				assert.Zero(t, a)
+			}
+		})
+	}
+}
