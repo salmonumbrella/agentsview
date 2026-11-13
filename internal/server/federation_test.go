@@ -59,6 +59,7 @@ func TestFederationCredentialIsolation(t *testing.T) {
 					assert.Equal(t, "Unauthorized\n", rec.Body.String())
 				}
 			}
+			var schemeResults []*httptest.ResponseRecorder
 			for _, header := range []string{token, "bearer " + token} {
 				req := httptest.NewRequest(http.MethodGet, federationHandshakePath, nil)
 				req.Header.Set("Authorization", header)
@@ -70,6 +71,7 @@ func TestFederationCredentialIsolation(t *testing.T) {
 				rows, err := svc.List(t.Context())
 				require.NoError(t, err)
 				assert.Empty(t, rows[0].LastHandshakeAt)
+				schemeResults = append(schemeResults, rec)
 			}
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/federation/handshake", nil)
 			req.Header.Set("Authorization", "Bearer "+token)
@@ -83,6 +85,10 @@ func TestFederationCredentialIsolation(t *testing.T) {
 			wrongResult := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(wrongResult, wrong)
 			assert.Equal(t, http.StatusUnauthorized, wrongResult.Code)
+			for _, schemeResult := range schemeResults {
+				assert.Equal(t, wrongResult.Body.String(), schemeResult.Body.String())
+				assert.Equal(t, wrongResult.Header(), schemeResult.Header())
+			}
 			require.NoError(t, svc.Revoke(t.Context(), enrollment.UID))
 			var body string
 			for _, pair := range [][2]string{{"", "spoke-a"}, {"avfc_bad", "spoke-a"}, {token, "wrong"}, {token, "spoke-a"}, {"personal", "spoke-a"}} {

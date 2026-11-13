@@ -73,6 +73,13 @@ func TestJoinPinsHubAndBlocksChangedIdentity(t *testing.T) {
 	link, err := archive.GetFederationLink(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, "blocked", link.State)
+	callsBeforeJoin = calls
+	err = svc.Join(t.Context(), hub.URL, "hub-a", "missing")
+	assert.ErrorContains(t, err, "already linked")
+	assert.Equal(t, callsBeforeJoin, calls)
+	unchanged, err := archive.GetFederationLink(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, link, unchanged)
 	require.NoError(t, svc.Leave(t.Context()))
 	identity = "hub-a"
 	require.NoError(t, svc.Join(t.Context(), hub.URL+"/av", "hub-a", token))
