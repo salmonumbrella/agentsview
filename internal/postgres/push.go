@@ -737,16 +737,25 @@ func (s *Sync) pushWithOptions(
 		vectorScope = mapKeys(sessionByID)
 	}
 
+	reconcileDeletions := func() error {
+		if result.Errors != 0 {
+			return nil
+		}
+		if full {
+			if err := s.reconcilePGMissingSessions(ctx, markerID, legacyMarkerMachines); err != nil {
+				return err
+			}
+		}
+		return s.reconcilePGDeletionJournal(ctx, state, markerID, legacyMarkerMachines, deletionRevision)
+	}
 	if len(sessions) == 0 {
+		if err := reconcileDeletions(); err != nil {
+			return result, err
+		}
 		if err := s.savePushState(ctx, state, lastPush, cutoff, runCommitted,
 			priorFingerprints, sessionFingerprints, result.Errors,
 		); err != nil {
 			return result, err
-		}
-		if result.Errors == 0 {
-			if err := s.reconcilePGDeletionJournal(ctx, state, markerID, legacyMarkerMachines, deletionRevision); err != nil {
-				return result, err
-			}
 		}
 		if err := s.writePushMarker(
 			ctx, markerID, markerMachine, markerMachineAliases,
@@ -875,16 +884,14 @@ func (s *Sync) pushWithOptions(
 		}
 	}
 
+	if err := reconcileDeletions(); err != nil {
+		return result, err
+	}
 	if err := s.savePushState(ctx, state, lastPush, cutoff,
 		append(pushed, runCommitted...), priorFingerprints, sessionFingerprints,
 		result.Errors,
 	); err != nil {
 		return result, err
-	}
-	if result.Errors == 0 {
-		if err := s.reconcilePGDeletionJournal(ctx, state, markerID, legacyMarkerMachines, deletionRevision); err != nil {
-			return result, err
-		}
 	}
 	// Write the push marker only after the push and local finalization
 	// succeed. A reset-recovery push that fails before this point leaves

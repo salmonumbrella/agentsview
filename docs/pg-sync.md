@@ -243,9 +243,14 @@ incremental and retries the failed sessions.
 
 After an archive rebuild, the next push sends all sessions again. Once every
 session publishes successfully, a full push also removes PostgreSQL sessions
-that this archive owns but no longer contains. Project filters limit this
-cleanup to the selected projects. Sessions owned by another archive, or whose
-owner is unknown, remain untouched. An interrupted push resumes before cleanup.
+that this archive owns but no longer contains. A full push after restoring a
+snapshot also checks owned rows against current local presence, even when
+deletion progress has not changed. Project filters
+limit this cleanup to the selected projects; remote-scoped full pushes do not
+perform this presence scan. Incremental pushes process recorded hard deletions,
+including formerly filtered sessions. Cleanup remains pending until a push
+succeeds. Sessions owned by another archive, or whose owner is unknown, remain
+untouched. An interrupted push resumes before cleanup.
 Codex thread trash state remains available for restoring or permanently deleting
 its pages.
 

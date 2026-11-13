@@ -112,6 +112,68 @@ func TestPushPreservesLegacyOffsetTimestamps(t *testing.T) {
 	assert.Equal(t, "1", marker)
 }
 
+func TestFullPushReconcilesRowsAfterSameGenerationRestore(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		t.Run(fmt.Sprintf("keep-local-%t", keep), func(t *testing.T) {
+			ctx := t.Context()
+			pgURL := testPGURL(t)
+			schema := fmt.Sprintf("agentsview_restore_full_%t", keep)
+			cleanNamedPGSchema(t, pgURL, schema)
+			t.Cleanup(func() { cleanNamedPGSchema(t, pgURL, schema) })
+			pg, err := Open(ctx, pgURL, schema, true)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, pg.Close()) })
+			require.NoError(t, EnsureSchema(ctx, pg, schema))
+			unavailable, err := ensureVectorBaseSchemaPG(ctx, pg)
+			require.NoError(t, err)
+			if unavailable != "" {
+				t.Skip(unavailable)
+			}
+			local, err := db.Open(ctx, filepath.Join(t.TempDir(), "local.db"))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, local.Close()) })
+			dbtest.SeedPricingMeta(t, local)
+			if keep {
+				require.NoError(t, local.UpsertSession(ctx, db.Session{ID: "kept", Project: "project", Machine: "machine", Agent: "claude", MessageCount: 1}))
+			}
+			syncer := &Sync{pg: pg, local: local, machine: "machine", schema: schema, schemaDone: true}
+			_, err = syncer.PushWithOptions(ctx, storage.PushOptions{Full: true}, nil)
+			require.NoError(t, err)
+			revision, err := local.SessionDeletionPublicationRevision(ctx)
+			require.NoError(t, err)
+			progress, err := syncer.effectiveSyncState().GetSyncState(ctx, "session_deletion_revision_v1:"+syncer.targetFingerprint+":"+syncer.databaseGeneration)
+			require.NoError(t, err)
+			assert.Equal(t, fmt.Sprint(revision), progress)
+			snapshot := filepath.Join(t.TempDir(), "snapshot.db")
+			require.NoError(t, local.SnapshotTo(ctx, snapshot))
+			require.NoError(t, local.UpsertSession(ctx, db.Session{ID: "later", Project: "project", Machine: "machine", Agent: "claude", MessageCount: 1}))
+			require.NoError(t, local.ReplaceSessionUsageEvents(ctx, "later", []db.UsageEvent{{SessionID: "later", Source: "provider", Model: "model", InputTokens: 11, OccurredAt: "2026-07-22T12:00:00Z", DedupKey: "later-usage"}}))
+			_, err = syncer.PushWithOptions(ctx, storage.PushOptions{Full: true}, nil)
+			require.NoError(t, err)
+			_, err = pg.ExecContext(ctx, `INSERT INTO vector_documents(doc_key,session_id,source_uuid,ordinal,ordinal_end,subordinate,offsets,content,content_hash) VALUES('later-doc','later','',0,0,FALSE,'','fixture','hash')`)
+			require.NoError(t, err)
+			var beforeUsage int
+			require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM usage_events WHERE session_id='later'`).Scan(&beforeUsage))
+			require.Equal(t, 1, beforeUsage)
+			restored, err := db.OpenIsolated(ctx, snapshot)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, restored.Close()) })
+			resync := &Sync{pg: pg, local: restored, machine: "machine", schema: schema, schemaDone: true}
+			_, err = resync.PushWithOptions(ctx, storage.PushOptions{Full: true}, nil)
+			require.NoError(t, err)
+			var sessions, vectors, usage int
+			require.NoError(t, pg.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='later'),(SELECT count(*) FROM vector_documents WHERE session_id='later'),(SELECT count(*) FROM usage_events WHERE session_id='later')`).Scan(&sessions, &vectors, &usage))
+			assert.Zero(t, sessions)
+			assert.Zero(t, vectors)
+			assert.Zero(t, usage)
+			if keep {
+				require.NoError(t, pg.QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE id='kept'`).Scan(&sessions))
+				assert.Equal(t, 1, sessions)
+			}
+		})
+	}
+}
+
 func TestPGUsageEventFingerprintsPreserveExactMicrodollars(t *testing.T) {
 	pgURL := testPGURL(t)
 	const schema = "agentsview_usage_fingerprint_money_test"
