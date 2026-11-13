@@ -2936,9 +2936,11 @@ Use `federation share list`, `show`, `pause`, `resume`, or `remove` to manage
 shares. `share list` omits the stored preview and prints suggested projects on
 standard error; `share show` prints the stored preview. A changed hub policy
 pauses active shares. A share you paused stays paused; run `share add` again to
-replace its consent and `resume` to activate it. Resume works without the hub;
-add and push need a live hub policy. Removing a share stops future delivery
-and requests cleanup. A member-controlled hub purges its records; an
+replace its consent and `resume` to activate it. Resume requires a completed
+stop receipt; run `federation push` and check status or `share show` if cleanup
+is pending. Add and push need a live hub policy. Removing a share stops future
+delivery and queues cleanup; run `federation push` and check status or
+`share show` for the receipt. A member-controlled hub purges its records; an
 organization-retained hub keeps them and reports retention. An offline hub
 leaves cleanup pending for retry. If a retained share's source archive is
 replaced, deletion narrowing waits for fresh consent rather than treating

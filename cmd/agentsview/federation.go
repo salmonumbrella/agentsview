@@ -247,6 +247,14 @@ func streamFederationDryRun(ctx context.Context, base, token string, out io.Writ
 	_, err = io.Copy(out, resp.Body)
 	return err
 }
+
+func removeFederationShare(ctx context.Context, base, token, uid string, out io.Writer) error {
+	if err := federationRequest(ctx, base, token, http.MethodDelete, "/api/v1/federation/shares/"+url.PathEscape(uid), nil, nil); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintln(out, "Share delivery stopped; hub cleanup is pending. Run federation push, then check federation status or share show.")
+	return err
+}
 func printFederationShares(out, diagnostic io.Writer, shares federation.ShareList) error {
 	if err := json.NewEncoder(out).Encode(shares.Shares); err != nil {
 		return err
@@ -295,13 +303,14 @@ func newFederationShareCommand() *cobra.Command {
 				return err
 			}
 			path := "/api/v1/federation/shares/" + url.PathEscape(args[0])
+			if action == "remove" {
+				return removeFederationShare(cmd.Context(), tr.URL, cfg.AuthToken, args[0], cmd.OutOrStdout())
+			}
 			method := http.MethodPost
 			if action == "show" {
 				method = http.MethodGet
 			}
-			if action == "remove" {
-				method = http.MethodDelete
-			} else if action != "show" {
+			if action != "show" {
 				path += "/" + action
 			}
 			if action == "show" {
@@ -314,10 +323,7 @@ func newFederationShareCommand() *cobra.Command {
 			if err = federationRequest(cmd.Context(), tr.URL, cfg.AuthToken, method, path, nil, nil); err != nil {
 				return err
 			}
-			if action == "remove" {
-				_, err = fmt.Fprintln(cmd.OutOrStdout(), "Share removed; future delivery stopped. Previously delivered records remain on the hub.")
-			}
-			return err
+			return nil
 		}})
 	}
 	return root

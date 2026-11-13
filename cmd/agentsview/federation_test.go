@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -30,7 +31,7 @@ func TestFederationRelativeCredentialRemainsUsableAfterDaemonDirectoryChanges(t 
 	require.NoError(t, err)
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "Bearer avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", r.Header.Get("Authorization"))
-		_ = json.NewEncoder(w).Encode(federation.HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{1}, EnrollmentUID: "enr-a", Member: "member-a", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
+		_ = json.NewEncoder(w).Encode(federation.HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{federation.ProtocolVersion}, EnrollmentUID: "enr-a", Member: "member-a", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
 	}))
 	t.Cleanup(hub.Close)
 	svc := federation.NewService("spoke", "spoke-a", policy, database)
@@ -81,6 +82,18 @@ func TestFederationRequestReturnsDaemonMessage(t *testing.T) {
 	t.Cleanup(daemon.Close)
 	err := federationRequest(t.Context(), daemon.URL, "", http.MethodGet, "/", nil, nil)
 	assert.EqualError(t, err, "federation: x")
+}
+
+func TestShareRemoveReportsPendingCleanup(t *testing.T) {
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodDelete, r.Method)
+		assert.Equal(t, "/api/v1/federation/shares/share-a", r.URL.Path)
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(daemon.Close)
+	var out bytes.Buffer
+	require.NoError(t, removeFederationShare(t.Context(), daemon.URL, "", "share-a", &out))
+	assert.Equal(t, "Share delivery stopped; hub cleanup is pending. Run federation push, then check federation status or share show.\n", out.String())
 }
 
 func TestShareConfirmationPostsOnlyOnYes(t *testing.T) {

@@ -343,12 +343,12 @@ func (db *DB) PutFederationShare(ctx context.Context, s FederationShare) error {
 		result, err := tx.ExecContext(ctx, `INSERT INTO federation_shares (share_uid,link_uid,normalized_remote,level,attribution,since,audience,state,consent_json,policy_digest) VALUES (?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(link_uid,normalized_remote) DO UPDATE SET
 		level=excluded.level,attribution=excluded.attribution,since=excluded.since,audience=excluded.audience,
-		state=CASE WHEN federation_shares.stop_intent<>'' THEN 'active' WHEN federation_shares.state='paused' THEN 'paused' ELSE excluded.state END,
-		epoch=CASE WHEN federation_shares.stop_intent<>'' OR federation_shares.state='active' THEN federation_shares.epoch+1 ELSE federation_shares.epoch END,
-		sequence=CASE WHEN federation_shares.stop_intent<>'' OR federation_shares.state='active' THEN 0 ELSE federation_shares.sequence END,
-		pending_batch=CASE WHEN federation_shares.stop_intent<>'' OR federation_shares.state='active' THEN '' ELSE federation_shares.pending_batch END,
-		stop_intent=CASE WHEN federation_shares.stop_intent<>'' THEN 'resume' WHEN federation_shares.state='active' THEN 'rebuild' ELSE '' END,
-		stop_receipt='',consent_json=excluded.consent_json,policy_digest=excluded.policy_digest
+		state=CASE WHEN federation_shares.stop_intent='pause' OR federation_shares.state='paused' AND federation_shares.stop_intent='' THEN 'paused' WHEN federation_shares.stop_intent<>'' THEN 'active' ELSE excluded.state END,
+		epoch=CASE WHEN (federation_shares.stop_intent<>'' AND federation_shares.stop_intent<>'pause') OR federation_shares.state='active' THEN federation_shares.epoch+1 ELSE federation_shares.epoch END,
+		sequence=CASE WHEN (federation_shares.stop_intent<>'' AND federation_shares.stop_intent<>'pause') OR federation_shares.state='active' THEN 0 ELSE federation_shares.sequence END,
+		pending_batch=CASE WHEN (federation_shares.stop_intent<>'' AND federation_shares.stop_intent<>'pause') OR federation_shares.state='active' THEN '' ELSE federation_shares.pending_batch END,
+		stop_intent=CASE WHEN federation_shares.stop_intent='pause' THEN 'pause' WHEN federation_shares.stop_intent<>'' THEN 'resume' WHEN federation_shares.state='active' THEN 'rebuild' ELSE '' END,
+		stop_receipt=CASE WHEN federation_shares.stop_intent='pause' THEN federation_shares.stop_receipt ELSE '' END,consent_json=excluded.consent_json,policy_digest=excluded.policy_digest
 		WHERE (federation_shares.stop_intent<>'' AND federation_shares.stop_receipt IN ('purged','retained')) OR
 		(federation_shares.stop_intent='' AND (federation_shares.state='policy_paused' OR
 		(federation_shares.state='active' AND (federation_shares.since<>excluded.since OR federation_shares.attribution<>excluded.attribution OR federation_shares.level<>excluded.level OR COALESCE(json_extract(federation_shares.consent_json,'$.delivery_notice'),'')<>COALESCE(json_extract(excluded.consent_json,'$.delivery_notice'),''))) OR
@@ -499,7 +499,7 @@ func (db *DB) ConfirmFederationResume(ctx context.Context, linkUID, uid string, 
 
 func (db *DB) BeginFederationRebuild(ctx context.Context, linkUID, uid string, epoch int64) error {
 	return db.Update(ctx, func(tx *sql.Tx) error {
-		result, err := tx.ExecContext(ctx, `UPDATE federation_shares SET epoch=epoch+1,sequence=0,pending_batch='',stop_intent='rebuild' WHERE link_uid=? AND share_uid=? AND state='active' AND epoch=?`, linkUID, uid, epoch)
+		result, err := tx.ExecContext(ctx, `UPDATE federation_shares SET epoch=epoch+1,sequence=0,pending_batch='',stop_intent='rebuild',sync_cursor='',usage_cursor=0,deletion_cursor=0 WHERE link_uid=? AND share_uid=? AND state='active' AND epoch=?`, linkUID, uid, epoch)
 		if err != nil {
 			return err
 		}
@@ -526,7 +526,7 @@ func (db *DB) SetFederationGeneration(ctx context.Context, linkUID, uid, generat
 		}
 		changed = old != "" && old != generation
 		if changed {
-			_, err := tx.ExecContext(ctx, `UPDATE federation_shares SET source_generation=?,epoch=epoch+1,sequence=0,stop_intent='rebuild' WHERE link_uid=? AND share_uid=?`, generation, linkUID, uid)
+			_, err := tx.ExecContext(ctx, `UPDATE federation_shares SET source_generation=?,epoch=epoch+1,sequence=0,stop_intent='rebuild',sync_cursor='',usage_cursor=0,deletion_cursor=0 WHERE link_uid=? AND share_uid=?`, generation, linkUID, uid)
 			if err != nil {
 				return err
 			}

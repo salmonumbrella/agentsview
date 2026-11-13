@@ -256,6 +256,29 @@ func TestFederationShareDuplicateAndReconsent(t *testing.T) {
 	require.NoError(t, database.Reader().QueryRow(ctx, `SELECT reason FROM federation_exclusions WHERE session_id='session-a'`).Scan(&reason))
 	assert.Equal(t, "private", reason)
 
+	for _, receipt := range []string{"purged", "retained"} {
+		t.Run("manual pause "+receipt, func(t *testing.T) {
+			manual := FederationShare{UID: "manual-" + receipt, LinkUID: "link-a", NormalizedRemote: "github.com/example/" + receipt, Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: `{"shown":1}`, PolicyDigest: "old"}
+			require.NoError(t, database.PutFederationShare(ctx, manual))
+			require.NoError(t, database.StopFederationShare(ctx, "link-a", manual.UID, "pause"))
+			updated := manual
+			updated.PolicyDigest, updated.ConsentJSON = "new", `{"shown":2}`
+			require.ErrorIs(t, database.PutFederationShare(ctx, updated), ErrFederationShareExists)
+			pending, err := database.GetFederationShare(ctx, "link-a", manual.UID)
+			require.NoError(t, err)
+			assert.Equal(t, "old", pending.PolicyDigest)
+			require.NoError(t, database.ReceiptFederationStop(ctx, "link-a", manual.UID, receipt, 1, 0))
+			require.NoError(t, database.PutFederationShare(ctx, updated))
+			paused, err := database.GetFederationShare(ctx, "link-a", manual.UID)
+			require.NoError(t, err)
+			assert.Equal(t, "paused", paused.State)
+			assert.Equal(t, "pause", paused.StopIntent)
+			assert.Equal(t, receipt, paused.StopReceipt)
+			assert.Equal(t, "new", paused.PolicyDigest)
+			require.NoError(t, database.ResumeFederationShare(ctx, "link-a", manual.UID))
+		})
+	}
+
 	manual := FederationShare{UID: "share-m", LinkUID: "link-a", NormalizedRemote: "github.com/example/web", Level: "summary", Attribution: "pooled", Audience: "operators", State: "paused", ConsentJSON: `{}`, PolicyDigest: "old"}
 	require.NoError(t, database.PutFederationShare(ctx, manual))
 	for _, tc := range []struct {
@@ -512,6 +535,7 @@ func TestRemoveFederationShareRetainsStopIntentAndAccounting(t *testing.T) {
 func TestFederationPendingBatchAndAcknowledgmentAreDurable(t *testing.T) {
 	d := testDB(t)
 	ctx := t.Context()
+	require.NoError(t, d.PutFederationLink(ctx, FederationLink{UID: "link", HubOrigin: "https://example.org", HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: "/fixture/token", ProtocolVersion: 2, State: "active"}))
 	require.NoError(t, d.PutFederationShare(ctx, FederationShare{UID: "share", LinkUID: "link", NormalizedRemote: "example.org/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: "{}", PolicyDigest: "policy"}))
 	require.NoError(t, d.SaveFederationPending(ctx, "share", 1, `{"sequence":1}`, []FederationDelivery{{RecordUID: "item", SessionID: "item", Hash: "attempt"}}))
 	share, err := d.GetFederationShare(ctx, "link", "share")
@@ -534,6 +558,7 @@ func TestFederationPendingBatchAndAcknowledgmentAreDurable(t *testing.T) {
 func TestFederationRebuildRetainsUncertainAttempt(t *testing.T) {
 	d := testDB(t)
 	ctx := t.Context()
+	require.NoError(t, d.PutFederationLink(ctx, FederationLink{UID: "link", HubOrigin: "https://example.org", HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: "/fixture/token", ProtocolVersion: 2, State: "active"}))
 	require.NoError(t, d.PutFederationShare(ctx, FederationShare{UID: "share", LinkUID: "link", NormalizedRemote: "example.org/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: "{}", PolicyDigest: "policy"}))
 	require.NoError(t, d.SaveFederationPending(ctx, "share", 1, `{"sequence":1}`, []FederationDelivery{{RecordUID: "item", SessionID: "item", Hash: "attempt"}}))
 	require.NoError(t, d.BeginFederationRebuild(ctx, "link", "share", 1))
@@ -568,6 +593,8 @@ func TestLeaveRetainsRetiredLinkAndStopsShares(t *testing.T) {
 func TestFederationReconcileConfirmsOnlyMatchingAttempt(t *testing.T) {
 	d := testDB(t)
 	ctx := t.Context()
+	require.NoError(t, d.PutFederationLink(ctx, FederationLink{UID: "link", HubOrigin: "https://example.org", HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: "/fixture/token", ProtocolVersion: 2, State: "active"}))
+	require.NoError(t, d.PutFederationShare(ctx, FederationShare{UID: "share", LinkUID: "link", NormalizedRemote: "example.org/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: "{}", PolicyDigest: "policy"}))
 	require.NoError(t, d.RecordFederationAttempt(ctx, "share", []FederationDelivery{{RecordUID: "a", SessionID: "a", Hash: "attempt-a"}, {RecordUID: "b", SessionID: "b", Hash: "attempt-b"}}))
 	require.NoError(t, d.ConfirmFederationMatches(ctx, "share", []FederationInventoryItem{{UID: "a", Hash: "attempt-a"}, {UID: "b", Hash: "different"}}))
 	ledger, err := d.FederationLedger(ctx, "share")
@@ -585,6 +612,7 @@ func TestFederationGenerationChangeRequiresNewEpoch(t *testing.T) {
 	changed, err := d.SetFederationGeneration(ctx, "link", "share", "one")
 	require.NoError(t, err)
 	assert.False(t, changed)
+	require.NoError(t, d.AdvanceFederationCursors(ctx, "share", 1, "2026-01-01T00:00:00Z", 23, 19))
 	changed, err = d.SetFederationGeneration(ctx, "link", "share", "two")
 	require.NoError(t, err)
 	assert.True(t, changed)
@@ -592,6 +620,9 @@ func TestFederationGenerationChangeRequiresNewEpoch(t *testing.T) {
 	require.NoError(t, err)
 	assert.EqualValues(t, 2, share.Epoch)
 	assert.Equal(t, "rebuild", share.StopIntent)
+	assert.Empty(t, share.SyncCursor)
+	assert.Zero(t, share.UsageCursor)
+	assert.Zero(t, share.DeletionCursor)
 }
 
 func TestFederationChangeCursorsAdvanceAfterProcessing(t *testing.T) {
@@ -604,6 +635,14 @@ func TestFederationChangeCursorsAdvanceAfterProcessing(t *testing.T) {
 	assert.Equal(t, "2026-01-01T00:00:00Z", share.SyncCursor)
 	assert.EqualValues(t, 5, share.UsageCursor)
 	assert.EqualValues(t, 7, share.DeletionCursor)
+	// A restored snapshot can keep the database identity while its journals
+	// regress. The recovery transition must not carry those cursors forward.
+	require.NoError(t, d.BeginFederationRebuild(ctx, "link", "share", 1))
+	share, err = d.GetFederationShare(ctx, "link", "share")
+	require.NoError(t, err)
+	assert.Empty(t, share.SyncCursor)
+	assert.Zero(t, share.UsageCursor)
+	assert.Zero(t, share.DeletionCursor)
 }
 
 func TestFederationDeliveryAndStopSurviveReopen(t *testing.T) {
@@ -611,6 +650,7 @@ func TestFederationDeliveryAndStopSurviveReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "archive.db")
 	d, err := OpenIsolated(ctx, path)
 	require.NoError(t, err)
+	require.NoError(t, d.PutFederationLink(ctx, FederationLink{UID: "link", HubOrigin: "https://example.org", HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: "/fixture/token", ProtocolVersion: 2, State: "active"}))
 	require.NoError(t, d.PutFederationShare(ctx, FederationShare{UID: "share", LinkUID: "link", NormalizedRemote: "example.org/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: "{}", PolicyDigest: "policy"}))
 	require.NoError(t, d.SaveFederationPending(ctx, "share", 1, `{"sequence":1}`, []FederationDelivery{{RecordUID: "item", SessionID: "item", Hash: "attempt"}}))
 	require.NoError(t, d.Close())

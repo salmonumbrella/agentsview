@@ -437,6 +437,9 @@ func (s *Service) ResumeShare(ctx context.Context, uid string) error {
 	case "active":
 		return inputError("share is already active")
 	}
+	if share.StopIntent == "pause" && share.StopReceipt == "pending" {
+		return inputError("cleanup pending; run federation push and check federation status or share show before resuming")
+	}
 	return s.db.ResumeFederationShare(ctx, link.UID, uid)
 }
 func (s *Service) RemoveShare(ctx context.Context, uid string) error {
