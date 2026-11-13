@@ -1411,3 +1411,51 @@ func TestReportingMessageLessUsageSuppliesInWindowFirstSeen(t *testing.T) {
 	assert.Zero(t, day.Hours[9].Activity.Totals.AgentMinutes)
 	assert.EqualValues(t, 10, day.Hours[9].Usage.Totals.InputTokens)
 }
+
+// Each pair is allocated from one authoritative session total. The odd totals
+// exercise the native last-positive remainder, not two independent costs.
+func TestReportingExportKeepsSharedAllocationRemainders(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		totals    [3]int64
+		first     [3]int64
+		second    [3]int64
+		marginals [2]int64
+		total     int64
+	}{{"even", [3]int64{100, 200, 300}, [3]int64{50, 100, 150}, [3]int64{50, 100, 150}, [2]int64{300, 300}, 600}, {"odd", [3]int64{107, 205, 309}, [3]int64{53, 102, 154}, [3]int64{54, 103, 155}, [2]int64{309, 312}, 621}} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := testDB(t)
+			ctx := t.Context()
+			require.NoError(t, d.UpsertModelPricingContext(ctx, []ModelPricing{{ModelPattern: "alloc-a", InputPerMTok: money.Money{Microdollars: 1000000}}, {ModelPattern: "alloc-b", InputPerMTok: money.Money{Microdollars: 1000000}}}))
+			date := time.Date(2026, 7, 28, 0, 0, 0, 0, time.UTC)
+			end := date.Add(24 * time.Hour)
+			for i, id := range []string{"a", "b", "c"} {
+				insertSession(t, d, id, "project", func(s *Session) { s.Agent = "copilot"; s.StartedAt = Ptr("2026-07-28T09:00:00Z") })
+				cost := money.Money{Microdollars: tc.totals[i]}
+				require.NoError(t, d.ReplaceSessionUsageEvents(ctx, id, []UsageEvent{{Source: "shutdown", Model: "alloc-a", InputTokens: 100, OccurredAt: "2026-07-28T09:05:00Z", DedupKey: "a"}, {Source: "shutdown", Model: "alloc-b", InputTokens: 100, Cost: &cost, CostStatus: "exact", CostSource: CopilotReportedCostSource, OccurredAt: "2026-07-28T09:10:00Z", DedupKey: "b"}}))
+			}
+			day, err := d.ExportReportingDay(ctx, ReportingExportOptions{Date: date, Now: end, SchemaVersion: export.ReportingJointSchemaVersion})
+			require.NoError(t, err)
+			assert.EqualValues(t, tc.total, day.Hours[9].Usage.Totals.Cost.Microdollars)
+			costs := map[string]int64{}
+			for _, model := range day.Hours[9].Usage.ByModel {
+				costs[model.Key] = model.Cost.Microdollars
+			}
+			assert.Equal(t, map[string]int64{"alloc-a": tc.marginals[0], "alloc-b": tc.marginals[1]}, costs)
+			tx, err := d.getReader().BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+			require.NoError(t, err)
+			defer func() { _ = tx.Rollback() }()
+			for i, id := range []string{"a", "b", "c"} {
+				source, err := d.loadReportingExportSourceScoped(ctx, tx, date, end, export.ReportingJointSchemaVersion, map[string]struct{}{id: {}})
+				require.NoError(t, err)
+				hours, err := reportingHoursFromSource(ctx, source.forDate(date, end), date, 24, export.ReportingJointSchemaVersion, nil, time.Hour)
+				require.NoError(t, err)
+				perModel := map[string]int64{}
+				for _, model := range hours[9].Usage.ByModel {
+					perModel[model.Key] = model.Cost.Microdollars
+				}
+				assert.Equal(t, map[string]int64{"alloc-a": tc.first[i], "alloc-b": tc.second[i]}, perModel)
+			}
+		})
+	}
+}
