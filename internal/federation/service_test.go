@@ -30,7 +30,7 @@ func TestJoinPinsHubAndBlocksChangedIdentity(t *testing.T) {
 		calls++
 		assert.Equal(t, "/av/api/v1/federation/handshake", r.URL.Path)
 		assert.Equal(t, "Bearer avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", r.Header.Get("Authorization"))
-		_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: identity, ProtocolVersions: []int{1}, EnrollmentUID: "enr-a", Member: "member-a", Policy: policy, PolicyDigest: digest})
+		_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: identity, ProtocolVersions: []int{1}, EnrollmentUID: "enr-a", Member: "member-a", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
 	}))
 	t.Cleanup(hub.Close)
 	token := filepath.Join(testutil.PrivateTempDir(t), "credential")
@@ -94,7 +94,7 @@ func TestJoinRejectsUnsupportedProtocolAndBadDigest(t *testing.T) {
 	policy := config.FederationHubConfig{Retention: "member-controlled", AllowedLevels: []string{"summary"}, MinGroupSize: 3, SuggestedProjects: []string{}, Processing: "none"}
 	digest, err := export.DigestCanonical(policy)
 	require.NoError(t, err)
-	response := HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{2}, EnrollmentUID: "enr-a", Member: "member-a", Policy: policy, PolicyDigest: digest}
+	response := HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{2}, EnrollmentUID: "enr-a", Member: "member-a", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest}
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(w).Encode(response) }))
 	t.Cleanup(hub.Close)
 	file := filepath.Join(testutil.PrivateTempDir(t), "credential")
@@ -125,6 +125,7 @@ func TestEnrollmentStoresOnlyDigestAndRevocationStopsHandshake(t *testing.T) {
 	handshake, err := svc.Authenticate(t.Context(), credential, "spoke-a")
 	require.NoError(t, err)
 	assert.Equal(t, "member-a", handshake.Member)
+	assert.Equal(t, "enrolled", handshake.EnrollmentState)
 	require.NoError(t, svc.Revoke(t.Context(), enrollment.UID))
 	_, err = svc.Authenticate(t.Context(), credential, "spoke-a")
 	assert.ErrorIs(t, err, db.ErrFederationUnauthorized)
@@ -163,34 +164,45 @@ func TestEnrollmentNormalizesAndRejectsInvalidFields(t *testing.T) {
 	assert.EqualError(t, err, "an active enrollment already exists for this spoke archive and member; revoke it first")
 }
 
-func TestUnsupportedLinkCanBeLeftWithoutContact(t *testing.T) {
-	for _, tc := range []struct {
-		version int
-		state   string
-	}{{2, LinkActive}, {ProtocolVersion, "paused"}} {
-		t.Run(tc.state, func(t *testing.T) {
-			archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
-			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, archive.Close()) })
-			calls := 0
-			hub := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls++ }))
-			t.Cleanup(hub.Close)
-			link := db.FederationLink{UID: "link-a", HubOrigin: hub.URL, HubArchiveID: "hub-a", EnrollmentUID: "enr-a", Member: "member-a", TokenFile: "missing", ProtocolVersion: tc.version, State: tc.state}
-			require.NoError(t, archive.PutFederationLink(t.Context(), link))
-			before, err := archive.GetFederationLink(t.Context())
-			require.NoError(t, err)
-			svc := NewService("spoke", "spoke-a", config.FederationHubConfig{}, archive)
-			status, err := svc.Status(t.Context())
-			require.NoError(t, err)
-			assert.Equal(t, HubUnsupported, status.Hub.State)
-			assert.Nil(t, status.Hub.Policy)
-			err = svc.Join(t.Context(), hub.URL, "hub-a", "missing")
-			assert.ErrorContains(t, err, "already linked")
-			after, err := archive.GetFederationLink(t.Context())
-			require.NoError(t, err)
-			assert.Equal(t, before, after)
-			assert.Zero(t, calls)
-			require.NoError(t, svc.Leave(t.Context()))
-		})
+func TestEnrollmentStateValidation(t *testing.T) {
+	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, archive.Close()) })
+	policy := config.FederationHubConfig{Retention: "member-controlled", AllowedLevels: []string{"summary"}, MinGroupSize: 3, SuggestedProjects: []string{}, Processing: "none"}
+	digest, err := export.DigestCanonical(policy)
+	require.NoError(t, err)
+	response := HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{1}, EnrollmentUID: "enr-a", Member: "member-a", Policy: policy, PolicyDigest: digest}
+	omit := false
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if omit {
+			_, _ = w.Write([]byte(`{"hub_archive_id":"hub-a","protocol_versions":[1],"enrollment_uid":"enr-a","member":"member-a"}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	t.Cleanup(hub.Close)
+	file := filepath.Join(testutil.PrivateTempDir(t), "credential")
+	require.NoError(t, os.WriteFile(file, []byte("avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), 0600))
+	svc := NewService("spoke", "spoke-a", policy, archive)
+	for _, missing := range []bool{false, true} {
+		omit = missing
+		response.EnrollmentState = "revoked"
+		assert.EqualError(t, svc.Join(t.Context(), hub.URL, "hub-a", file), "unsupported enrollment state")
+		_, err := archive.GetFederationLink(t.Context())
+		require.Error(t, err)
 	}
+	omit = false
+	response.EnrollmentState = "enrolled"
+	require.NoError(t, svc.Join(t.Context(), hub.URL, "hub-a", file))
+	response.EnrollmentState = "revoked"
+	status, err := svc.Status(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, HubError, status.Hub.State)
+	assert.Equal(t, "unsupported enrollment state", status.Hub.Message)
+	response.EnrollmentState = "enrolled"
+	response.PolicyDigest = "wrong"
+	status, err = svc.Status(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, HubError, status.Hub.State)
+	assert.Equal(t, "invalid federation policy digest", status.Hub.Message)
 }

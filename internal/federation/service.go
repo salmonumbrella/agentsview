@@ -24,12 +24,8 @@ const (
 	LinkActive      = "active"
 	LinkBlocked     = "blocked"
 	HubOK           = "ok"
-	HubRefused      = "refused"
-	HubUnreachable  = "unreachable"
-	HubCredential   = "credential"
-	HubInvalid      = "invalid"
+	HubError        = "error"
 	HubBlocked      = "blocked"
-	HubUnsupported  = "unsupported"
 )
 
 type Service struct {
@@ -167,7 +163,7 @@ func (s *Service) Authenticate(ctx context.Context, token, archive string) (Hand
 	if err != nil {
 		return out, err
 	}
-	return HandshakeResponse{HubArchiveID: s.archiveID, ProtocolVersions: []int{ProtocolVersion}, EnrollmentUID: e.UID, Member: e.Member, Policy: s.policy, PolicyDigest: digest}, nil
+	return HandshakeResponse{HubArchiveID: s.archiveID, ProtocolVersions: []int{ProtocolVersion}, EnrollmentUID: e.UID, Member: e.Member, EnrollmentState: "enrolled", Policy: s.policy, PolicyDigest: digest}, nil
 }
 func validateHandshake(h HandshakeResponse, expected string) error {
 	if h.HubArchiveID != expected || h.EnrollmentUID == "" || h.Member == "" {
@@ -181,6 +177,9 @@ func validateHandshake(h HandshakeResponse, expected string) error {
 	}
 	if !supported {
 		return inputError("unsupported federation protocol")
+	}
+	if h.EnrollmentState != "enrolled" {
+		return inputError("unsupported enrollment state")
 	}
 	if h.Policy.SuggestedProjects == nil {
 		return inputError("invalid federation policy")
@@ -258,10 +257,6 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	}
 	out.Link = &link
 	out.Hub = &HubStatus{}
-	if link.ProtocolVersion != ProtocolVersion || (link.State != LinkActive && link.State != LinkBlocked) {
-		out.Hub.State, out.Hub.Message = HubUnsupported, "link was written by a newer agentsview; upgrade to use it"
-		return out, nil
-	}
 	if link.State == LinkBlocked {
 		out.Hub.State = HubBlocked
 		return out, nil
@@ -270,7 +265,7 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	if err != nil {
 		var input *InputError
 		if errors.As(err, &input) {
-			out.Hub.State, out.Hub.Message = HubCredential, err.Error()
+			out.Hub.State, out.Hub.Message = HubError, err.Error()
 			return out, nil
 		}
 		return out, err
@@ -278,12 +273,12 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	h, err := Handshake(ctx, link.HubOrigin, token, s.archiveID)
 	if err != nil {
 		var input *InputError
-		if errors.Is(err, ErrHubRefused) {
-			out.Hub.State, out.Hub.Message = HubRefused, err.Error()
+		if errors.Is(err, ErrHubError) {
+			out.Hub.State, out.Hub.Message = HubError, err.Error()
 			return out, nil
 		}
 		if errors.As(err, &input) {
-			out.Hub.State, out.Hub.Message = HubUnreachable, err.Error()
+			out.Hub.State, out.Hub.Message = HubError, err.Error()
 			return out, nil
 		}
 		return out, err
@@ -297,11 +292,11 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 		return out, nil
 	}
 	if err = validateHandshake(h, link.HubArchiveID); err != nil {
-		out.Hub.State, out.Hub.Message = HubInvalid, err.Error()
+		out.Hub.State, out.Hub.Message = HubError, err.Error()
 		return out, nil
 	}
 	if h.EnrollmentUID != link.EnrollmentUID || h.Member != link.Member {
-		out.Hub.State, out.Hub.Message = HubInvalid, "federation enrollment changed"
+		out.Hub.State, out.Hub.Message = HubError, "federation enrollment changed"
 		return out, nil
 	}
 	out.Hub.State, out.Hub.Policy, out.Hub.PolicyDigest = HubOK, &h.Policy, h.PolicyDigest

@@ -7,6 +7,7 @@ type HandshakeResponse struct {
 	ProtocolVersions []int                      `json:"protocol_versions"`
 	EnrollmentUID    string                     `json:"enrollment_uid"`
 	Member           string                     `json:"member"`
+	EnrollmentState  string                     `json:"enrollment_state"`
 	Policy           config.FederationHubConfig `json:"policy"`
 	PolicyDigest     string                     `json:"policy_digest"`
 }

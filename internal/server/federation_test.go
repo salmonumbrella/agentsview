@@ -241,12 +241,14 @@ func TestFederationHubSpokeLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, status.Link)
 	assert.Equal(t, federation.LinkActive, status.Link.State)
-	assert.Equal(t, federation.HubRefused, status.Hub.State)
+	assert.Equal(t, federation.HubError, status.Hub.State)
+	assert.Equal(t, federation.ErrHubRefused.Error(), status.Hub.Message)
 	assert.Nil(t, status.Hub.Policy)
 	httpHub.Close()
 	status, err = spoke.Status(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, federation.HubUnreachable, status.Hub.State)
+	assert.Equal(t, federation.HubError, status.Hub.State)
+	assert.Equal(t, "cannot reach hub", status.Hub.Message)
 	require.NoError(t, spoke.Leave(t.Context()))
 	status, err = spoke.Status(t.Context())
 	require.NoError(t, err)
@@ -326,7 +328,7 @@ func TestFederationJoinControlMessages(t *testing.T) {
 	policy := config.FederationHubConfig{Retention: "member-controlled", AllowedLevels: []string{"summary"}, MinGroupSize: 3, SuggestedProjects: []string{}, Processing: "none"}
 	digest, err := export.DigestCanonical(policy)
 	require.NoError(t, err)
-	response := federation.HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{1}, EnrollmentUID: "enr-a", Member: "member-a", Policy: policy, PolicyDigest: digest}
+	response := federation.HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{1}, EnrollmentUID: "enr-a", Member: "member-a", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest}
 	code := http.StatusOK
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if code != http.StatusOK {

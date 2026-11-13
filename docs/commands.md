@@ -104,8 +104,9 @@ agentsview federation status
 The hub URL may include a reverse-proxy path. The link starts with zero shares.
 Status shows the stored link, the hub state, and the hub's current policy when
 it answers; the spoke keeps no copy of that policy. It blocks the link if the
-hub archive ID changes. `refused` means the hub rejected the credential because
-it is revoked, unknown, or for another archive. Get a new enrollment, run
+hub archive ID changes. When the hub rejects the credential, status shows hub
+state `error` with a message that says it is revoked, unknown, or for another
+archive. Get a new enrollment, run
 `leave`, then `join` to recover. Join refuses while a link exists; run `leave`
 first. The credential file must be mode 0600; a permissive mode is refused.
 

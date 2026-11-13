@@ -42,17 +42,18 @@ func TestStatusRechecksCredentialPermissions(t *testing.T) {
 	calls := 0
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
-		_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{1}, EnrollmentUID: "enr-a", Member: "member-a", Policy: policy, PolicyDigest: digest})
+		_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{1}, EnrollmentUID: "enr-a", Member: "member-a", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
 	}))
 	t.Cleanup(hub.Close)
 	file := filepath.Join(t.TempDir(), "credential")
 	require.NoError(t, os.WriteFile(file, []byte("avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), 0600))
 	svc := NewService("spoke", "spoke-a", policy, archive)
 	require.NoError(t, svc.Join(t.Context(), hub.URL, "hub-a", file))
-	require.NoError(t, os.Chmod(file, 0640))
+	require.NoError(t, os.Chmod(file, 0644))
 	status, err := svc.Status(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, HubCredential, status.Hub.State)
+	assert.Equal(t, HubError, status.Hub.State)
+	assert.Equal(t, "credential file must be a regular file readable only by its owner (mode 0600)", status.Hub.Message)
 	assert.Nil(t, status.Hub.Policy)
 	assert.Equal(t, 1, calls)
 }
