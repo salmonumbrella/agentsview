@@ -116,7 +116,24 @@ func reportingEvidenceDaysFrom(ctx context.Context, reader sessionExportQuerier,
 			days[time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, time.UTC)] = struct{}{}
 		}
 	}
-	rows, err := reader.QueryContext(ctx, timestamps+` SELECT ts FROM timestamps WHERE ts IS NOT NULL`, args...)
+	// A selected session may use creation as first-seen when its earlier start
+	// is outside the requested day. Include that day when the source window
+	// can select the session; timed usage already contributes its own date.
+	creation := ""
+	if scope != nil {
+		creation = ` UNION ALL
+			SELECT agentsview_timestamp_unix_micro(s.created_at) FROM sessions s
+			WHERE s.deleted_at IS NULL` + scopeWhere + `
+			AND agentsview_timestamp_unix_micro(s.created_at) >= COALESCE(
+				agentsview_timestamp_unix_micro(NULLIF(s.started_at,'')),
+				agentsview_timestamp_unix_micro(s.created_at))
+			AND (agentsview_timestamp_unix_micro(s.ended_at) >= agentsview_timestamp_unix_micro(s.created_at)
+			 OR (COALESCE(s.ended_at,'')='' AND EXISTS (SELECT 1 FROM messages m WHERE m.session_id=s.id
+				 AND agentsview_timestamp_unix_micro(m.timestamp) >= agentsview_timestamp_unix_micro(s.created_at)))
+			 OR EXISTS (SELECT 1 FROM tool_result_events tre WHERE tre.session_id=s.id AND tre.source='tool_execution'
+				 AND tre.status IN ('completed','errored') AND agentsview_timestamp_unix_micro(tre.timestamp) >= agentsview_timestamp_unix_micro(s.created_at)))`
+	}
+	rows, err := reader.QueryContext(ctx, timestamps+` SELECT ts FROM timestamps WHERE ts IS NOT NULL`+creation, args...)
 	if err != nil {
 		return ReportingRange{}, nil, fmt.Errorf("query reporting evidence dates: %w", err)
 	}
