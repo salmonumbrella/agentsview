@@ -106,16 +106,16 @@ Status shows the stored link, the hub state, and the hub's current policy when
 it answers; the spoke keeps no copy of that policy. It blocks the link if the
 hub archive ID changes. When the hub rejects the credential, status shows hub
 state `error` with a message that says it is revoked, unknown, or for another
-archive. Get a new enrollment, run
-`leave`, then `join` to recover. Join refuses while a link exists; run `leave`
+archive. Get a new enrollment, run `leave`, then `join` to recover. Join refuses while a link exists; run `leave`
 first. The credential file must be mode 0600; a permissive mode is refused.
 
 The hub operator can use `agentsview federation enrollments list` and
 `agentsview federation revoke <enrollment-uid>`. The list shows `enrolled` for
-a member that has never contacted the hub, `contacted` after any contact, and `revoked`
-after revocation. `last_handshake_at` records the last contact and is updated by
-join and status. A join the spoke refuses still counts as contact. The member can run `agentsview federation leave` to remove the
-local link; the credential file remains in place. The hub is not told when a
+a member that has never contacted the hub, `contacted` after any contact, and
+`revoked` after revocation. `last_handshake_at` records the last contact and is updated by
+join and status. A join the spoke refuses still counts as contact. The member
+can run `agentsview federation leave` to remove the local link; the credential
+file remains in place. The hub is not told when a
 member leaves, so a `contacted` install may have left; revoke that enrollment.
 
 ### Find a command by task

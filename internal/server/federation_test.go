@@ -93,6 +93,7 @@ func TestFederationCredentialIsolation(t *testing.T) {
 				rec := httptest.NewRecorder()
 				srv.Handler().ServeHTTP(rec, req)
 				assert.Equal(t, http.StatusOK, rec.Code)
+				assert.Contains(t, rec.Body.String(), `"enrollment_state":"enrolled"`)
 				wrong := httptest.NewRequest(http.MethodGet, "/api/v1/federation/handshake", nil)
 				wrong.Header.Set("Authorization", "Bearer "+token)
 				wrong.Header.Set(federation.SpokeArchiveHeader, "wrong")
