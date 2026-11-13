@@ -222,3 +222,168 @@ func TestLocalRelinkingDoesNotTakeFederatedParent(t *testing.T) {
 	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT parent_session_id FROM sessions WHERE id='child'`).Scan(&got))
 	assert.Equal(t, "parent", got)
 }
+
+func TestFederationPurgeOnlyOwnedRecords(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		for _, q := range []string{
+			`INSERT INTO sessions(id,project,machine,agent) VALUES('owned','p','federated','claude'),('other','p','federated','claude'),('local','p','host','claude')`,
+			`INSERT INTO federation_records(share_uid,record_uid,session_id,hash) VALUES('share','owned','owned','a'),('other-share','other','other','b')`,
+			`INSERT INTO messages(session_id,ordinal,role,content) VALUES('owned',0,'user','shared'),('other',0,'user','other'),('local',0,'user','local')`,
+		} {
+			if _, err := tx.ExecContext(ctx, q); err != nil {
+				return err
+			}
+		}
+		_, err := purgeFederationRecordsTx(ctx, tx, "share", []string{"owned", "other", "local", "unknown"})
+		return err
+	}))
+	var owned, other, local, messages, deleted int
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT
+		(SELECT count(*) FROM sessions WHERE id='owned'),
+		(SELECT count(*) FROM sessions WHERE id='other'),
+		(SELECT count(*) FROM sessions WHERE id='local'),
+		(SELECT count(*) FROM messages WHERE session_id IN ('other','local')),
+		(SELECT count(*) FROM session_deletion_changes WHERE session_id='owned' AND deleted=1)`).Scan(&owned, &other, &local, &messages, &deleted))
+	assert.Zero(t, owned)
+	assert.Equal(t, 1, other)
+	assert.Equal(t, 1, local)
+	assert.Equal(t, 2, messages)
+	assert.Equal(t, 1, deleted)
+}
+
+func TestFederationStopPurgesOnlyOwnedAndCannotBeReactivatedByStaleManifest(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr", SpokeArchiveID: "spoke", Member: "member", CredentialSHA256: "digest"}))
+	share := FederationHubShare{UID: "share", EnrollmentUID: "enr", Remote: "example.org/repo", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active", Retention: "member-controlled"}
+	_, err := d.PutFederationHubShare(ctx, "spoke", share)
+	require.NoError(t, err)
+	record := FederationHubRecord{UID: "owned", Hash: "hash", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: SessionBatchWrite{Session: Session{ID: "owned", Project: share.Remote, Machine: "federated", Agent: "claude"}}}
+	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 1, "batch", []FederationHubRecord{record})
+	require.NoError(t, err)
+	share.State = "stopped"
+	stopped, err := d.PutFederationHubShare(ctx, "spoke", share)
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", stopped.State)
+	var sessions, records int
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='owned'), (SELECT count(*) FROM federation_records WHERE share_uid='share')`).Scan(&sessions, &records))
+	assert.Zero(t, sessions)
+	assert.Zero(t, records)
+	share.State = "active"
+	stale, err := d.PutFederationHubShare(ctx, "spoke", share)
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", stale.State)
+}
+
+func TestFederationReconcileIsShareScopedAndRejectsOutOfOrderPages(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr", SpokeArchiveID: "spoke", Member: "member", CredentialSHA256: "digest"}))
+	for _, id := range []string{"share", "other"} {
+		_, err := d.PutFederationHubShare(ctx, "spoke", FederationHubShare{UID: id, EnrollmentUID: "enr", Remote: "example.org/repo", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active"})
+		require.NoError(t, err)
+	}
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO federation_records(share_uid,record_uid,session_id,hash) VALUES('share','owned','owned','a'),('other','private','private','b')`)
+		return err
+	}))
+	page := FederationInventoryPage{Round: "round", Epoch: 1, Sequence: 0, Items: []FederationInventoryItem{{UID: "missing", Hash: "x"}}, Final: true}
+	result, err := d.ReconcileFederationPage(ctx, "enr", "spoke", "share", page)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"missing"}, result.Missing)
+	assert.Equal(t, []string{"owned"}, result.Extra)
+	assert.NotContains(t, result.Extra, "private")
+	page.After = "wrong"
+	_, err = d.ReconcileFederationPage(ctx, "enr", "spoke", "share", page)
+	require.ErrorIs(t, err, ErrFederationSequence)
+	_, err = d.ReconcileFederationPage(ctx, "enr", "spoke", "unknown", page)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+	_, err = d.ReconcileFederationPage(ctx, "foreign", "spoke", "share", page)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+}
+
+func TestFederationRevokeUsesShareRetention(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr", SpokeArchiveID: "spoke", Member: "member", CredentialSHA256: "digest"}))
+	for _, tc := range []struct{ uid, retention string }{{"purge", "member-controlled"}, {"retain", "org-retained"}} {
+		_, err := d.PutFederationHubShare(ctx, "spoke", FederationHubShare{UID: tc.uid, EnrollmentUID: "enr", Remote: "example.org/" + tc.uid, ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active", Retention: tc.retention})
+		require.NoError(t, err)
+		record := FederationHubRecord{UID: tc.uid, Hash: "hash", Remote: "example.org/" + tc.uid, ProjectKey: "key", Write: SessionBatchWrite{Session: Session{ID: tc.uid, Project: "p", Machine: "federated", Agent: "claude"}}}
+		_, err = d.CommitFederationBatch(ctx, "enr", "spoke", tc.uid, "policy", 1, 1, "batch", []FederationHubRecord{record})
+		require.NoError(t, err)
+	}
+	require.NoError(t, d.RevokeFederationEnrollment(ctx, "enr"))
+	var purged, retained int
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='purge'),(SELECT count(*) FROM sessions WHERE id='retain')`).Scan(&purged, &retained))
+	assert.Zero(t, purged)
+	assert.Equal(t, 1, retained)
+}
+
+func TestRetainedStoppedShareAllowsOnlyTombstoneNarrowing(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr", SpokeArchiveID: "spoke", Member: "member", CredentialSHA256: "digest"}))
+	share := FederationHubShare{UID: "share", EnrollmentUID: "enr", Remote: "example.org/repo", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active", Retention: "org-retained"}
+	_, err := d.PutFederationHubShare(ctx, "spoke", share)
+	require.NoError(t, err)
+	record := FederationHubRecord{UID: "owned", Hash: "hash", Remote: share.Remote, ProjectKey: share.ProjectKey, Write: SessionBatchWrite{Session: Session{ID: "owned", Project: "p", Machine: "federated", Agent: "claude"}}}
+	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 1, "batch", []FederationHubRecord{record})
+	require.NoError(t, err)
+	share.State = "stopped"
+	_, err = d.PutFederationHubShare(ctx, "spoke", share)
+	require.NoError(t, err)
+	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 2, "mixed", []FederationHubRecord{{UID: "owned", Tombstone: true}, record})
+	require.ErrorIs(t, err, ErrFederationInvalidBatch)
+	var count int
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE id='owned'`).Scan(&count))
+	assert.Equal(t, 1, count)
+	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 2, "delete", []FederationHubRecord{{UID: "owned", Tombstone: true}})
+	require.NoError(t, err)
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE id='owned'`).Scan(&count))
+	assert.Zero(t, count)
+}
+
+func TestFederationRebuildKeepsOldRowsUntilAllRangesRepaired(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr", SpokeArchiveID: "spoke", Member: "member", CredentialSHA256: "digest"}))
+	share := FederationHubShare{UID: "share", EnrollmentUID: "enr", Remote: "example.org/repo", ProjectKey: "key", Level: "summary", Attribution: "pooled", Audience: "operators", PolicyDigest: "policy", Epoch: 1, State: "active", Retention: "member-controlled"}
+	_, err := d.PutFederationHubShare(ctx, "spoke", share)
+	require.NoError(t, err)
+	record := func(id, hash string) FederationHubRecord {
+		return FederationHubRecord{UID: id, Hash: hash, Remote: share.Remote, ProjectKey: share.ProjectKey, Write: SessionBatchWrite{Session: Session{ID: id, Project: share.Remote, Machine: "federated", Agent: "claude"}}}
+	}
+	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 1, 1, "first", []FederationHubRecord{record("a", "same"), record("z", "old")})
+	require.NoError(t, err)
+	share.Epoch, share.Rebuild = 2, true
+	_, err = d.PutFederationHubShare(ctx, "spoke", share)
+	require.NoError(t, err)
+	first := FederationInventoryPage{Round: "round", Epoch: 2, Through: "a", Items: []FederationInventoryItem{{UID: "a", Hash: "same"}}}
+	result, err := d.ReconcileFederationPage(ctx, "enr", "spoke", "share", first)
+	require.NoError(t, err)
+	assert.Equal(t, "a", result.Boundary)
+	last := FederationInventoryPage{Round: "round", Epoch: 2, After: "a", Final: true, Items: []FederationInventoryItem{{UID: "b", Hash: "new"}}}
+	result, err = d.ReconcileFederationPage(ctx, "enr", "spoke", "share", last)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"b"}, result.Missing)
+	var old int
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE id='z'`).Scan(&old))
+	assert.Equal(t, 1, old)
+	_, err = d.CommitFederationBatch(ctx, "enr", "spoke", "share", "policy", 2, 1, "repair", []FederationHubRecord{record("b", "new")})
+	require.NoError(t, err)
+	last.Sequence = 1
+	result, err = d.ReconcileFederationPage(ctx, "enr", "spoke", "share", last)
+	require.NoError(t, err)
+	assert.False(t, result.Complete)
+	result, err = d.ReconcileFederationPage(ctx, "enr", "spoke", "share", last)
+	require.NoError(t, err)
+	assert.True(t, result.Complete)
+	var same, repaired int
+	require.NoError(t, d.rawReader().QueryRowContext(ctx, `SELECT (SELECT count(*) FROM sessions WHERE id='a'), (SELECT count(*) FROM sessions WHERE id='b'), (SELECT count(*) FROM sessions WHERE id='z')`).Scan(&same, &repaired, &old))
+	assert.Equal(t, 1, same)
+	assert.Equal(t, 1, repaired)
+	assert.Zero(t, old)
+}

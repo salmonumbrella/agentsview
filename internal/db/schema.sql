@@ -1877,6 +1877,11 @@ CREATE TABLE IF NOT EXISTS federation_shares (
     state TEXT NOT NULL CHECK (state IN ('active', 'paused', 'policy_paused')),
     consent_json TEXT NOT NULL,
     policy_digest TEXT NOT NULL,
+    epoch INTEGER NOT NULL DEFAULT 1, sequence INTEGER NOT NULL DEFAULT 0,
+    source_generation TEXT NOT NULL DEFAULT '', sync_cursor TEXT NOT NULL DEFAULT '',
+    usage_cursor INTEGER NOT NULL DEFAULT 0, deletion_cursor INTEGER NOT NULL DEFAULT 0,
+    pending_batch TEXT NOT NULL DEFAULT '', stop_intent TEXT NOT NULL DEFAULT '',
+    stop_receipt TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE (link_uid, normalized_remote)
 );
@@ -1899,10 +1904,12 @@ CREATE TABLE IF NOT EXISTS federation_hub_shares (
     normalized_remote TEXT NOT NULL, project_key TEXT NOT NULL,
     level TEXT NOT NULL, attribution TEXT NOT NULL, audience TEXT NOT NULL,
     policy_digest TEXT NOT NULL, epoch INTEGER NOT NULL, sequence INTEGER NOT NULL DEFAULT 0,
-    last_batch_digest TEXT NOT NULL DEFAULT '', last_refused TEXT NOT NULL DEFAULT '{}', state TEXT NOT NULL
+    last_batch_digest TEXT NOT NULL DEFAULT '', last_refused TEXT NOT NULL DEFAULT '{}', state TEXT NOT NULL,
+    retention TEXT NOT NULL DEFAULT '', reconcile_round TEXT NOT NULL DEFAULT '',
+    reconcile_boundary TEXT NOT NULL DEFAULT '', completed_epoch INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS federation_records (
     share_uid TEXT NOT NULL, record_uid TEXT NOT NULL, session_id TEXT NOT NULL UNIQUE,
-    hash TEXT NOT NULL, assistant_count INTEGER NOT NULL DEFAULT 0,
+    hash TEXT NOT NULL, assistant_count INTEGER NOT NULL DEFAULT 0, epoch INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (share_uid, record_uid)
 );

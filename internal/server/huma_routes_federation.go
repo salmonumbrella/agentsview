@@ -69,6 +69,7 @@ func (s *Server) registerFederationRoutes() {
 		peer := func(op *huma.Operation) { op.Hidden = true }
 		registerRoute(group, http.MethodPut, "/shares/{uid}", "Register share", s.humaFederationPutShare, peer, maxBodyBytes(16<<20))
 		registerRoute(group, http.MethodPost, "/shares/{uid}/batches", "Deliver batch", s.humaFederationBatch, peer, maxBodyBytes(16<<20))
+		registerRoute(group, http.MethodPost, "/shares/{uid}/reconcile", "Reconcile share", s.humaFederationReconcile, peer, maxBodyBytes(16<<20))
 		registerRoute(group, http.MethodPost, "/enrollments", "Enroll a spoke", s.humaFederationEnroll, hidden)
 		registerRoute(group, http.MethodGet, "/enrollments", "List enrollments", s.humaFederationList, hidden)
 		registerRoute(group, http.MethodPost, "/enrollments/{uid}/revoke", "Revoke an enrollment", s.humaFederationRevoke, hidden)
@@ -291,4 +292,26 @@ func (s *Server) humaFederationPush(ctx context.Context, _ *emptyInput) (*jsonOu
 		return nil, err
 	}
 	return &jsonOutput[federation.PushResult]{Body: v}, nil
+}
+
+func (s *Server) humaFederationReconcile(ctx context.Context, in *federationPeerInput) (*jsonOutput[db.FederationInventoryResult], error) {
+	h, err := peerIdentity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var page federation.ReconcileRequest
+	if err = jsonv2.Unmarshal(in.RawBody, &page, jsonv2.RejectUnknownMembers(true)); err != nil {
+		return nil, huma.Error400BadRequest("invalid federation inventory")
+	}
+	result, err := s.federation.Reconcile(ctx, h.EnrollmentUID, h.SpokeArchiveID, in.UID, page)
+	if errors.Is(err, db.ErrFederationInvalidBatch) {
+		return nil, huma.Error400BadRequest("invalid federation inventory")
+	}
+	if errors.Is(err, db.ErrFederationSequence) {
+		return nil, huma.Error409Conflict("federation inventory out of sequence")
+	}
+	if err = federationControlError(err); err != nil {
+		return nil, err
+	}
+	return &jsonOutput[db.FederationInventoryResult]{Body: result}, nil
 }

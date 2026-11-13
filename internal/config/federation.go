@@ -40,6 +40,9 @@ func (c FederationHubConfig) Validate() error {
 	if strings.TrimSpace(c.Retention) == "" || strings.TrimSpace(c.Processing) == "" || c.MinGroupSize < 1 || len(c.AllowedLevels) == 0 {
 		return errors.New("[federation.hub] policy fields must be non-empty and min_group_size positive")
 	}
+	if c.Retention != "member-controlled" && c.Retention != "org-retained" {
+		return errors.New("[federation.hub] retention must be member-controlled or org-retained")
+	}
 	for _, level := range c.AllowedLevels {
 		if level != "summary" && level != "transcript" {
 			return errors.New("[federation.hub] allowed_levels must contain summary or transcript")

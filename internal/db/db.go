@@ -703,6 +703,9 @@ const federationShareVersionBase = 1 << 22
 // Delivery ownership must survive archive rebuilds and older binaries.
 const federationDeliveryVersionBase = 1 << 23
 
+// Withdrawal state cannot be safely interpreted by earlier federation writers.
+const federationWithdrawalVersionBase = 1 << 24
+
 const tokenCoverageRepairStatsKey = "token_coverage_repair_v1"
 
 const toolCallFieldBackfillStatsKey = "tool_call_field_backfill_v1"
@@ -2429,7 +2432,7 @@ func readUserVersion(ctx context.Context, conn interface {
 
 // DecodeUserVersion returns the parser version and permanent archive-only mode.
 func DecodeUserVersion(version int) (int, bool) {
-	version &^= federationVersionBase | federationShareVersionBase | federationDeliveryVersionBase
+	version &^= federationVersionBase | federationShareVersionBase | federationDeliveryVersionBase | federationWithdrawalVersionBase
 	if version >= archiveOnlyVersionBase {
 		return version - archiveOnlyVersionBase, true
 	}
@@ -2470,6 +2473,9 @@ func writeUserVersion(ctx context.Context, tx *sql.Tx, version int) error {
 	}
 	if hasDelivery {
 		version += federationDeliveryVersionBase
+	}
+	if hasShares || hasDelivery {
+		version += federationWithdrawalVersionBase
 	}
 	_, err = tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", version))
 	return err
@@ -2549,6 +2555,20 @@ func legacySchemaColumnMigrations() []schemaColumnMigration {
 
 func schemaColumnMigrations() []schemaColumnMigration {
 	return []schemaColumnMigration{
+		{"federation_shares", "epoch", "ALTER TABLE federation_shares ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1"},
+		{"federation_shares", "sequence", "ALTER TABLE federation_shares ADD COLUMN sequence INTEGER NOT NULL DEFAULT 0"},
+		{"federation_shares", "source_generation", "ALTER TABLE federation_shares ADD COLUMN source_generation TEXT NOT NULL DEFAULT ''"},
+		{"federation_shares", "sync_cursor", "ALTER TABLE federation_shares ADD COLUMN sync_cursor TEXT NOT NULL DEFAULT ''"},
+		{"federation_shares", "usage_cursor", "ALTER TABLE federation_shares ADD COLUMN usage_cursor INTEGER NOT NULL DEFAULT 0"},
+		{"federation_shares", "deletion_cursor", "ALTER TABLE federation_shares ADD COLUMN deletion_cursor INTEGER NOT NULL DEFAULT 0"},
+		{"federation_shares", "pending_batch", "ALTER TABLE federation_shares ADD COLUMN pending_batch TEXT NOT NULL DEFAULT ''"},
+		{"federation_shares", "stop_intent", "ALTER TABLE federation_shares ADD COLUMN stop_intent TEXT NOT NULL DEFAULT ''"},
+		{"federation_shares", "stop_receipt", "ALTER TABLE federation_shares ADD COLUMN stop_receipt TEXT NOT NULL DEFAULT ''"},
+		{"federation_hub_shares", "retention", "ALTER TABLE federation_hub_shares ADD COLUMN retention TEXT NOT NULL DEFAULT ''"},
+		{"federation_hub_shares", "reconcile_round", "ALTER TABLE federation_hub_shares ADD COLUMN reconcile_round TEXT NOT NULL DEFAULT ''"},
+		{"federation_hub_shares", "reconcile_boundary", "ALTER TABLE federation_hub_shares ADD COLUMN reconcile_boundary TEXT NOT NULL DEFAULT ''"},
+		{"federation_hub_shares", "completed_epoch", "ALTER TABLE federation_hub_shares ADD COLUMN completed_epoch INTEGER NOT NULL DEFAULT 0"},
+		{"federation_records", "epoch", "ALTER TABLE federation_records ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1"},
 		{"federation_deliveries", "attempt_hash", "ALTER TABLE federation_deliveries ADD COLUMN attempt_hash TEXT NOT NULL DEFAULT ''"},
 
 		{"sessions", "usage_generation", "ALTER TABLE sessions ADD COLUMN usage_generation TEXT;" +

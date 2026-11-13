@@ -114,10 +114,11 @@ The hub operator can use `agentsview federation enrollments list` and
 a member that has never contacted the hub, `contacted` after any contact, and
 `revoked` after revocation. `last_handshake_at` records the last contact and is
 updated by join and status. A join the spoke refuses still counts as contact.
-The member can run `agentsview federation leave` to remove the local link before
-setting the role to `off`; it needs the spoke role and the link stays until
-removed. The credential file remains in place. The hub is not told when a
-member leaves, so a `contacted` install may have left; revoke that enrollment.
+The member can run `agentsview federation leave` before setting the role to
+`off`. Leave stops the shares and records hub cleanup for the next push. If
+the hub is offline, cleanup remains pending and is retried when the spoke can
+reach it. Keep the spoke role enabled until cleanup is confirmed.
+The credential file remains in place for that retry.
 
 ### Find a command by task
 
@@ -2936,20 +2937,21 @@ shares. `share list` omits the stored preview and prints suggested projects on
 standard error; `share show` prints the stored preview. A changed hub policy
 pauses active shares. A share you paused stays paused; run `share add` again to
 replace its consent and `resume` to activate it. Resume works without the hub;
-add and push need a live hub policy. Removing a share stops future delivery;
-previously delivered records remain on the hub until withdrawal is supported.
+add and push need a live hub policy. Removing a share stops future delivery
+and requests cleanup. A member-controlled hub purges its records; an
+organization-retained hub keeps them and reports retention. An offline hub
+leaves cleanup pending for retry.
 `federation exclude <session-id> [--reason text]` works before or after joining
 and keeps a session out of all shares in this archive, including after removal
 or rejoining. `federation push --dry-run` prints selected summaries locally. Run
 `federation push` to deliver active shares now; the spoke also retries on a
 schedule. `federation status` and `federation share show` report delivery and
-quarantine counts. Shares confirmed with the earlier notice that nothing is sent
-can be confirmed again with `share add` before delivery. Adding a removed
-repository again reports its delivered sessions as refused until withdrawal is
-supported. A batch that started without an acknowledgment shows as unconfirmed
-and may or may not have reached the hub. If the session is excluded before the
-next acknowledged push, it stays unconfirmed and is never resent until
-withdrawal and reconcile exist. Usage from shared sessions is dated at the
+quarantine counts. Shares confirmed with an earlier delivery-enabled notice retain that consent.
+Shares confirmed with the earlier notice that nothing is sent need a fresh
+`share add` confirmation before delivery. Local delivery history remains
+available after removal. A batch without an acknowledgment is unconfirmed and
+may have reached the hub. Excluded payloads are not replayed to resolve that
+uncertainty; reconciliation or withdrawal repairs the hub instead. Usage from shared sessions is dated at the
 session’s start.
 
 Selection requires the session's own unambiguous repository identity and proof

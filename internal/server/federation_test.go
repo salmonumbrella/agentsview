@@ -42,7 +42,7 @@ func TestFederationCredentialIsolation(t *testing.T) {
 				ops := []operation{{http.MethodGet, "/"}, {http.MethodGet, "/api/ping"}, {http.MethodGet, "/debug/pprof/"}, {http.MethodGet, "/api/v1/federation/enrollments"}, {http.MethodPost, "/api/v1/federation/enrollments"}, {http.MethodPost, "/api/v1/federation/enrollments/enr-a/revoke"}}
 				ops = append(ops, operation{http.MethodPost, "/api/v1/federation/shares/preview"}, operation{http.MethodPost, "/api/v1/federation/shares"}, operation{http.MethodGet, "/api/v1/federation/shares"}, operation{http.MethodGet, "/api/v1/federation/shares/x"}, operation{http.MethodPost, "/api/v1/federation/shares/x/pause"}, operation{http.MethodPost, "/api/v1/federation/shares/x/resume"}, operation{http.MethodDelete, "/api/v1/federation/shares/x"}, operation{http.MethodPost, "/api/v1/federation/exclusions"}, operation{http.MethodGet, "/api/v1/federation/dry-run"})
 				ops = append(ops, operation{http.MethodPost, federationHandshakePath}, operation{http.MethodGet, "/api/v1/federation/shares/x/batches"}, operation{http.MethodPut, "/api/v1/federation/shares/"}, operation{http.MethodPost, "/api/v1/federation/shares/x/batches/extra"}, operation{http.MethodPut, "/api/v1/federation/shares/x%2Fy"})
-				for _, peerOp := range []operation{{http.MethodPut, "/api/v1/federation/shares/x"}, {http.MethodPost, "/api/v1/federation/shares/x/batches"}} {
+				for _, peerOp := range []operation{{http.MethodPut, "/api/v1/federation/shares/x"}, {http.MethodPost, "/api/v1/federation/shares/x/batches"}, {http.MethodPost, "/api/v1/federation/shares/x/reconcile"}} {
 					req := httptest.NewRequest(peerOp.method, peerOp.path, strings.NewReader(`{}`))
 					req.Header.Set("Authorization", "Bearer "+token)
 					req.Header.Set(federation.SpokeArchiveHeader, "spoke-a")
@@ -385,7 +385,7 @@ func TestFederationJoinControlMessages(t *testing.T) {
 	policy := config.FederationHubConfig{Retention: "member-controlled", AllowedLevels: []string{"summary"}, MinGroupSize: 3, SuggestedProjects: []string{}, Processing: "none"}
 	digest, err := export.DigestCanonical(policy)
 	require.NoError(t, err)
-	response := federation.HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{1}, EnrollmentUID: "enr-a", Member: "member-a", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest}
+	response := federation.HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{federation.ProtocolVersion}, EnrollmentUID: "enr-a", Member: "member-a", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest}
 	code := http.StatusOK
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if code != http.StatusOK {
@@ -443,8 +443,8 @@ func TestFederationPeerOperationBoundary(t *testing.T) {
 		method, path string
 		want         bool
 	}{
-		{"GET", "/api/v1/federation/handshake", true}, {"PUT", "/api/v1/federation/shares/x", true}, {"POST", "/api/v1/federation/shares/x/batches", true},
-		{"GET", "/api/v1/federation/shares/x", false}, {"POST", "/api/v1/federation/shares/x", false}, {"PUT", "/api/v1/federation/shares/", false}, {"PUT", "/api/v1/federation/shares/a/b", false}, {"POST", "/api/v1/federation/shares/x/batches/extra", false},
+		{"GET", "/api/v1/federation/handshake", true}, {"PUT", "/api/v1/federation/shares/x", true}, {"POST", "/api/v1/federation/shares/x/batches", true}, {"POST", "/api/v1/federation/shares/x/reconcile", true},
+		{"GET", "/api/v1/federation/shares/x", false}, {"POST", "/api/v1/federation/shares/x", false}, {"PUT", "/api/v1/federation/shares/", false}, {"PUT", "/api/v1/federation/shares/a/b", false}, {"POST", "/api/v1/federation/shares/x/batches/extra", false}, {"POST", "/api/v1/federation/shares/x/reconcile/extra", false},
 	} {
 		assert.Equal(t, tc.want, federationPeerOperation(tc.method, tc.path), "%s %s", tc.method, tc.path)
 	}

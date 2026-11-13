@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	ProtocolVersion = 1
+	ProtocolVersion = 2
 	LinkActive      = "active"
 	LinkBlocked     = "blocked"
 	HubOK           = "ok"

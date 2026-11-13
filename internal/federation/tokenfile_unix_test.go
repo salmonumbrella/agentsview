@@ -27,7 +27,7 @@ func TestStatusRechecksCredentialPermissions(t *testing.T) {
 	calls := 0
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
-		_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{1}, EnrollmentUID: "enr-a", Member: "member-a", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
+		_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{ProtocolVersion}, EnrollmentUID: "enr-a", Member: "member-a", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
 	}))
 	t.Cleanup(hub.Close)
 	file := filepath.Join(t.TempDir(), "credential")

@@ -1525,24 +1525,9 @@ func (db *DB) DeleteParserExcludedSessions(ctx context.Context, ids []string) (i
 		if err := db.checkArchiveSessionProvenanceTx(ctx, tx, SessionBatchWrite{Session: Session{ID: id}}); err != nil {
 			return 0, fmt.Errorf("checking parser-excluded session ownership: %w", err)
 		}
-		if err := deleteSessionMessagesTx(tx, id); err != nil {
-			return 0, fmt.Errorf(
-				"pre-deleting parser-excluded session %s messages: %w",
-				id, err,
-			)
-		}
-		if _, err := tx.ExecContext(ctx, "DELETE FROM commit_links WHERE session_id=?", id); err != nil {
-			return 0, fmt.Errorf("deleting parser-excluded commit links: %w", err)
-		}
-
-		res, err := tx.ExecContext(ctx,
-			"DELETE FROM sessions WHERE id = ?", id,
-		)
+		res, err := deleteSessionPhysicalTx(ctx, tx, id)
 		if err != nil {
-			return 0, fmt.Errorf(
-				"deleting parser-excluded session %s: %w",
-				id, err,
-			)
+			return 0, fmt.Errorf("deleting parser-excluded session %s: %w", id, err)
 		}
 		n, _ := res.RowsAffected()
 		deleted += n
@@ -1551,6 +1536,21 @@ func (db *DB) DeleteParserExcludedSessions(ctx context.Context, ids []string) (i
 		return 0, fmt.Errorf("commit parser-excluded delete: %w", err)
 	}
 	return int(deleted), nil
+}
+
+// deleteSessionPhysicalTx removes one already-authorized session and its
+// non-cascading content. Callers establish ownership before invoking it.
+func deleteSessionPhysicalTx(ctx context.Context, tx *sql.Tx, id string) (sql.Result, error) {
+	if err := deleteSessionMessagesTx(tx, id); err != nil {
+		return nil, err
+	}
+	if err := deleteSessionAnnotationsTx(ctx, tx, "id=?", id); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM commit_links WHERE session_id=?", id); err != nil {
+		return nil, err
+	}
+	return tx.ExecContext(ctx, "DELETE FROM sessions WHERE id=?", id)
 }
 
 const insertSessionSQL = `

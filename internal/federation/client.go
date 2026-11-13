@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.kenn.io/agentsview/internal/config"
+	"go.kenn.io/agentsview/internal/db"
 )
 
 const SpokeArchiveHeader = "X-AgentsView-Spoke-Archive"
@@ -93,5 +94,11 @@ func PostBatch(ctx context.Context, base, credential, archive string, b Batch) (
 	if e, ok := err.(*peerHTTPError); ok && e.Status == http.StatusConflict {
 		_ = json.Unmarshal(e.Body, &result)
 	}
+	return result, err
+}
+
+func PostReconcile(ctx context.Context, base, credential, archive string, request ReconcileRequest) (db.FederationInventoryResult, error) {
+	var result db.FederationInventoryResult
+	err := peerRequest(ctx, base, credential, archive, http.MethodPost, "/api/v1/federation/shares/"+url.PathEscape(request.ShareUID)+"/reconcile", request, &result, (16<<20)+(64<<10))
 	return result, err
 }

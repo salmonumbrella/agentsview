@@ -16,28 +16,63 @@ func (s *Service) RegisterShare(ctx context.Context, enrollment, spoke, uid stri
 	}
 	normalized, ok := export.NormalizeGitRemote(m.Remote)
 	identity := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: m.Remote})
-	if s.role != "hub" || m.Protocol != ProtocolVersion || m.SpokeInstance != spoke || m.ShareUID != uid || uid == "" || m.Epoch != 1 || !ok || normalized != m.Remote || identity.Key != m.ProjectKey || m.Level != "summary" || !slices.Contains(s.policy.AllowedLevels, m.Level) || (m.Attribution != "pooled" && m.Attribution != "member") || m.Audience != "operators" || m.PolicyDigest != digest {
+	if s.role != "hub" || m.Protocol != ProtocolVersion || m.SpokeInstance != spoke || m.ShareUID != uid || uid == "" || m.Epoch < 1 || !ok || normalized != m.Remote || identity.Key != m.ProjectKey || m.Level != "summary" || (m.Attribution != "pooled" && m.Attribution != "member") || m.Audience != "operators" || (m.Action != "" && m.Action != "stop" && m.Action != "resume" && m.Action != "rebuild") {
 		return out, inputError("invalid federation share")
 	}
-	stored, err := s.db.PutFederationHubShare(ctx, spoke, db.FederationHubShare{UID: uid, EnrollmentUID: enrollment, Remote: m.Remote, ProjectKey: m.ProjectKey, Level: m.Level, Attribution: m.Attribution, Audience: m.Audience, PolicyDigest: m.PolicyDigest, Epoch: m.Epoch, State: "active"})
+	retention := s.policy.Retention
+	if m.Action == "stop" {
+		if m.Policy == nil || m.Policy.Validate() != nil {
+			return out, inputError("invalid federation share")
+		}
+		consentDigest, e := export.DigestCanonical(*m.Policy)
+		if e != nil || consentDigest != m.PolicyDigest {
+			return out, inputError("invalid federation share")
+		}
+		retention = m.Policy.Retention
+	} else if m.PolicyDigest != digest || !slices.Contains(s.policy.AllowedLevels, m.Level) {
+		return out, inputError("invalid federation share")
+	}
+	state := "active"
+	if m.Action == "stop" {
+		state = "stopped"
+	}
+	stored, err := s.db.PutFederationHubShare(ctx, spoke, db.FederationHubShare{UID: uid, EnrollmentUID: enrollment, Remote: m.Remote, ProjectKey: m.ProjectKey, Level: m.Level, Attribution: m.Attribution, Audience: m.Audience, PolicyDigest: m.PolicyDigest, Epoch: m.Epoch, State: state, Retention: retention, Resume: m.Action == "resume", Rebuild: m.Action == "rebuild"})
 	if err != nil {
 		return out, err
 	}
-	return ShareView{State: "accepted", Committed: stored.Sequence, Epoch: stored.Epoch}, nil
+	state = stored.State
+	if state == "active" {
+		state = "accepted"
+	}
+	return ShareView{State: state, Committed: stored.Sequence, Epoch: stored.Epoch}, nil
 }
+
 func (s *Service) ApplyBatch(ctx context.Context, enrollment, spoke, uid string, batch Batch) (BatchAck, error) {
 	var out BatchAck
-	if s.role != "hub" || batch.Protocol != ProtocolVersion || batch.SpokeInstance != spoke || batch.ShareUID != uid || batch.Epoch != 1 || batch.Sequence < 1 || len(batch.Records) == 0 || len(batch.Records) > 1000 {
+	if s.role != "hub" || batch.Protocol != ProtocolVersion || batch.SpokeInstance != spoke || batch.ShareUID != uid || batch.Epoch < 1 || batch.Sequence < 1 || len(batch.Records) == 0 || len(batch.Records) > 1000 {
 		return out, inputError("invalid federation batch")
 	}
 	records := make([]db.FederationHubRecord, 0, len(batch.Records))
 	seen := map[string]bool{}
 	for _, r := range batch.Records {
-		digest, err := export.DigestCanonical(r.Payload)
-		if err != nil || r.Kind != "session_summary" || r.RecordUID == "" || r.RecordUID != r.Payload.SessionID || seen[r.RecordUID] || digest != r.Hash {
+		if r.RecordUID == "" || seen[r.RecordUID] {
 			return out, inputError("invalid federation batch")
 		}
 		seen[r.RecordUID] = true
+		if r.Kind == "tombstone" {
+			if r.Payload != nil || r.Hash != "" {
+				return out, inputError("invalid federation batch")
+			}
+			records = append(records, db.FederationHubRecord{UID: r.RecordUID, Tombstone: true})
+			continue
+		}
+		if r.Kind != "session_summary" || r.Payload == nil || r.RecordUID != r.Payload.SessionID {
+			return out, inputError("invalid federation batch")
+		}
+		digest, err := export.DigestCanonical(r.Payload)
+		if err != nil || digest != r.Hash {
+			return out, inputError("invalid federation batch")
+		}
 		p := r.Payload
 		identity := export.BuildProjectIdentity(export.ProjectIdentityInput{GitRemote: p.Remote})
 		normalized, ok := export.NormalizeGitRemote(p.Remote)
@@ -74,4 +109,11 @@ func (s *Service) ApplyBatch(ctx context.Context, enrollment, spoke, uid string,
 	}
 	result, err := s.db.CommitFederationBatch(ctx, enrollment, spoke, uid, policyDigest, batch.Epoch, batch.Sequence, digest, records)
 	return BatchAck{Committed: result.Committed, Refused: result.Refused}, err
+}
+
+func (s *Service) Reconcile(ctx context.Context, enrollment, spoke, uid string, request ReconcileRequest) (db.FederationInventoryResult, error) {
+	if s.role != "hub" || request.Protocol != ProtocolVersion || request.SpokeInstance != spoke || request.ShareUID != uid {
+		return db.FederationInventoryResult{}, inputError("invalid federation inventory")
+	}
+	return s.db.ReconcileFederationPage(ctx, enrollment, spoke, uid, request.FederationInventoryPage)
 }

@@ -90,6 +90,15 @@ func TestFederationSelectionRequiresOwnSnapshotAndLocalProof(t *testing.T) {
 	assert.Equal(t, result.Excluded, idsOnly.Excluded)
 	assert.Equal(t, 2, idsOnly.NotIdentifiable)
 	assert.Equal(t, 1, result.ToolCounts["selected"])
+	first, err := database.SelectFederationPage(ctx, "github.com/example/api", "2026-01-02", "", 1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"boundary"}, first.IDs)
+	second, err := database.SelectFederationPage(ctx, "github.com/example/api", "2026-01-02", first.IDs[0], 1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"selected"}, second.IDs)
+	last, err := database.SelectFederationPage(ctx, "github.com/example/api", "2026-01-02", second.IDs[0], 1)
+	require.NoError(t, err)
+	assert.Empty(t, last.IDs)
 }
 
 func TestFederationSelectionAttachesUsageAcrossChunks(t *testing.T) {
@@ -124,4 +133,28 @@ func TestFederationSelectionAttachesUsageAcrossChunks(t *testing.T) {
 		assert.Equal(t, 1000, row.ModelUsage.InputTokens)
 		assert.Equal(t, 500, row.ModelUsage.OutputTokens)
 	}
+}
+
+func TestFederationChangedCandidatesIncludeDeletionAndExcludeUnrelatedHistory(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.Update(ctx, func(tx *sql.Tx) error {
+		for _, q := range []string{
+			`INSERT INTO sessions(id,project,machine,agent,sync_marker) VALUES('changed','p','host','claude','2030-01-01T00:00:00Z')`,
+			`UPDATE sessions SET sync_marker='2030-01-01T00:00:00Z' WHERE id='changed'`,
+			`INSERT INTO federation_deliveries(share_uid,record_uid,session_id,hash,state) VALUES('share','gone','gone','old','sent')`,
+			`INSERT INTO session_deletion_changes(session_id,project,revision,deleted) VALUES('gone','p',1,1)`,
+		} {
+			if _, err := tx.ExecContext(ctx, q); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	ids, err := d.FederationChangedCandidates(ctx, "share", "2029-01-01T00:00:00Z", 0, 0, 0, 1, "", 1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"changed"}, ids)
+	ids, err = d.FederationChangedCandidates(ctx, "share", "2029-01-01T00:00:00Z", 0, 0, 0, 1, "changed", 1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"gone"}, ids)
 }

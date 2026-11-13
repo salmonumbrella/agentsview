@@ -40,3 +40,21 @@ func TestFederationHubDisablesDiscovery(t *testing.T) {
 		})
 	}
 }
+
+func TestFederationRetentionAcceptsOnlyDisclosedPolicies(t *testing.T) {
+	for _, tc := range []struct {
+		retention string
+		valid     bool
+	}{
+		{"member-controlled", true},
+		{"org-retained", true},
+		{"other", false},
+	} {
+		policy := FederationHubConfig{Retention: tc.retention, AllowedLevels: []string{"summary"}, MinGroupSize: 3, Processing: "none"}
+		if tc.valid {
+			assert.NoError(t, policy.Validate())
+		} else {
+			assert.Error(t, policy.Validate())
+		}
+	}
+}

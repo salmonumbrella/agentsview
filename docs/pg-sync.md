@@ -852,10 +852,9 @@ ______________________________________________________________________
 
 - **One-way sync** — sessions flow from SQLite to PostgreSQL only. Changes in
   PostgreSQL do not propagate back to local machines.
-- **Permanent deletes not propagated** — sessions removed via `agentsview session prune`
-  are not deleted from PostgreSQL because the local rows no longer exist at
-  push time. Use a direct SQL DELETE to clean up PostgreSQL if needed.
-  Soft-deleted sessions (trash) sync correctly.
+- **Deletion requires a successful refresh** — incremental and empty pushes
+  reconcile deleted sessions owned by the source archive. A failed or offline
+  refresh can leave the served mirror stale until a later successful push.
 - **Schema compatibility** — legacy `pg serve` automatically applies pending schema
   migrations on startup. If the PostgreSQL role lacks DDL permissions, run
   `agentsview replica pg push` from a machine with write access to update the schema.

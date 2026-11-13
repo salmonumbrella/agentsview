@@ -113,7 +113,7 @@ func TestPGActivityReportKeptChanges(t *testing.T) {
 			assert.Len(t, a.Sessions, 2)
 			assert.Equal(t, 1000, a.Report.Totals.OutputTokens)
 		}},
-		{name: "hard delete", full: true, write: func(t *testing.T, d *db.DB) {
+		{name: "hard delete", full: false, write: func(t *testing.T, d *db.DB) {
 			t.Helper()
 			require.NoError(t, d.DeleteSession(t.Context(), "past"))
 		}, check: func(t *testing.T, a activity.CandidateArtifacts) {

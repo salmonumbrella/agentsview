@@ -2812,7 +2812,7 @@ can read everything in its archive, so use a dedicated data directory for the
 hub.
 
 Every role, including `off`, rejects federation credentials (`avfc_` values)
-except the hub handshake, share registration, and batch delivery operations.
+except the hub handshake, share registration, batch delivery, and reconcile operations.
 A personal auth token must not begin with `avfc_`.
 
 ```toml
@@ -2826,6 +2826,10 @@ min_group_size = 3
 suggested_projects = []
 processing = "none"
 ```
+
+The retention policy is either `member-controlled` (withdrawal purges shared
+records) or `org-retained` (withdrawal stops delivery and retains records).
+The consented policy governs a share even if the hub policy later changes.
 
 The `[federation.hub]` settings are read only when the role is `hub`. The hub
 sends this policy and its digest in the handshake. A spoke pins the hub

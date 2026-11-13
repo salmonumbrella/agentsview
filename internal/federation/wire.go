@@ -5,6 +5,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"go.kenn.io/agentsview/internal/config"
+	"go.kenn.io/agentsview/internal/db"
 )
 
 type HandshakeResponse struct {
@@ -19,16 +20,18 @@ type HandshakeResponse struct {
 }
 
 type ShareManifest struct {
-	Protocol      int    `json:"protocol"`
-	SpokeInstance string `json:"spoke_instance"`
-	ShareUID      string `json:"share_uid"`
-	Epoch         int64  `json:"epoch"`
-	Remote        string `json:"normalized_remote"`
-	ProjectKey    string `json:"project_key"`
-	Level         string `json:"level"`
-	Attribution   string `json:"attribution"`
-	Audience      string `json:"audience"`
-	PolicyDigest  string `json:"policy_digest"`
+	Protocol      int                         `json:"protocol"`
+	SpokeInstance string                      `json:"spoke_instance"`
+	ShareUID      string                      `json:"share_uid"`
+	Epoch         int64                       `json:"epoch"`
+	Remote        string                      `json:"normalized_remote"`
+	ProjectKey    string                      `json:"project_key"`
+	Level         string                      `json:"level"`
+	Attribution   string                      `json:"attribution"`
+	Audience      string                      `json:"audience"`
+	PolicyDigest  string                      `json:"policy_digest"`
+	Action        string                      `json:"action,omitempty"`
+	Policy        *config.FederationHubConfig `json:"policy,omitempty"`
 }
 type ShareView struct {
 	State     string `json:"state"`
@@ -44,10 +47,10 @@ type Batch struct {
 	Records       []BatchRecord `json:"records"`
 }
 type BatchRecord struct {
-	RecordUID string        `json:"record_uid"`
-	Kind      string        `json:"kind"`
-	Hash      string        `json:"hash"`
-	Payload   SummaryRecord `json:"payload"`
+	RecordUID string         `json:"record_uid"`
+	Kind      string         `json:"kind"`
+	Hash      string         `json:"hash"`
+	Payload   *SummaryRecord `json:"payload,omitempty"`
 }
 type BatchAck struct {
 	Committed int64             `json:"committed"`
@@ -107,4 +110,12 @@ func DecodeBatch(data []byte) (Batch, error) {
 		return bad()
 	}
 	return batch, nil
+}
+
+// ReconcileRequest carries only selected IDs and hashes for one bounded range.
+type ReconcileRequest struct {
+	Protocol      int    `json:"protocol"`
+	SpokeInstance string `json:"spoke_instance"`
+	ShareUID      string `json:"share_uid"`
+	db.FederationInventoryPage
 }

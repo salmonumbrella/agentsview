@@ -132,7 +132,7 @@ func TestFederationUserVersion(t *testing.T) {
 	require.NoError(t, database.PutFederationLink(ctx, link))
 	assert.Equal(t, federationVersionBase+CurrentDataVersion(), raw())
 	require.NoError(t, database.DeleteFederationLink(ctx))
-	assert.Equal(t, CurrentDataVersion(), raw())
+	assert.Equal(t, federationVersionBase+CurrentDataVersion(), raw())
 	require.NoError(t, database.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr-a", SpokeArchiveID: "spoke-a", Member: "member-a", CredentialSHA256: "digest-a"}))
 	version := raw()
 	assert.Equal(t, federationVersionBase+CurrentDataVersion(), version)
@@ -142,6 +142,7 @@ func TestFederationUserVersion(t *testing.T) {
 	assert.False(t, archiveOnly)
 	require.NoError(t, database.RevokeFederationEnrollment(ctx, "enr-a"))
 	assert.Equal(t, version, raw())
+	link.UID = "link-b"
 	require.NoError(t, database.PutFederationLink(ctx, link))
 	require.NoError(t, database.DeleteFederationLink(ctx))
 	assert.Equal(t, version, raw())
@@ -202,10 +203,11 @@ func TestFederationShareStateSurvivesCopyAndLeave(t *testing.T) {
 	require.NoError(t, target.DeleteFederationLink(ctx))
 	shares, err = target.ListFederationShares(ctx, "link-a")
 	require.NoError(t, err)
-	assert.Empty(t, shares)
+	require.Len(t, shares, 1)
+	assert.Equal(t, "leave", shares[0].StopIntent)
 	var afterLeave int
 	require.NoError(t, target.Reader().QueryRow(ctx, `PRAGMA user_version`).Scan(&afterLeave))
-	assert.Equal(t, federationVersionBase+federationShareVersionBase+CurrentDataVersion(), afterLeave)
+	assert.Equal(t, federationVersionBase+federationShareVersionBase+federationWithdrawalVersionBase+CurrentDataVersion(), afterLeave)
 	var reason string
 	require.NoError(t, target.Reader().QueryRow(ctx, `SELECT reason FROM federation_exclusions WHERE session_id = 'session-a'`).Scan(&reason))
 	assert.Equal(t, "private", reason)
@@ -218,13 +220,15 @@ func TestFederationShareDuplicateAndReconsent(t *testing.T) {
 	require.NoError(t, database.PutFederationShare(ctx, first))
 	var version int
 	require.NoError(t, database.Reader().QueryRow(ctx, `PRAGMA user_version`).Scan(&version))
-	assert.Equal(t, federationVersionBase+federationShareVersionBase+CurrentDataVersion(), version)
+	assert.Equal(t, federationVersionBase+federationShareVersionBase+federationWithdrawalVersionBase+CurrentDataVersion(), version)
 	next := first
 	next.UID = "share-b"
 	next.ConsentJSON = `{"shown":2}`
 	next.PolicyDigest = "new"
 	require.ErrorIs(t, database.PutFederationShare(ctx, next), ErrFederationShareExists)
 	require.NoError(t, database.PauseFederationSharesForPolicy(ctx, "link-a", "new"))
+	require.ErrorIs(t, database.PutFederationShare(ctx, next), ErrFederationShareExists)
+	require.NoError(t, database.ReceiptFederationStop(ctx, "link-a", "share-a", "purged", 1, 0))
 	require.NoError(t, database.PutFederationShare(ctx, next))
 	shares, err := database.ListFederationShares(ctx, "link-a")
 	require.NoError(t, err)
@@ -238,6 +242,8 @@ func TestFederationShareDuplicateAndReconsent(t *testing.T) {
 	}))
 	require.NoError(t, database.PutFederationExclusion(ctx, "session-a", "private"))
 	require.NoError(t, database.DeleteFederationShare(ctx, "link-a", "share-a"))
+	require.ErrorIs(t, database.PutFederationShare(ctx, next), ErrFederationShareExists)
+	require.NoError(t, database.ReceiptFederationStop(ctx, "link-a", "share-a", "purged", 2, 0))
 	require.NoError(t, database.PutFederationShare(ctx, next))
 	var reason string
 	require.NoError(t, database.Reader().QueryRow(ctx, `SELECT reason FROM federation_exclusions WHERE session_id='session-a'`).Scan(&reason))
@@ -381,7 +387,8 @@ func TestFederationShareReplacementAndRemovalKeepLedger(t *testing.T) {
 	require.NoError(t, d.DeleteFederationShare(ctx, "link", "share"))
 	q, err := d.FederationQuarantines(ctx)
 	require.NoError(t, err)
-	assert.Empty(t, q)
+	require.Len(t, q, 1)
+	assert.Equal(t, FederationCollision, q[0].Error)
 	ledger, err := d.FederationLedger(ctx, "share")
 	require.NoError(t, err)
 	assert.Equal(t, "hash", ledger["record"].Hash)
@@ -408,4 +415,145 @@ func TestFederationAttemptColumnUpgradesAndCopiesOldLedger(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "sent", ledger["record"].State)
 	assert.Empty(t, ledger["record"].AttemptHash)
+}
+
+func TestFederationWithdrawalStateSurvivesCopy(t *testing.T) {
+	source, target := testDB(t), testDB(t)
+	ctx := t.Context()
+	require.NoError(t, source.Update(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO federation_shares
+			(share_uid,link_uid,normalized_remote,level,attribution,audience,state,consent_json,policy_digest,epoch,sequence,source_generation,stop_intent,stop_receipt,pending_batch)
+			VALUES('share','link','example.org/repo','summary','pooled','operators','paused','{}','policy',3,7,'generation','remove','pending','envelope')`)
+		if err != nil {
+			return err
+		}
+		return stampFederationVersion(ctx, tx)
+	}))
+	require.NoError(t, target.CopyFederationStateFrom(ctx, source.Path()))
+	var epoch, sequence, version int
+	var generation, intent, receipt, pending string
+	require.NoError(t, target.Reader().QueryRow(ctx, `SELECT epoch,sequence,source_generation,stop_intent,stop_receipt,pending_batch FROM federation_shares WHERE share_uid='share'`).Scan(&epoch, &sequence, &generation, &intent, &receipt, &pending))
+	require.NoError(t, target.Reader().QueryRow(ctx, `PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, 3, epoch)
+	assert.Equal(t, 7, sequence)
+	assert.Equal(t, "generation", generation)
+	assert.Equal(t, "remove", intent)
+	assert.Equal(t, "pending", receipt)
+	assert.Equal(t, "envelope", pending)
+	assert.NotZero(t, version&federationWithdrawalVersionBase)
+	decoded, _ := DecodeUserVersion(version)
+	assert.Equal(t, CurrentDataVersion(), decoded)
+}
+
+func TestRemoveFederationShareRetainsStopIntentAndAccounting(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.PutFederationShare(ctx, FederationShare{UID: "share", LinkUID: "link", NormalizedRemote: "example.org/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: "{}", PolicyDigest: "policy"}))
+	require.NoError(t, d.RecordFederationDelivery(ctx, "share", []FederationDelivery{{RecordUID: "record", SessionID: "record", Hash: "confirmed", State: "sent"}}))
+	require.NoError(t, d.DeleteFederationShare(ctx, "link", "share"))
+	share, err := d.GetFederationShare(ctx, "link", "share")
+	require.NoError(t, err)
+	assert.Equal(t, "remove", share.StopIntent)
+	assert.Equal(t, "pending", share.StopReceipt)
+	ledger, err := d.FederationLedger(ctx, "share")
+	require.NoError(t, err)
+	assert.Equal(t, "confirmed", ledger["record"].Hash)
+	assert.Equal(t, "sent", ledger["record"].State)
+}
+
+func TestFederationPendingBatchAndAcknowledgmentAreDurable(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.PutFederationShare(ctx, FederationShare{UID: "share", LinkUID: "link", NormalizedRemote: "example.org/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: "{}", PolicyDigest: "policy"}))
+	require.NoError(t, d.SaveFederationPending(ctx, "share", 1, `{"sequence":1}`, []FederationDelivery{{RecordUID: "item", SessionID: "item", Hash: "attempt"}}))
+	share, err := d.GetFederationShare(ctx, "link", "share")
+	require.NoError(t, err)
+	assert.Equal(t, `{"sequence":1}`, share.PendingBatch)
+	ledger, err := d.FederationLedger(ctx, "share")
+	require.NoError(t, err)
+	assert.Equal(t, "attempt", ledger["item"].AttemptHash)
+	require.NoError(t, d.CommitFederationAcknowledgment(ctx, "share", 1, []FederationDelivery{{RecordUID: "item", SessionID: "item", Hash: "attempt", State: "sent"}}))
+	share, err = d.GetFederationShare(ctx, "link", "share")
+	require.NoError(t, err)
+	assert.Empty(t, share.PendingBatch)
+	assert.EqualValues(t, 1, share.Sequence)
+	ledger, err = d.FederationLedger(ctx, "share")
+	require.NoError(t, err)
+	assert.Equal(t, "sent", ledger["item"].State)
+	assert.Empty(t, ledger["item"].AttemptHash)
+}
+
+func TestFederationRebuildRetainsUncertainAttempt(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.PutFederationShare(ctx, FederationShare{UID: "share", LinkUID: "link", NormalizedRemote: "example.org/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: "{}", PolicyDigest: "policy"}))
+	require.NoError(t, d.SaveFederationPending(ctx, "share", 1, `{"sequence":1}`, []FederationDelivery{{RecordUID: "item", SessionID: "item", Hash: "attempt"}}))
+	require.NoError(t, d.BeginFederationRebuild(ctx, "link", "share", 1))
+	share, err := d.GetFederationShare(ctx, "link", "share")
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, share.Epoch)
+	assert.Empty(t, share.PendingBatch)
+	assert.Equal(t, "rebuild", share.StopIntent)
+	ledger, err := d.FederationLedger(ctx, "share")
+	require.NoError(t, err)
+	assert.Equal(t, "attempt", ledger["item"].AttemptHash)
+}
+
+func TestLeaveRetainsRetiredLinkAndStopsShares(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.PutFederationLink(ctx, FederationLink{UID: "link", HubOrigin: "https://example.org", HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: "/fixture/token", ProtocolVersion: 2, State: "active"}))
+	require.NoError(t, d.PutFederationShare(ctx, FederationShare{UID: "share", LinkUID: "link", NormalizedRemote: "example.org/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: "{}", PolicyDigest: "policy"}))
+	require.NoError(t, d.DeleteFederationLink(ctx))
+	_, err := d.GetFederationLink(ctx)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+	links, err := d.ListFederationLinks(ctx)
+	require.NoError(t, err)
+	require.Len(t, links, 1)
+	assert.Equal(t, "retired", links[0].State)
+	share, err := d.GetFederationShare(ctx, "link", "share")
+	require.NoError(t, err)
+	assert.Equal(t, "leave", share.StopIntent)
+	assert.Equal(t, "pending", share.StopReceipt)
+}
+
+func TestFederationReconcileConfirmsOnlyMatchingAttempt(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.RecordFederationAttempt(ctx, "share", []FederationDelivery{{RecordUID: "a", SessionID: "a", Hash: "attempt-a"}, {RecordUID: "b", SessionID: "b", Hash: "attempt-b"}}))
+	require.NoError(t, d.ConfirmFederationMatches(ctx, "share", []FederationInventoryItem{{UID: "a", Hash: "attempt-a"}, {UID: "b", Hash: "different"}}))
+	ledger, err := d.FederationLedger(ctx, "share")
+	require.NoError(t, err)
+	assert.Equal(t, "sent", ledger["a"].State)
+	assert.Equal(t, "attempt-a", ledger["a"].Hash)
+	assert.Empty(t, ledger["a"].AttemptHash)
+	assert.Equal(t, "attempt-b", ledger["b"].AttemptHash)
+}
+
+func TestFederationGenerationChangeRequiresNewEpoch(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.PutFederationShare(ctx, FederationShare{UID: "share", LinkUID: "link", NormalizedRemote: "example.org/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: "{}", PolicyDigest: "policy"}))
+	changed, err := d.SetFederationGeneration(ctx, "link", "share", "one")
+	require.NoError(t, err)
+	assert.False(t, changed)
+	changed, err = d.SetFederationGeneration(ctx, "link", "share", "two")
+	require.NoError(t, err)
+	assert.True(t, changed)
+	share, err := d.GetFederationShare(ctx, "link", "share")
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, share.Epoch)
+	assert.Equal(t, "rebuild", share.StopIntent)
+}
+
+func TestFederationChangeCursorsAdvanceAfterProcessing(t *testing.T) {
+	d := testDB(t)
+	ctx := t.Context()
+	require.NoError(t, d.PutFederationShare(ctx, FederationShare{UID: "share", LinkUID: "link", NormalizedRemote: "example.org/repo", Level: "summary", Attribution: "pooled", Audience: "operators", State: "active", ConsentJSON: "{}", PolicyDigest: "policy"}))
+	require.NoError(t, d.AdvanceFederationCursors(ctx, "share", 1, "2026-01-01T00:00:00Z", 5, 7))
+	share, err := d.GetFederationShare(ctx, "link", "share")
+	require.NoError(t, err)
+	assert.Equal(t, "2026-01-01T00:00:00Z", share.SyncCursor)
+	assert.EqualValues(t, 5, share.UsageCursor)
+	assert.EqualValues(t, 7, share.DeletionCursor)
 }

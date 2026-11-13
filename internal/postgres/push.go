@@ -503,6 +503,10 @@ func (s *Sync) pushWithOptions(
 	if err != nil {
 		return result, err
 	}
+	deletionRevision, err := s.local.SessionDeletionPublicationRevision(ctx)
+	if err != nil {
+		return result, err
+	}
 	if len(s.projectRemotes) > 0 {
 		// Keep later snapshot changes in the journal for the next push.
 		s.identityRevision, err = s.local.ProjectIdentityPublicationRevision(ctx)
@@ -739,8 +743,8 @@ func (s *Sync) pushWithOptions(
 		); err != nil {
 			return result, err
 		}
-		if full && result.Errors == 0 {
-			if err := s.reconcilePGMissingSessions(ctx, markerID, legacyMarkerMachines); err != nil {
+		if result.Errors == 0 {
+			if err := s.reconcilePGDeletionJournal(ctx, state, markerID, legacyMarkerMachines, deletionRevision); err != nil {
 				return result, err
 			}
 		}
@@ -877,8 +881,8 @@ func (s *Sync) pushWithOptions(
 	); err != nil {
 		return result, err
 	}
-	if full && result.Errors == 0 {
-		if err := s.reconcilePGMissingSessions(ctx, markerID, legacyMarkerMachines); err != nil {
+	if result.Errors == 0 {
+		if err := s.reconcilePGDeletionJournal(ctx, state, markerID, legacyMarkerMachines, deletionRevision); err != nil {
 			return result, err
 		}
 	}
@@ -2268,25 +2272,66 @@ func purgePGExcludedPushSessions(
 	return deletePGExcludedSessionRows(ctx, pg, purgeIDs)
 }
 
+// Reconcile journaled hard deletions even when the current push has no rows.
+// Missing or regressed progress falls back to owned-presence reconciliation.
+func (s *Sync) reconcilePGDeletionJournal(ctx context.Context, state syncStateStore, owner string, legacy []string, through int64) error {
+	key := "session_deletion_revision_v1:" + s.targetFingerprint + ":" + s.databaseGeneration
+	stored, err := state.GetSyncState(ctx, key)
+	if err != nil {
+		return err
+	}
+	after, parseErr := strconv.ParseInt(stored, 10, 64)
+	if stored == "" || parseErr != nil || after < 0 || after > through {
+		if err = s.reconcilePGMissingSessionIDs(ctx, owner, legacy, nil, true); err != nil {
+			return err
+		}
+	} else if after < through {
+		changes, err := s.local.LoadSessionDeletionDelta(ctx, after, through, nil, nil)
+		if err != nil {
+			return err
+		}
+		ids := make([]string, 0, len(changes))
+		for _, change := range changes {
+			ids = append(ids, change.SessionID)
+		}
+		if len(ids) > 0 {
+			if err = s.reconcilePGMissingSessionIDs(ctx, owner, legacy, ids, true); err != nil {
+				return err
+			}
+		}
+	}
+	writer, ok := state.(databaseSyncStateWriter)
+	if !ok {
+		return fmt.Errorf("sync state store %T cannot save deletion progress", state)
+	}
+	return writer.SetSyncStatesForDatabase(ctx, s.databaseGeneration, map[string]string{key: strconv.FormatInt(through, 10)})
+}
+
 // Reconcile after publishing sessions so Codex page curation transfers finish
 // before deletion cascades. The unfinished full run keeps failed cleanup retryable.
-func (s *Sync) reconcilePGMissingSessions(
-	ctx context.Context, ownerMarker string, legacyMarkerMachines []string,
-) error {
+func (s *Sync) reconcilePGMissingSessions(ctx context.Context, ownerMarker string, legacyMarkerMachines []string) error {
+	return s.reconcilePGMissingSessionIDs(ctx, ownerMarker, legacyMarkerMachines, nil, false)
+}
+
+func (s *Sync) reconcilePGMissingSessionIDs(ctx context.Context, ownerMarker string, legacyMarkerMachines []string, candidates []string, allOwned bool) error {
 	// The owner marker spans all archive scopes; a remote scope cannot judge a missing local session.
-	if len(s.projectRemotes) > 0 {
+	if len(s.projectRemotes) > 0 && !allOwned {
 		return nil
 	}
 	// Empty Codex thread anchors still own remote restore/purge scope.
 	where := "owner_marker = $1 AND NOT (trash_includes_codex_pages AND deleted_at IS NOT NULL)"
 	args := []any{ownerMarker}
-	if len(s.projects) > 0 {
+	if !allOwned && len(s.projects) > 0 {
 		args = append(args, s.projects)
 		where += fmt.Sprintf(" AND project = ANY($%d)", len(args))
 	}
-	if len(s.excludeProjects) > 0 {
+	if !allOwned && len(s.excludeProjects) > 0 {
 		args = append(args, s.excludeProjects)
 		where += fmt.Sprintf(" AND project <> ALL($%d)", len(args))
+	}
+	if candidates != nil {
+		args = append(args, candidates)
+		where += fmt.Sprintf(" AND id = ANY($%d)", len(args))
 	}
 	rows, err := s.pg.QueryContext(ctx,
 		"SELECT id, agent, COALESCE(file_path, '') FROM sessions WHERE "+where, args...)

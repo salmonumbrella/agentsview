@@ -1523,3 +1523,10 @@ Federated summaries store usage events but no messages or tool calls; orphan
 copy preserves the sessions and their usage events during a rebuild. Per-model
 federation usage events are session aggregates, so readers preserve counts above
 the per-message limit. Local hierarchy repair leaves share-owned parents intact.
+
+Withdrawal records a durable stop before contacting the hub. A confirmed hub
+purge covers its owned records, not a stale live mirror or reader-made copy.
+Incremental PostgreSQL pushes consume the deletion journal and verify local
+absence and target ownership; a successful refresh is needed to remove stale
+mirror rows. Stopped shares retain local accounting and destination context.
+The additive `1 << 24` archive bit protects withdrawal state from older writers.

@@ -31,7 +31,7 @@ func TestJoinPinsHubAndBlocksChangedIdentity(t *testing.T) {
 		calls++
 		assert.Equal(t, "/av/api/v1/federation/handshake", r.URL.Path)
 		assert.Equal(t, "Bearer avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", r.Header.Get("Authorization"))
-		_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: identity, ProtocolVersions: []int{1}, EnrollmentUID: "enr-a", Member: "member-a", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
+		_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: identity, ProtocolVersions: []int{ProtocolVersion}, EnrollmentUID: "enr-a", Member: "member-a", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
 	}))
 	t.Cleanup(hub.Close)
 	token := filepath.Join(testutil.PrivateTempDir(t), "credential")
@@ -95,7 +95,7 @@ func TestJoinRejectsUnsupportedProtocolAndBadDigest(t *testing.T) {
 	policy := config.FederationHubConfig{Retention: "member-controlled", AllowedLevels: []string{"summary"}, MinGroupSize: 3, SuggestedProjects: []string{}, Processing: "none"}
 	digest, err := export.DigestCanonical(policy)
 	require.NoError(t, err)
-	response := HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{1}, EnrollmentUID: "enr-a", Member: "member-a", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest}
+	response := HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{ProtocolVersion}, EnrollmentUID: "enr-a", Member: "member-a", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest}
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(w).Encode(response) }))
 	t.Cleanup(hub.Close)
 	file := filepath.Join(testutil.PrivateTempDir(t), "credential")
@@ -107,12 +107,12 @@ func TestJoinRejectsUnsupportedProtocolAndBadDigest(t *testing.T) {
 		name, hubID, path, digest, message string
 		version                            int
 	}{
-		{"relative", "hub-a", "relative", digest, "credential file path must be absolute", 1},
-		{"missing", "hub-a", filepath.Join(t.TempDir(), "missing"), digest, "cannot open credential file", 1},
-		{"format", "hub-a", badFile, digest, "invalid federation credential", 1},
-		{"identity", "different", file, digest, "federation hub identity mismatch", 1},
-		{"protocol", "hub-a", file, digest, "unsupported federation protocol", 2},
-		{"digest", "hub-a", file, "wrong", "invalid federation policy digest", 1},
+		{"relative", "hub-a", "relative", digest, "credential file path must be absolute", ProtocolVersion},
+		{"missing", "hub-a", filepath.Join(t.TempDir(), "missing"), digest, "cannot open credential file", ProtocolVersion},
+		{"format", "hub-a", badFile, digest, "invalid federation credential", ProtocolVersion},
+		{"identity", "different", file, digest, "federation hub identity mismatch", ProtocolVersion},
+		{"protocol", "hub-a", file, digest, "unsupported federation protocol", 1},
+		{"digest", "hub-a", file, "wrong", "invalid federation policy digest", ProtocolVersion},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			response.ProtocolVersions, response.PolicyDigest = []int{tc.version}, tc.digest
@@ -171,7 +171,7 @@ func TestEnrollmentStateValidation(t *testing.T) {
 	policy := config.FederationHubConfig{Retention: "member-controlled", AllowedLevels: []string{"summary"}, MinGroupSize: 3, SuggestedProjects: []string{}, Processing: "none"}
 	digest, err := export.DigestCanonical(policy)
 	require.NoError(t, err)
-	response := HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{1}, EnrollmentUID: "enr-a", Member: "member-a", Policy: policy, PolicyDigest: digest}
+	response := HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{ProtocolVersion}, EnrollmentUID: "enr-a", Member: "member-a", Policy: policy, PolicyDigest: digest}
 	omit := false
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if omit {
@@ -217,7 +217,7 @@ func TestShareConsentAndPolicyChange(t *testing.T) {
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodGet, r.Method)
 		assert.Equal(t, "/api/v1/federation/handshake", r.URL.Path)
-		_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{1}, EnrollmentUID: "enr-a", Member: "member-a", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
+		_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub-a", ProtocolVersions: []int{ProtocolVersion}, EnrollmentUID: "enr-a", Member: "member-a", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
 	}))
 	t.Cleanup(hub.Close)
 	file := filepath.Join(testutil.PrivateTempDir(t), "credential")
@@ -427,7 +427,7 @@ func TestShareLocalStateAndExclusionErrors(t *testing.T) {
 	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, archive.Close()) })
-	require.NoError(t, archive.PutFederationLink(t.Context(), db.FederationLink{UID: "link-a", HubOrigin: "http://127.0.0.1:1", HubArchiveID: "hub-a", EnrollmentUID: "enr-a", Member: "member-a", TokenFile: "missing", ProtocolVersion: 1, State: "active"}))
+	require.NoError(t, archive.PutFederationLink(t.Context(), db.FederationLink{UID: "link-a", HubOrigin: "http://127.0.0.1:1", HubArchiveID: "hub-a", EnrollmentUID: "enr-a", Member: "member-a", TokenFile: "missing", ProtocolVersion: ProtocolVersion, State: "active"}))
 	require.NoError(t, archive.PutFederationShare(t.Context(), db.FederationShare{UID: "share-a", LinkUID: "link-a", NormalizedRemote: "github.com/example/api", Level: "summary", Attribution: "pooled", Audience: "operators", State: "paused", ConsentJSON: `{}`, PolicyDigest: "digest"}))
 	svc := NewService("spoke", "spoke-a", config.FederationHubConfig{}, archive)
 	require.NoError(t, svc.ResumeShare(t.Context(), "share-a"))

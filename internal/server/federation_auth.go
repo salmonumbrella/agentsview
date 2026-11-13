@@ -25,7 +25,7 @@ func federationPeerOperation(method, path string) bool {
 	if len(parts) == 1 && parts[0] != "" && method == http.MethodPut {
 		return true
 	}
-	return len(parts) == 2 && parts[0] != "" && parts[1] == "batches" && method == http.MethodPost
+	return len(parts) == 2 && parts[0] != "" && (parts[1] == "batches" || parts[1] == "reconcile") && method == http.MethodPost
 }
 
 // federationAuth returns true when it has handled the request; a nil service

@@ -33,7 +33,7 @@ func TestPushOldConsentDoesNotDeliver(t *testing.T) {
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		assert.Equal(t, "/api/v1/federation/handshake", r.URL.Path)
-		_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub", ProtocolVersions: []int{1}, EnrollmentUID: "enr", Member: "member", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
+		_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub", ProtocolVersions: []int{ProtocolVersion}, EnrollmentUID: "enr", Member: "member", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
 	}))
 	t.Cleanup(hub.Close)
 	file := filepath.Join(testutil.PrivateTempDir(t), "credential")
@@ -59,7 +59,7 @@ func TestPushOldConsentDoesNotDeliver(t *testing.T) {
 		_, e := tx.ExecContext(t.Context(), `UPDATE federation_shares SET consent_json=? WHERE share_uid='share'`, string(currentConsent))
 		return e
 	}))
-	policy.Retention = "new-retention"
+	policy.Retention = "org-retained"
 	digest, err = export.DigestCanonical(policy)
 	require.NoError(t, err)
 	before = calls
@@ -76,7 +76,7 @@ func TestPushWithNoActiveShareAvoidsHub(t *testing.T) {
 	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, archive.Close()) })
-	require.NoError(t, archive.PutFederationLink(t.Context(), db.FederationLink{UID: "link", HubOrigin: "https://example.invalid", HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: "/missing", ProtocolVersion: 1, State: "active"}))
+	require.NoError(t, archive.PutFederationLink(t.Context(), db.FederationLink{UID: "link", HubOrigin: "https://example.invalid", HubArchiveID: "hub", EnrollmentUID: "enr", Member: "member", TokenFile: "/missing", ProtocolVersion: ProtocolVersion, State: "active"}))
 	svc := NewService("spoke", "spoke", config.FederationHubConfig{}, archive)
 	result, err := svc.Push(t.Context())
 	require.NoError(t, err)
@@ -98,16 +98,26 @@ func TestGrantChangesWaitForPush(t *testing.T) {
 			hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.Method == http.MethodGet:
-					_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub", ProtocolVersions: []int{1}, EnrollmentUID: "enr", Member: "member", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
+					_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub", ProtocolVersions: []int{ProtocolVersion}, EnrollmentUID: "enr", Member: "member", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
 				case r.Method == http.MethodPut:
-					_ = json.NewEncoder(w).Encode(ShareView{State: "accepted", Epoch: 1})
+					var manifest ShareManifest
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&manifest))
+					state := "accepted"
+					if manifest.Action == "stop" {
+						state = "stopped"
+					}
+					_ = json.NewEncoder(w).Encode(ShareView{State: state, Epoch: 1, Committed: int64(batches)})
+				case strings.HasSuffix(r.URL.Path, "/reconcile"):
+					var request ReconcileRequest
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+					_ = json.NewEncoder(w).Encode(db.FederationInventoryResult{Boundary: request.Through, Covered: request.Through, Complete: request.Final})
 				default:
 					batches++
 					if batches == 1 {
 						close(entered)
 						<-release
 					}
-					_ = json.NewEncoder(w).Encode(BatchAck{Committed: 1, Refused: map[string]string{}})
+					_ = json.NewEncoder(w).Encode(BatchAck{Committed: int64(batches), Refused: map[string]string{}})
 				}
 			}))
 			t.Cleanup(hub.Close)
@@ -166,7 +176,11 @@ func TestGrantChangesWaitForPush(t *testing.T) {
 			require.NoError(t, mutate(ctx))
 			_, err = svc.Push(ctx)
 			require.NoError(t, err)
-			assert.Equal(t, 1, batches)
+			if operation == "pause" {
+				assert.Equal(t, 1, batches)
+			} else {
+				assert.Equal(t, 2, batches)
+			}
 		})
 	}
 }
@@ -191,11 +205,15 @@ func TestPushLargeAcknowledgmentAndBatchLimit(t *testing.T) {
 			var sizes []int
 			var committed int64
 			hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.Method {
-				case http.MethodGet:
-					_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub", ProtocolVersions: []int{1}, EnrollmentUID: "enr", Member: "member", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
-				case http.MethodPut:
+				switch {
+				case r.Method == http.MethodGet:
+					_ = json.NewEncoder(w).Encode(HandshakeResponse{HubArchiveID: "hub", ProtocolVersions: []int{ProtocolVersion}, EnrollmentUID: "enr", Member: "member", EnrollmentState: "enrolled", Policy: policy, PolicyDigest: digest})
+				case r.Method == http.MethodPut:
 					_ = json.NewEncoder(w).Encode(ShareView{State: "accepted", Epoch: 1, Committed: committed})
+				case strings.HasSuffix(r.URL.Path, "/reconcile"):
+					var request ReconcileRequest
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+					_ = json.NewEncoder(w).Encode(db.FederationInventoryResult{Boundary: request.Through, Covered: request.Through, Complete: request.Final})
 				default:
 					data, e := io.ReadAll(r.Body)
 					require.NoError(t, e)
@@ -266,4 +284,24 @@ func TestPushLargeAcknowledgmentAndBatchLimit(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFederationInventoryResponseRejectsUntrustedRanges(t *testing.T) {
+	page := db.FederationInventoryPage{After: "a", Through: "z", Items: []db.FederationInventoryItem{{UID: "b", Hash: "hash"}}}
+	for _, tc := range []struct {
+		name   string
+		result db.FederationInventoryResult
+	}{
+		{"unknown missing", db.FederationInventoryResult{Boundary: "a", Covered: "z", Missing: []string{"c"}}},
+		{"duplicate extra", db.FederationInventoryResult{Boundary: "a", Covered: "z", Extra: []string{"c", "c"}}},
+		{"extra outside coverage", db.FederationInventoryResult{Boundary: "a", Covered: "c", Extra: []string{"d"}}},
+		{"premature complete", db.FederationInventoryResult{Complete: true}},
+		{"advance while repairing", db.FederationInventoryResult{Boundary: "z", Covered: "z", Missing: []string{"b"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Error(t, validateFederationInventoryResponse(page, tc.result))
+		})
+	}
+	assert.NoError(t, validateFederationInventoryResponse(page, db.FederationInventoryResult{Boundary: "a", Covered: "z", Missing: []string{"b"}}))
+	assert.NoError(t, validateFederationInventoryResponse(page, db.FederationInventoryResult{Boundary: "z", Covered: "z"}))
 }

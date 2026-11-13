@@ -17,11 +17,12 @@ import (
 )
 
 const (
-	shareIncludes          = "Session identity, repository, agent, models, times, counts, usage, cost, automation, outcome and health"
-	shareOmits             = "Content, paths, titles, tool inputs and results, and tool categories"
-	shareDisclosure        = "Anyone holding the hub bearer token can read everything the hub stores"
-	shareAttributionNotice = "Member attribution is a request for a later release"
-	shareDeliveryNotice    = "Summary records are delivered to the hub; removing a share stops future delivery but does not yet delete delivered records"
+	shareIncludes             = "Session identity, repository, agent, models, times, counts, usage, cost, automation, outcome and health"
+	shareOmits                = "Content, paths, titles, tool inputs and results, and tool categories"
+	shareDisclosure           = "Anyone holding the hub bearer token can read everything the hub stores"
+	shareAttributionNotice    = "Member attribution is a request for a later release"
+	shareLegacyDeliveryNotice = "Summary records are delivered to the hub; removing a share stops future delivery but does not yet delete delivered records"
+	shareDeliveryNotice       = "Summary records are delivered to the hub; removal stops delivery and requests cleanup under the disclosed retention policy"
 )
 
 type ShareGrant struct {
@@ -136,16 +137,25 @@ func (s *Service) PreviewShare(ctx context.Context, g ShareGrant) (SharePreview,
 	return s.previewWithPolicy(ctx, g, hub)
 }
 func (s *Service) previewWithPolicy(ctx context.Context, g ShareGrant, hub *HubStatus) (SharePreview, error) {
-	var p SharePreview
 	selected, err := s.db.SelectFederationSessions(ctx, g.Project, g.Since)
 	if err != nil {
-		return p, err
+		return SharePreview{}, err
 	}
+	return previewFromSelection(g, hub, selected)
+}
+
+func previewFromSelection(g ShareGrant, hub *HubStatus, selected db.FederationSelection) (SharePreview, error) {
+	var p SharePreview
 	p = SharePreview{Grant: g, PolicyDigest: hub.PolicyDigest, Policy: *hub.Policy, Audience: "operators", Includes: shareIncludes, Omits: shareOmits, Disclosure: shareDisclosure, AttributionNotice: shareAttributionNotice, DeliveryNotice: shareDeliveryNotice, Selected: len(selected.IDs), NotLocal: selected.NotLocal, NotIdentifiable: selected.NotIdentifiable, Excluded: selected.Excluded, Records: []SummaryRecord{}}
 	agents, models := map[string]bool{}, map[string]bool{}
 	selectedIDs := make(map[string]bool, len(selected.IDs))
 	for _, id := range selected.IDs {
 		selectedIDs[id] = true
+	}
+	for id, eligible := range selected.EligibleParents {
+		if eligible {
+			selectedIDs[id] = true
+		}
 	}
 	p.Usage.HasCost = len(selected.Rows) > 0
 	for _, row := range selected.Rows {
@@ -383,9 +393,14 @@ func (s *Service) PauseShare(ctx context.Context, uid string) error {
 	case "policy_paused":
 		return inputError(policyPausedMessage)
 	}
-	return s.db.SetFederationShareState(ctx, link.UID, uid, "active", "paused")
+	return s.db.StopFederationShare(ctx, link.UID, uid, "pause")
 }
 func (s *Service) ResumeShare(ctx context.Context, uid string) error {
+	release, err := s.acquirePush(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	link, err := s.currentLink(ctx)
 	if err != nil {
 		return err
@@ -400,7 +415,7 @@ func (s *Service) ResumeShare(ctx context.Context, uid string) error {
 	case "active":
 		return inputError("share is already active")
 	}
-	return s.db.SetFederationShareState(ctx, link.UID, uid, "paused", "active")
+	return s.db.ResumeFederationShare(ctx, link.UID, uid)
 }
 func (s *Service) RemoveShare(ctx context.Context, uid string) error {
 	release, err := s.acquirePush(ctx)
