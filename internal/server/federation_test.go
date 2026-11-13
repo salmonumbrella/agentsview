@@ -652,7 +652,7 @@ func (w *pulseLostResponseWriter) Write(_ []byte) (int, error) {
 }
 
 func TestFederationPulseHTTPProtectsHistoryAfterUpdate(t *testing.T) {
-	for _, scenario := range []string{"delivered", "lost-response"} {
+	for _, scenario := range []string{"delivered", "lost-response", "independent-reader"} {
 		t.Run(scenario, func(t *testing.T) {
 			database := dbtest.OpenTestDBAt(t, filepath.Join(t.TempDir(), "archive.db"))
 			ctx := t.Context()
@@ -669,12 +669,13 @@ func TestFederationPulseHTTPProtectsHistoryAfterUpdate(t *testing.T) {
 			}
 			svc := federation.NewService("hub", "archive", config.FederationHubConfig{MinGroupSize: 3}, database)
 			srv := New(config.Config{Host: "127.0.0.1", Port: 8080, AuthToken: "personal", RequireAuth: true}, database, nil, WithFederation(svc))
-			read := func() (db.FederationPulse, string) {
+			other := New(config.Config{Host: "127.0.0.1", Port: 8080, AuthToken: "second-reader", RequireAuth: true}, database, nil, WithFederation(svc))
+			read := func(handler http.Handler, token string) (db.FederationPulse, string) {
 				t.Helper()
 				req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/v1/federation/pulse?since=2020-07-29", nil)
-				req.Header.Set("Authorization", "Bearer personal")
+				req.Header.Set("Authorization", "Bearer "+token)
 				rec := httptest.NewRecorder()
-				srv.Handler().ServeHTTP(rec, req)
+				handler.ServeHTTP(rec, req)
 				require.Equal(t, http.StatusOK, rec.Code)
 				var pulse db.FederationPulse
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pulse))
@@ -688,7 +689,7 @@ func TestFederationPulseHTTPProtectsHistoryAfterUpdate(t *testing.T) {
 				assert.Equal(t, http.StatusOK, lost.status)
 				assert.Positive(t, lost.writes)
 			} else {
-				first, _ := read()
+				first, _ := read(srv.Handler(), "personal")
 				require.NotNil(t, first.Totals["tokens"].Value)
 				assert.EqualValues(t, 60, *first.Totals["tokens"].Value)
 				require.NotNil(t, first.Totals["cost_microdollars"].Value)
@@ -698,7 +699,11 @@ func TestFederationPulseHTTPProtectsHistoryAfterUpdate(t *testing.T) {
 			record := db.FederationHubRecord{UID: "a", Hash: "changed", Remote: "example/repo", ProjectKey: "project", Write: db.SessionBatchWrite{Session: db.Session{ID: "a", Project: "example/repo", Agent: "codex", StartedAt: &started}, Signals: db.SessionSignalUpdate{Outcome: "unknown"}, UsageEvents: []db.UsageEvent{{Source: "fixture", Model: "model", InputTokens: 17, Cost: &cost, CostStatus: "exact", CostSource: "reported", OccurredAt: started, DedupKey: "a"}}}}
 			_, err := database.CommitFederationBatch(ctx, "e-a", "s-a", "h-a", "policy", 1, 2, "changed", []db.FederationHubRecord{record})
 			require.NoError(t, err)
-			later, body := read()
+			handler, token := srv.Handler(), "personal"
+			if scenario == "independent-reader" {
+				handler, token = other.Handler(), "second-reader"
+			}
+			later, body := read(handler, token)
 			assert.True(t, later.Suppressed)
 			assert.Empty(t, later.Projects)
 			assert.Equal(t, "suppressed", later.Totals["tokens"].State)
