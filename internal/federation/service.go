@@ -10,8 +10,6 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
@@ -65,8 +63,6 @@ func readCredential(ctx context.Context, path string) (string, error) {
 		switch {
 		case errors.Is(err, requestsign.ErrPrivateMode):
 			return "", inputError("credential file must be a regular file readable only by its owner (mode 0600)")
-		case errors.Is(err, requestsign.ErrPrivateTooLarge):
-			return "", inputError("credential file is too large")
 		default:
 			return "", inputError("cannot open credential file")
 		}
@@ -82,34 +78,23 @@ func readCredential(ctx context.Context, path string) (string, error) {
 	}
 	return token, nil
 }
-func normalizeIdentifier(value, field string, limit int, required bool) (string, error) {
+func normalizeIdentifier(value, field string, required bool) (string, error) {
 	value = strings.TrimSpace(value)
 	if required && value == "" {
 		return "", inputError(field + " is required")
-	}
-	if len(value) > limit {
-		return "", inputError(field + " is too long")
-	}
-	if !utf8.ValidString(value) {
-		return "", inputError(field + " has invalid characters")
-	}
-	for _, r := range value {
-		if unicode.IsControl(r) {
-			return "", inputError(field + " has invalid characters")
-		}
 	}
 	return value, nil
 }
 func (s *Service) Enroll(ctx context.Context, archive, member, name string) (db.FederationEnrollment, string, error) {
 	var e db.FederationEnrollment
 	var err error
-	if archive, err = normalizeIdentifier(archive, "spoke archive ID", 128, true); err != nil {
+	if archive, err = normalizeIdentifier(archive, "spoke archive ID", true); err != nil {
 		return e, "", err
 	}
-	if member, err = normalizeIdentifier(member, "member", 128, true); err != nil {
+	if member, err = normalizeIdentifier(member, "member", true); err != nil {
 		return e, "", err
 	}
-	if name, err = normalizeIdentifier(name, "spoke name", 256, false); err != nil {
+	if name, err = normalizeIdentifier(name, "spoke name", false); err != nil {
 		return e, "", err
 	}
 	token, err := randomID("avfc_", 32)
@@ -261,11 +246,7 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	h, err := Handshake(ctx, link.HubOrigin, token, s.archiveID)
 	if err != nil {
 		var input *InputError
-		if errors.Is(err, ErrHubRefused) {
-			out.Hub.State, out.Hub.Message = HubError, err.Error()
-			return out, nil
-		}
-		if errors.As(err, &input) {
+		if errors.Is(err, ErrHubRefused) || errors.As(err, &input) {
 			out.Hub.State, out.Hub.Message = HubError, err.Error()
 			return out, nil
 		}

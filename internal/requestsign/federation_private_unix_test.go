@@ -24,5 +24,5 @@ func TestReadPrivateModeAndLimit(t *testing.T) {
 	}
 	require.NoError(t, os.Chmod(path, 0600))
 	_, err = ReadPrivate(path, 6)
-	assert.ErrorIs(t, err, ErrPrivateTooLarge)
+	assert.EqualError(t, err, "reading private signing file failed")
 }

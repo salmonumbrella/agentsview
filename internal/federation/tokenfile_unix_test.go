@@ -17,21 +17,6 @@ import (
 	"go.kenn.io/agentsview/internal/export"
 )
 
-func TestJoinRefusesReadableCredentialBeforeNetwork(t *testing.T) {
-	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, archive.Close()) })
-	calls := 0
-	hub := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls++ }))
-	t.Cleanup(hub.Close)
-	file := filepath.Join(t.TempDir(), "credential")
-	require.NoError(t, os.WriteFile(file, []byte("avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), 0644))
-	require.NoError(t, os.Chmod(file, 0644))
-	svc := NewService("spoke", "spoke-a", config.FederationHubConfig{}, archive)
-	require.Error(t, svc.Join(t.Context(), hub.URL, "hub-a", file))
-	assert.Zero(t, calls)
-}
-
 func TestStatusRechecksCredentialPermissions(t *testing.T) {
 	archive, err := db.OpenIsolated(t.Context(), filepath.Join(t.TempDir(), "archive.db"))
 	require.NoError(t, err)
@@ -48,6 +33,10 @@ func TestStatusRechecksCredentialPermissions(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "credential")
 	require.NoError(t, os.WriteFile(file, []byte("avfc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), 0600))
 	svc := NewService("spoke", "spoke-a", policy, archive)
+	require.NoError(t, os.Chmod(file, 0644))
+	assert.EqualError(t, svc.Join(t.Context(), hub.URL, "hub-a", file), "credential file must be a regular file readable only by its owner (mode 0600)")
+	assert.Zero(t, calls)
+	require.NoError(t, os.Chmod(file, 0600))
 	require.NoError(t, svc.Join(t.Context(), hub.URL, "hub-a", file))
 	require.NoError(t, os.Chmod(file, 0644))
 	status, err := svc.Status(t.Context())

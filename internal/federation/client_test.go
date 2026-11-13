@@ -48,15 +48,28 @@ func TestHandshakeUsesPinnedBasePath(t *testing.T) {
 }
 
 func TestHandshakeRefusesRedirect(t *testing.T) {
-	for _, code := range []int{301, 302, 307, 308} {
-		t.Run(http.StatusText(code), func(t *testing.T) {
+	for _, tc := range []struct {
+		code    int
+		refused bool
+	}{{301, false}, {302, false}, {307, false}, {308, false}, {401, true}} {
+		t.Run(http.StatusText(tc.code), func(t *testing.T) {
 			reached := false
 			target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
 			t.Cleanup(target.Close)
-			hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, target.URL, code) }))
+			hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.refused {
+					w.WriteHeader(tc.code)
+				} else {
+					http.Redirect(w, r, target.URL, tc.code)
+				}
+			}))
 			t.Cleanup(hub.Close)
 			_, err := Handshake(t.Context(), hub.URL, "avfc_test", "spoke-a")
 			require.Error(t, err)
+			if tc.refused {
+				assert.ErrorIs(t, err, ErrHubRefused)
+				assert.EqualError(t, err, "hub refused this credential (revoked, unknown, or wrong archive)")
+			}
 			assert.False(t, reached)
 		})
 	}
