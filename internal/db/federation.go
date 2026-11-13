@@ -37,15 +37,10 @@ type FederationLink struct {
 
 func (db *DB) CreateFederationEnrollment(ctx context.Context, e FederationEnrollment) error {
 	return db.Update(ctx, func(tx *sql.Tx) error {
-		var exists int
-		err := tx.QueryRowContext(ctx, `SELECT 1 FROM federation_enrollments WHERE spoke_archive_id = ? AND member = ? AND revoked_at = ''`, e.SpokeArchiveID, e.Member).Scan(&exists)
-		if err == nil {
+		_, err := tx.ExecContext(ctx, `INSERT INTO federation_enrollments (enrollment_uid,spoke_archive_id,member,spoke_name,credential_sha256) VALUES (?,?,?,?,?)`, e.UID, e.SpokeArchiveID, e.Member, e.SpokeName, e.CredentialSHA256)
+		if isSQLiteUniqueConstraint(err) {
 			return ErrFederationEnrollmentExists
 		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO federation_enrollments (enrollment_uid,spoke_archive_id,member,spoke_name,credential_sha256) VALUES (?,?,?,?,?)`, e.UID, e.SpokeArchiveID, e.Member, e.SpokeName, e.CredentialSHA256)
 		return err
 	})
 }

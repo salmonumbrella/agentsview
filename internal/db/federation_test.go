@@ -35,6 +35,7 @@ func TestFederationEnrollmentLifecycle(t *testing.T) {
 	assert.Equal(t, "contacted", rows[0].State)
 	require.Error(t, db.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr-b", SpokeArchiveID: "spoke-a", Member: "member-a", CredentialSHA256: "digest-b"}))
 	require.NoError(t, db.RevokeFederationEnrollment(ctx, "enr-a"))
+	require.NoError(t, db.CreateFederationEnrollment(ctx, FederationEnrollment{UID: "enr-b", SpokeArchiveID: "spoke-a", Member: "member-a", CredentialSHA256: "digest-b"}))
 	rows, err = db.ListFederationEnrollments(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, "revoked", rows[0].State)
