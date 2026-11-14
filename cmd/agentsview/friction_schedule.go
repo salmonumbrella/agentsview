@@ -40,8 +40,12 @@ func newFrictionRunner(cfg config.Config, store frictionRunnerStore, now func() 
 	} else if store.ReadOnly() {
 		return nil, nil
 	}
-	zone := strings.TrimSpace(os.Getenv("AGENTSVIEW_FRICTION_TZ"))
-	if zone == "" {
+	zone, explicitZone := os.LookupEnv("AGENTSVIEW_FRICTION_TZ")
+	if explicitZone {
+		if _, err := timeutil.LoadTimezone(zone); err != nil {
+			return nil, err
+		}
+	} else {
 		zone = strings.TrimSpace(cfg.Friction.Timezone)
 	}
 	loc := timeutil.LocalLocation()
@@ -51,6 +55,7 @@ func newFrictionRunner(cfg config.Config, store frictionRunnerStore, now func() 
 	}
 	var err error
 	if zone != "" {
+		// Saved abbreviations remain readable during the config warning release.
 		loc, err = time.LoadLocation(zone)
 	}
 	if err != nil {

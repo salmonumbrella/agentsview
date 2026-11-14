@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"go.kenn.io/agentsview/internal/friction"
+	"go.kenn.io/agentsview/internal/timeutil"
 )
 
 // ErrFrictionDigestConflict reports that another builder wrote the digest
@@ -65,28 +66,11 @@ type FrictionPatternUpdate struct {
 // FrictionDayBounds returns the first instant of date and the following date.
 // A skipped date has an empty interval; a repeated midnight uses its first occurrence.
 func FrictionDayBounds(date string, loc *time.Location) (time.Time, time.Time, error) {
-	day, err := time.Parse("2006-01-02", date)
+	start, end, err := timeutil.DateBounds(date, loc)
 	if err != nil {
 		return time.Time{}, time.Time{}, fmt.Errorf("parsing friction date %q: %w", date, err)
 	}
-	return frictionDateStart(day, loc), frictionDateStart(day.AddDate(0, 0, 1), loc), nil
-}
-
-func frictionDateStart(day time.Time, loc *time.Location) time.Time {
-	// Search offset intervals in time order so gaps and repeated midnights
-	// resolve to the earliest valid instant. Two days cover all IANA UTC offsets.
-	for cursor := day.Add(-48 * time.Hour).In(loc); ; {
-		_, offset := cursor.Zone()
-		_, end := cursor.ZoneBounds()
-		candidate := day.Add(-time.Duration(offset) * time.Second).In(loc)
-		if candidate.Before(cursor) {
-			candidate = cursor
-		}
-		if end.IsZero() || candidate.Before(end) {
-			return candidate
-		}
-		cursor = end
-	}
+	return start, end, nil
 }
 
 const frictionPendingDatesSQL = `
@@ -132,7 +116,7 @@ func (db *DB) FrictionPendingDates(ctx context.Context, first, last string, loc 
 		if err != nil {
 			continue
 		}
-		date := ts.In(loc).Format("2006-01-02")
+		date := timeutil.ReportDate(ts, loc).String()
 		if date >= first && date <= last {
 			dates[date] = true
 		}
@@ -451,7 +435,7 @@ func (db *DB) EarliestSessionDate(ctx context.Context, loc *time.Location) (stri
 	if earliest.IsZero() {
 		return "", nil
 	}
-	return earliest.In(loc).Format("2006-01-02"), nil
+	return timeutil.ReportDate(earliest, loc).String(), nil
 }
 
 // UpdateFrictionDigestRender replaces the rendered forms of a digest and

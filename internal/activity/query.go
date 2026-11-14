@@ -4,6 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"cloud.google.com/go/civil"
+	"go.kenn.io/kit/civiltime"
+
+	"go.kenn.io/agentsview/internal/timeutil"
 )
 
 // BucketUnit names the calendar/clock unit a timeline bucket spans.
@@ -62,6 +67,9 @@ const (
 // presets in the requested timezone, validating the range, clamping the
 // effective end to now, and selecting (and bounding) the bucket size.
 func ResolveQuery(input QueryInput, now time.Time) (Query, error) {
+	if input.Timezone == "" {
+		input.Timezone = "UTC"
+	}
 	loc, err := loadLocation(input.Timezone)
 	if err != nil {
 		return Query{}, err
@@ -158,7 +166,7 @@ func loadLocation(tz string) (*time.Location, error) {
 	if tz == "" || tz == "UTC" {
 		return time.UTC, nil
 	}
-	loc, err := time.LoadLocation(tz)
+	loc, err := timeutil.LoadTimezone(tz)
 	if err != nil {
 		return nil, fmt.Errorf("invalid timezone: %s", tz)
 	}
@@ -181,7 +189,7 @@ func resolveRange(
 	}
 	date := input.Date
 	if date == "" {
-		date = now.In(loc).Format("2006-01-02")
+		date = timeutil.ReportDate(now, loc).String()
 	}
 	return expandPreset(preset, date, loc)
 }
@@ -205,22 +213,25 @@ func parseCustomRange(input QueryInput) (time.Time, time.Time, error) {
 // expandPreset expands a day/week/month preset anchored at Date into UTC
 // bounds, walking calendar units in loc so DST shifts are reflected.
 func expandPreset(preset, date string, loc *time.Location) (time.Time, time.Time, error) {
-	d, err := time.ParseInLocation("2006-01-02", date, loc)
+	d, err := civil.ParseDate(date)
 	if err != nil {
 		return time.Time{}, time.Time{}, fmt.Errorf("invalid date: %s", date)
 	}
+	first, next := d, d.AddDays(1)
 	switch preset {
 	case "day":
-		return d.UTC(), d.AddDate(0, 0, 1).UTC(), nil
 	case "week":
-		monday := d.AddDate(0, 0, -isoMondayOffset(d.Weekday()))
-		return monday.UTC(), monday.AddDate(0, 0, 7).UTC(), nil
+		first = d.AddDays(-isoMondayOffset(d.In(time.UTC).Weekday()))
+		next = first.AddDays(7)
 	case "month":
-		first := time.Date(d.Year(), d.Month(), 1, 0, 0, 0, 0, loc)
-		return first.UTC(), first.AddDate(0, 1, 0).UTC(), nil
+		first.Day = 1
+		next = civil.DateOf(first.In(time.UTC).AddDate(0, 1, 0))
 	default:
 		return time.Time{}, time.Time{}, fmt.Errorf("invalid preset: %s", preset)
 	}
+	start, _, _ := civiltime.DayBounds(first, loc)
+	end, _, _ := civiltime.DayBounds(next, loc)
+	return start.UTC(), end.UTC(), nil
 }
 
 // isoMondayOffset is the number of days from the ISO Monday of the week
@@ -296,35 +307,29 @@ func fixedBuckets(start, end time.Time, step time.Duration) []BucketWindow {
 }
 
 // calendarBuckets tiles [start, end) into local calendar windows of stepDays
-// days each, anchored at the local midnight (ISO Monday for weeks) at or before
-// start. The first Start is clipped up to start and the last End down to end.
+// days each, anchored at the first instant of the local date (ISO Monday for
+// weeks) at or before start. The first Start and last End are clipped to the range.
 func calendarBuckets(start, end time.Time, loc *time.Location, stepDays int) []BucketWindow {
 	if !start.Before(end) {
 		return nil
 	}
-	local := localMidnight(start, loc)
+	date := timeutil.ReportDate(start, loc)
 	if stepDays == 7 {
-		local = local.AddDate(0, 0, -isoMondayOffset(local.Weekday()))
+		date = date.AddDays(-isoMondayOffset(date.In(time.UTC).Weekday()))
 	}
 	var out []BucketWindow
 	for {
-		next := local.AddDate(0, 0, stepDays)
-		bStart := maxTime(local.UTC(), start)
-		bEnd := minTime(next.UTC(), end)
+		nextDate := date.AddDays(stepDays)
+		first, _, _ := civiltime.DayBounds(date, loc)
+		next, _, _ := civiltime.DayBounds(nextDate, loc)
+		bStart, bEnd := maxTime(first.UTC(), start), minTime(next.UTC(), end)
 		if bEnd.After(bStart) {
 			out = append(out, BucketWindow{Start: bStart, End: bEnd})
 		}
-		if !next.UTC().Before(end) {
+		if !next.Before(end) {
 			break
 		}
-		local = next
+		date = nextDate
 	}
 	return out
-}
-
-// localMidnight returns the local 00:00 wall time on the calendar day that
-// contains t in loc.
-func localMidnight(t time.Time, loc *time.Location) time.Time {
-	l := t.In(loc)
-	return time.Date(l.Year(), l.Month(), l.Day(), 0, 0, 0, 0, loc)
 }

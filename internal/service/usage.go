@@ -172,7 +172,7 @@ func BuildUsageFilter(req UsageRequest, groups ModelGroups) (db.UsageFilter, err
 	if tz == "" {
 		tz = "UTC"
 	}
-	if _, err := time.LoadLocation(tz); err != nil {
+	if _, err := timeutil.LoadTimezone(tz); err != nil {
 		return db.UsageFilter{}, &UsageInputError{Msg: "invalid timezone: " + tz}
 	}
 	from, to := req.From, req.To

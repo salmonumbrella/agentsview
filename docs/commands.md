@@ -1378,7 +1378,7 @@ agentsview report usage daily [flags]
 | `--breakdown` | `false`       | Show per-model rows and populate detailed JSON breakdown arrays          |
 | `--offline`   | `false`       | Read the archive directly without sync or pricing fetches                |
 | `--no-sync`   | `false`       | Skip source refresh; a new daemon starts without automatic sync          |
-| `--timezone`  | system        | IANA timezone name for date bucketing                                    |
+| `--timezone`  | `UTC`         | UTC or an IANA timezone name for date bucketing                           |
 
 When the window includes Codex Cloud sessions that have only plan usage, the
 report leaves them out of the totals and prints "note: N sessions billed as plan
@@ -1444,7 +1444,7 @@ ______________________________________________________________________
 ### `agentsview source cursor sync-usage`
 
 Fetch Cursor Admin API usage events and store them in the local archive so they
-contribute to the Usage dashboard and daily reports.
+contribute to the Usage dashboard and daily reports. Date windows use UTC.
 
 ```bash
 agentsview source cursor sync-usage [flags]
@@ -1490,7 +1490,7 @@ agentsview report activity [flags]
 | `--date`     | today     | Anchor date for day/week/month presets (`YYYY-MM-DD`) |
 | `--from`     |           | Start instant for custom range (RFC3339)              |
 | `--to`       |           | End instant for custom range (RFC3339)                |
-| `--timezone` | system    | IANA timezone for range bucketing                     |
+| `--timezone` | `UTC`     | UTC or an IANA timezone for range bucketing            |
 | `--bucket`   | automatic | Bucket size: `5m`, `15m`, `1h`, `1d`, or `1w`         |
 | `--project`  |           | Filter by project                                     |
 | `--agent`    |           | Filter by agent name                                  |

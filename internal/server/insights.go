@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/insight"
 	"go.kenn.io/agentsview/internal/money"
@@ -33,8 +35,39 @@ type generateInsightRequest struct {
 	Filters        *cannedSessionFiltersInput `json:"filters,omitempty"`
 	// Timezone is the IANA zone the caller's date range is expressed in, so
 	// the attached activity summary covers the same local-day window as the
-	// activity dashboard the dates were derived from. Empty means UTC.
+	// activity dashboard the dates were derived from. Omission means UTC.
 	Timezone string `json:"timezone,omitempty"`
+}
+
+func (req *generateInsightRequest) UnmarshalJSON(data []byte) error {
+	type request generateInsightRequest
+	var decoded request
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields struct {
+		Timezone jsontext.Value `json:"timezone"`
+		Filters  struct {
+			Timezone jsontext.Value `json:"timezone"`
+		} `json:"filters"`
+	}
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for _, raw := range []jsontext.Value{fields.Timezone, fields.Filters.Timezone} {
+		if raw == nil {
+			continue
+		}
+		var zone string
+		if err := json.Unmarshal(raw, &zone); err != nil {
+			return err
+		}
+		if _, err := timeutil.LoadTimezone(zone); err != nil {
+			return err
+		}
+	}
+	*req = generateInsightRequest(decoded)
+	return nil
 }
 
 type cannedSessionFiltersInput struct {
@@ -90,7 +123,7 @@ func normalizeCannedSessionFilters(
 	if filters.Timezone == "" {
 		filters.Timezone = "UTC"
 	}
-	if _, err := time.LoadLocation(filters.Timezone); err != nil {
+	if _, err := timeutil.LoadTimezone(filters.Timezone); err != nil {
 		return insight.CannedSessionFilters{},
 			"invalid timezone: " + filters.Timezone, false
 	}
@@ -619,7 +652,7 @@ func (s *Server) listCannedCoachSessions(
 }
 
 func cannedCoachLocation(name string) *time.Location {
-	loc, err := time.LoadLocation(name)
+	loc, err := timeutil.LoadTimezone(name)
 	if err != nil {
 		return time.UTC
 	}
@@ -630,15 +663,15 @@ func cannedCoachUTCDateBounds(
 	from, to string,
 	loc *time.Location,
 ) (string, string) {
-	start, err := time.ParseInLocation("2006-01-02", from, loc)
+	start, _, err := timeutil.DateBounds(from, loc)
 	if err != nil {
 		return from, to
 	}
-	end, err := time.ParseInLocation("2006-01-02", to, loc)
+	_, end, err := timeutil.DateBounds(to, loc)
 	if err != nil {
 		return from, to
 	}
-	end = end.AddDate(0, 0, 1).Add(-time.Nanosecond)
+	end = end.Add(-time.Nanosecond)
 	return start.UTC().Format("2006-01-02"),
 		end.UTC().Format("2006-01-02")
 }
@@ -676,7 +709,7 @@ func cannedCoachSessionLocalDate(
 		}
 		return ""
 	}
-	return t.Format("2006-01-02")
+	return timeutil.ReportDate(t, loc).String()
 }
 
 func cannedCoachLocalTime(

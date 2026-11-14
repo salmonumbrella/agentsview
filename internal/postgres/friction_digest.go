@@ -16,6 +16,7 @@ import (
 
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/friction"
+	"go.kenn.io/agentsview/internal/timeutil"
 )
 
 // FrictionAvailable reports whether startup proved this role can write the
@@ -165,7 +166,7 @@ func (s *Store) FrictionPendingDates(ctx context.Context, first, last string, lo
 		if err := rows.Scan(&ts); err != nil {
 			return nil, err
 		}
-		dates[ts.In(loc).Format("2006-01-02")] = true
+		dates[timeutil.ReportDate(ts, loc).String()] = true
 	}
 	return slices.Sorted(maps.Keys(dates)), rows.Err()
 }
@@ -456,7 +457,7 @@ func (s *Store) EarliestSessionDate(ctx context.Context, loc *time.Location) (st
 	if !earliest.Valid {
 		return "", nil
 	}
-	return earliest.Time.In(loc).Format("2006-01-02"), nil
+	return timeutil.ReportDate(earliest.Time, loc).String(), nil
 }
 
 func (s *Store) UpdateFrictionDigestRender(

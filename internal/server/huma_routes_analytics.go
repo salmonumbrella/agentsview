@@ -4,12 +4,11 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"time"
+
+	"github.com/danielgtaylor/huma/v2"
 
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/timeutil"
-
-	"github.com/danielgtaylor/huma/v2"
 )
 
 func (s *Server) registerAnalyticsRoutes() {
@@ -99,7 +98,7 @@ func (s *Server) analyticsFilterFromInput(ctx context.Context, in AnalyticsFilte
 	if tz == "" {
 		tz = "UTC"
 	}
-	if _, err := time.LoadLocation(tz); err != nil {
+	if _, err := timeutil.LoadTimezone(tz); err != nil {
 		return db.AnalyticsFilter{}, apiError(http.StatusBadRequest, "invalid timezone: "+tz)
 	}
 	from, to := defaultDateRange(in.From, in.To)

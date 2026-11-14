@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+
 	"go.kenn.io/agentsview/internal/activity"
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/insight"
@@ -555,7 +556,7 @@ func insightStringValue(s *string) string {
 // activityRangeSummary resolves the requested range into an activity report and
 // condenses it into a RangeSummary for the insight prompt. The range spans the
 // local days [DateFrom, DateTo] in req.Timezone (empty means UTC): the bounds
-// are that zone's midnights, matching the activity dashboard the dates were
+// are that zone's civil day bounds, matching the activity dashboard the dates were
 // derived from, so a non-UTC viewer's summary covers the window the dashboard
 // shows rather than a UTC-shifted one. It applies the same automated-session
 // scope as BuildPrompt's session list so the summary reflects the same work the
@@ -570,22 +571,21 @@ func (s *Server) activityRangeSummary(
 	if tz == "" {
 		tz = "UTC"
 	}
-	loc, err := time.LoadLocation(tz)
+	loc, err := timeutil.LoadTimezone(tz)
 	if err != nil {
 		return nil, fmt.Errorf("loading timezone %q: %w", tz, err)
 	}
-	// Local midnights of DateFrom and the day after DateTo bound the half-open
+	// The first instants of DateFrom and the day after DateTo bound the half-open
 	// window, expressed as absolute instants so ResolveQuery's custom-range
 	// parse keeps them exact; Timezone drives only the bucket calendar.
-	from, err := time.ParseInLocation("2006-01-02", req.DateFrom, loc)
+	from, _, err := timeutil.DateBounds(req.DateFrom, loc)
 	if err != nil {
 		return nil, fmt.Errorf("parsing date_from %q: %w", req.DateFrom, err)
 	}
-	toDay, err := time.ParseInLocation("2006-01-02", req.DateTo, loc)
+	_, to, err := timeutil.DateBounds(req.DateTo, loc)
 	if err != nil {
 		return nil, fmt.Errorf("parsing date_to %q: %w", req.DateTo, err)
 	}
-	to := toDay.AddDate(0, 0, 1)
 	q, err := activity.ResolveQuery(activity.QueryInput{
 		Preset:   "custom",
 		From:     from.UTC().Format(time.RFC3339),

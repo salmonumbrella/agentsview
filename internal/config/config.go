@@ -29,13 +29,15 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gofrs/flock"
 	"github.com/spf13/pflag"
+	"go.kenn.io/kit/atomicfile"
+	"go.kenn.io/kit/embedconfig"
+	"go.kenn.io/kit/embedlocal"
+
 	"go.kenn.io/agentsview/internal/friction"
 	"go.kenn.io/agentsview/internal/jsonutil"
 	"go.kenn.io/agentsview/internal/parser"
 	"go.kenn.io/agentsview/internal/pathutil"
-	"go.kenn.io/kit/atomicfile"
-	"go.kenn.io/kit/embedconfig"
-	"go.kenn.io/kit/embedlocal"
+	"go.kenn.io/agentsview/internal/timeutil"
 )
 
 // TerminalConfig holds terminal launch preferences.
@@ -763,11 +765,16 @@ func (c FrictionKataConfig) FileKinds() []friction.Kind {
 // Validate checks the zone name, backfill bound, and seat patterns.
 func (c FrictionConfig) Validate() error {
 	if tz := strings.TrimSpace(c.Timezone); tz != "" {
-		if tz == "Local" {
-			return fmt.Errorf("[friction] timezone %q is not an IANA zone", tz)
-		}
-		if _, err := time.LoadLocation(tz); err != nil {
-			return fmt.Errorf("[friction] timezone %q is not an IANA zone", tz)
+		if _, err := timeutil.LoadTimezone(tz); err != nil {
+			// Preserve existing saved abbreviations for one release. Explicit API,
+			// CLI and environment parameters already require UTC or an IANA name.
+			if tz == "Local" || strings.Contains(tz, "/") {
+				return fmt.Errorf("[friction] timezone %q is not an IANA zone", tz)
+			}
+			if _, legacyErr := time.LoadLocation(tz); legacyErr != nil {
+				return fmt.Errorf("[friction] timezone %q is not an IANA zone", tz)
+			}
+			log.Printf("warning: [friction] timezone %q is deprecated and will be rejected in the next release; use UTC or an IANA name such as America/New_York", tz)
 		}
 	}
 	if c.BackfillDays < 1 || c.BackfillDays > 3650 {

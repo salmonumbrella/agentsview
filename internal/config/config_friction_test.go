@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"log"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -125,4 +127,15 @@ func TestFrictionKataFileKinds(t *testing.T) {
 	assert.Equal(t, []friction.Kind{friction.KindError}, FrictionKataConfig{Kinds: []string{"error"}}.FileKinds())
 	assert.Equal(t, 2, FrictionKataConfig{}.FileMinSessions(), "unset files only patterns seen in two sessions")
 	assert.Equal(t, 1, FrictionKataConfig{MinSessions: 1}.FileMinSessions())
+}
+
+func TestFrictionSavedAbbreviationWarnsWithoutFailingLoad(t *testing.T) {
+	var logs bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	cfg := loadMinimalWithConfig(t, map[string]any{"friction": map[string]any{"timezone": "EST"}})
+	assert.Equal(t, "EST", cfg.Friction.Timezone)
+	assert.Contains(t, logs.String(), `timezone "EST" is deprecated`)
+	assert.Contains(t, logs.String(), "next release")
 }

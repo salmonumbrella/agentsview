@@ -407,7 +407,7 @@ func resolveTimezone(name string) (*time.Location, error) {
 	if name == "" {
 		return time.UTC, nil
 	}
-	loc, err := time.LoadLocation(name)
+	loc, err := timeutil.LoadTimezone(name)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"loading timezone %q: %w", name, err,

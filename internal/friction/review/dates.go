@@ -4,12 +4,16 @@
 // friction_digest_sessions, and "nightly" becomes an hourly catch-up.
 package review
 
-import "time"
+import (
+	"time"
+
+	"go.kenn.io/agentsview/internal/timeutil"
+)
 
 const dateLayout = "2006-01-02"
 
 func localDate(t time.Time, loc *time.Location) string {
-	return t.In(loc).Format(dateLayout)
+	return timeutil.ReportDate(t, loc).String()
 }
 
 // addDays shifts a YYYY-MM-DD date. Inputs are validated at the API edge

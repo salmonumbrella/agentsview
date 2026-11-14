@@ -46,12 +46,13 @@ func IsValidTimestamp(s string) bool {
 
 // ParseSince resolves a --since value against now: relative forms
 // "Nh", "Nd", "Nw", "Nm" (months), "Ny", or an absolute YYYY-MM-DD
-// (that date's midnight in now's location). N is a positive integer.
+// (that date's first instant in now's location). N is a positive integer.
 // Months/years use now.AddDate(-y, -m, 0) for calendar-aware arithmetic;
 // hours/days/weeks use now.Add(-d).
 func ParseSince(now time.Time, s string) (time.Time, error) {
 	if IsValidDate(s) {
-		return time.ParseInLocation("2006-01-02", s, now.Location())
+		start, _, err := DateBounds(s, now.Location())
+		return start, err
 	}
 	if len(s) < 2 {
 		return time.Time{}, sinceFormatError(s)
@@ -154,7 +155,7 @@ func validatedTimezoneName(name string) string {
 	if name == "" || name == "Local" {
 		return ""
 	}
-	if _, err := time.LoadLocation(name); err != nil {
+	if _, err := LoadTimezone(name); err != nil {
 		return ""
 	}
 	return name

@@ -16,6 +16,7 @@ import (
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/kept"
+	"go.kenn.io/agentsview/internal/timeutil"
 )
 
 const (
@@ -302,7 +303,7 @@ func resolveActivitySelection(
 	if tz == "" {
 		tz = "UTC"
 	}
-	loc, err := time.LoadLocation(tz)
+	loc, err := timeutil.LoadTimezone(tz)
 	if err != nil {
 		return resolvedActivitySelection{},
 			apiError(http.StatusBadRequest, "invalid timezone: "+tz)
@@ -314,7 +315,7 @@ func resolveActivitySelection(
 	// Presets need an anchor date; default to today in the requested
 	// timezone, matching the prior day-only handler's behavior.
 	if input.Date == "" && input.From == "" {
-		input.Date = now.In(loc).Format("2006-01-02")
+		input.Date = timeutil.ReportDate(now, loc).String()
 	}
 	q, err := activity.ResolveQuery(input, now)
 	if err != nil {

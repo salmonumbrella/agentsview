@@ -10,6 +10,7 @@ import (
 
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/friction"
+	"go.kenn.io/agentsview/internal/timeutil"
 )
 
 func (s *Store) DiagnosticSignalsForDate(ctx context.Context, date string, loc *time.Location) ([]friction.Signal, error) {
@@ -56,7 +57,7 @@ func (s *Store) FrictionPendingDiagnosticDates(ctx context.Context, last string,
 		if err = rows.Scan(&ts); err != nil {
 			return nil, err
 		}
-		dates[ts.In(loc).Format("2006-01-02")] = true
+		dates[timeutil.ReportDate(ts, loc).String()] = true
 	}
 	if err = rows.Err(); err != nil {
 		return nil, err

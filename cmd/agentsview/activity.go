@@ -16,11 +16,13 @@ import (
 	"time"
 
 	"github.com/doordash-oss/oapi-codegen-dd/v3/pkg/runtime"
+
 	"go.kenn.io/agentsview/internal/activity"
 	"go.kenn.io/agentsview/internal/apiclient"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/export"
+	"go.kenn.io/agentsview/internal/timeutil"
 )
 
 // ActivityReportConfig holds the flags for `agentsview activity report`.
@@ -463,7 +465,7 @@ func resolveCLIActivitySelection(
 ) (activity.Query, db.AnalyticsFilter, error) {
 	tz := cfg.Timezone
 	if tz == "" {
-		tz = localTimezone()
+		tz = "UTC"
 	}
 
 	date := cfg.Date
@@ -515,7 +517,7 @@ func decodeCLIActivitySessionCursor(
 func (cursor cliActivitySessionCursor) selection() (
 	activity.Query, db.AnalyticsFilter, error,
 ) {
-	loc, err := time.LoadLocation(cursor.Query.Timezone)
+	loc, err := timeutil.LoadTimezone(cursor.Query.Timezone)
 	if err != nil || cursor.Query.Timezone != cursor.Filter.Timezone {
 		return activity.Query{}, db.AnalyticsFilter{}, errors.New("invalid timezone")
 	}
@@ -562,13 +564,13 @@ func newCLIActivitySessionCursor(
 }
 
 // todayIn returns today's date as YYYY-MM-DD in the given IANA timezone,
-// falling back to the local zone when tz is unknown.
+// falling back to UTC when tz is unknown.
 func todayIn(tz string) string {
-	loc, err := time.LoadLocation(tz)
+	loc, err := timeutil.LoadTimezone(tz)
 	if err != nil {
-		loc = time.Local //nolint:forbidigo // Format the CLI report date in the local zone when no valid zone is supplied.
+		loc = time.UTC
 	}
-	return activityReportNow().In(loc).Format("2006-01-02")
+	return timeutil.ReportDate(activityReportNow(), loc).String()
 }
 
 // printActivityReport renders the human-readable report: a header, totals,
@@ -579,7 +581,7 @@ func printActivityReport(r activity.Report) {
 }
 
 func printActivityReportTo(w io.Writer, r activity.Report) {
-	loc, err := time.LoadLocation(r.Timezone)
+	loc, err := timeutil.LoadTimezone(r.Timezone)
 	if err != nil {
 		loc = time.UTC
 	}

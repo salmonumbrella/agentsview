@@ -62,7 +62,7 @@ func BuildAnalyticsFilter(req AnalyticsRequest, now time.Time) (db.AnalyticsFilt
 	if tz == "" {
 		tz = "UTC"
 	}
-	if _, err := time.LoadLocation(tz); err != nil {
+	if _, err := timeutil.LoadTimezone(tz); err != nil {
 		return db.AnalyticsFilter{}, &AnalyticsInputError{Msg: "invalid timezone: " + tz}
 	}
 	from, to := req.From, req.To
@@ -106,7 +106,7 @@ func BuildActivityReportSelection(
 	if tz == "" {
 		tz = "UTC"
 	}
-	loc, err := time.LoadLocation(tz)
+	loc, err := timeutil.LoadTimezone(tz)
 	if err != nil {
 		return activity.Query{}, db.AnalyticsFilter{}, &AnalyticsInputError{Msg: "invalid timezone: " + tz}
 	}
@@ -114,7 +114,7 @@ func BuildActivityReportSelection(
 		Preset: req.Preset, Date: req.Date, From: req.From, To: req.To, Timezone: tz,
 	}
 	if input.Date == "" && input.From == "" {
-		input.Date = now.In(loc).Format(time.DateOnly)
+		input.Date = timeutil.ReportDate(now, loc).String()
 	}
 	q, err := activity.ResolveQuery(input, now)
 	if err != nil {

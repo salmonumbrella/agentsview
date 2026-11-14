@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"go.kenn.io/agentsview/internal/timeutil"
 )
 
 type placeholderStyle int
@@ -463,7 +465,7 @@ func NormalizeSessionTimezone(name string) (string, error) {
 	if name == "Local" {
 		return "", fmt.Errorf("invalid timezone: %s", name)
 	}
-	loc, err := time.LoadLocation(name)
+	loc, err := timeutil.LoadTimezone(name)
 	if err != nil {
 		return "", fmt.Errorf("invalid timezone: %s", name)
 	}
@@ -478,11 +480,11 @@ func sessionDateBoundary(date, timezone string, nextDay bool) string {
 		// contract rather than making SQL construction panic.
 		name = "UTC"
 	}
-	loc, err := time.LoadLocation(name)
+	loc, err := timeutil.LoadTimezone(name)
 	if err != nil {
 		loc = time.UTC
 	}
-	boundary, err := time.ParseInLocation(time.DateOnly, date, loc)
+	start, end, err := timeutil.DateBounds(date, loc)
 	if err != nil {
 		// Dates are likewise validated at public boundaries. Returning the
 		// original value preserves the historical behavior for invalid
@@ -490,9 +492,9 @@ func sessionDateBoundary(date, timezone string, nextDay bool) string {
 		return date
 	}
 	if nextDay {
-		boundary = boundary.AddDate(0, 0, 1)
+		return end.UTC().Format(time.RFC3339)
 	}
-	return boundary.UTC().Format(time.RFC3339)
+	return start.UTC().Format(time.RFC3339)
 }
 
 // QueryBuilder allocates dialect placeholders and collects bind parameters.
@@ -953,14 +955,16 @@ func sessionFilterPredicates(
 			inPredicate(q("agent"), splitCSV(f.Agent), b))
 	}
 	if f.Date != "" {
-		preds = append(preds, "("+b.dialect.dateEndExpr(q)+" >= "+
-			b.dialect.dateParam(b.Add(sessionDateBoundary(
-				f.Date, f.Timezone, false,
-			)))+" AND "+
-			b.dialect.dateStartExpr(q)+" < "+
-			b.dialect.dateParam(b.Add(sessionDateBoundary(
-				f.Date, f.Timezone, true,
-			)))+")")
+		start, end := sessionDateBoundary(f.Date, f.Timezone, false), sessionDateBoundary(f.Date, f.Timezone, true)
+		if start == end {
+			// No session can overlap a calendar date the zone skipped, even a
+			// session spanning the instant where that empty day would have been.
+			preds = append(preds, b.dialect.FalseLiteral())
+		} else {
+			preds = append(preds, "("+b.dialect.dateEndExpr(q)+" >= "+
+				b.dialect.dateParam(b.Add(start))+" AND "+
+				b.dialect.dateStartExpr(q)+" < "+b.dialect.dateParam(b.Add(end))+")")
+		}
 	}
 	preds = append(preds, b.SessionDateRangePredicates(f.DateFrom, f.DateTo, f.Timezone, q)...)
 	if f.ActiveSince != "" {
@@ -1342,6 +1346,11 @@ func (b *QueryBuilder) terminationParam(t time.Time) string {
 // SessionDateRangePredicates matches sessions whose activity overlaps the inclusive
 // calendar-date range. Empty bounds add no restriction, as in session listing.
 func (b *QueryBuilder) SessionDateRangePredicates(dateFrom, dateTo, timezone string, q func(string) string) []string {
+	if dateFrom != "" && dateTo != "" &&
+		sessionDateBoundary(dateFrom, timezone, false) == sessionDateBoundary(dateTo, timezone, true) {
+		return []string{b.dialect.FalseLiteral()}
+	}
+
 	var preds []string
 	if dateFrom != "" {
 		preds = append(preds, b.dialect.dateEndExpr(q)+" >= "+
