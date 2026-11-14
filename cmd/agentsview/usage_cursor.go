@@ -88,7 +88,7 @@ func runUsageCursor(ctx context.Context, cfg UsageCursorConfig) error {
 		}
 	}
 
-	loc := timeutil.LocalLocation()
+	loc := time.UTC
 
 	start, end, err := resolveCursorUsageWindow(cfg, loc)
 	if err != nil {
@@ -157,7 +157,7 @@ func resolveCursorUsageWindow(
 	var err error
 
 	if startDate != "" {
-		start, err = time.ParseInLocation("2006-01-02", startDate, loc)
+		start, _, err = timeutil.DateBounds(startDate, loc)
 		if err != nil {
 			return time.Time{}, time.Time{}, fmt.Errorf(
 				"invalid since date %q: %w", startDate, err,
@@ -168,13 +168,13 @@ func resolveCursorUsageWindow(
 	}
 
 	if endDate != "" {
-		end, err = time.ParseInLocation("2006-01-02", endDate, loc)
+		_, end, err = timeutil.DateBounds(endDate, loc)
 		if err != nil {
 			return time.Time{}, time.Time{}, fmt.Errorf(
 				"invalid until date %q: %w", endDate, err,
 			)
 		}
-		end = end.AddDate(0, 0, 1).Add(-time.Millisecond)
+		end = end.Add(-time.Millisecond)
 	} else {
 		end = now
 	}

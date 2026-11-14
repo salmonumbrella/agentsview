@@ -247,3 +247,56 @@ func TestBuildBuckets_CalendarWeekISOMonday(t *testing.T) {
 	require.Len(t, ws, 2)
 	assert.Equal(t, mustRFC3339(t, "2026-06-22T00:00:00Z"), ws[0].End)
 }
+
+func TestResolveQueryCivilPresets(t *testing.T) {
+	for _, tc := range []struct{ zone, preset, date, start, end string }{
+		{"America/Santiago", "day", "2026-09-06", "2026-09-06T04:00:00Z", "2026-09-07T03:00:00Z"},
+		{"America/Havana", "day", "2026-03-08", "2026-03-08T05:00:00Z", "2026-03-09T04:00:00Z"},
+		{"Asia/Jerusalem", "day", "2000-10-06", "2000-10-05T21:00:00Z", "2000-10-06T22:00:00Z"},
+		{"America/Santiago", "week", "2026-09-06", "2026-08-31T04:00:00Z", "2026-09-07T03:00:00Z"},
+		{"America/Havana", "month", "2026-03-08", "2026-03-01T05:00:00Z", "2026-04-01T04:00:00Z"},
+		{"Pacific/Apia", "week", "2011-12-30", "2011-12-26T10:00:00Z", "2012-01-01T10:00:00Z"},
+	} {
+		t.Run(tc.zone+tc.preset, func(t *testing.T) {
+			q, err := ResolveQuery(QueryInput{Preset: tc.preset, Date: tc.date, Timezone: tc.zone}, mustRFC3339(t, "2030-01-01T00:00:00Z"))
+			require.NoError(t, err)
+			assert.Equal(t, tc.start, q.RangeStart.Format(time.RFC3339))
+			assert.Equal(t, tc.end, q.RangeEnd.Format(time.RFC3339))
+		})
+	}
+	_, err := ResolveQuery(QueryInput{Preset: "day", Date: "2011-12-30", Timezone: "Pacific/Apia"}, mustRFC3339(t, "2030-01-01T00:00:00Z"))
+	require.Error(t, err, "a skipped date must not select an adjacent day")
+}
+
+func TestBuildBucketsCivilTransitions(t *testing.T) {
+	for _, tc := range []struct {
+		zone, start, end string
+		boundaries       []string
+	}{
+		{"America/Santiago", "2026-09-05T04:00:00Z", "2026-09-08T03:00:00Z", []string{"2026-09-06T04:00:00Z", "2026-09-07T03:00:00Z", "2026-09-08T03:00:00Z"}},
+		{"Pacific/Apia", "2011-12-29T10:00:00Z", "2011-12-31T10:00:00Z", []string{"2011-12-30T10:00:00Z", "2011-12-31T10:00:00Z"}},
+		{"America/St_Johns", "2010-11-07T02:45:00Z", "2010-11-08T03:30:00Z", []string{"2010-11-08T03:30:00Z"}},
+	} {
+		t.Run(tc.zone, func(t *testing.T) {
+			start, end := mustRFC3339(t, tc.start), mustRFC3339(t, tc.end)
+			buckets, err := BuildBuckets(start, end, BucketSpec{BucketDay, 86400}, loc(t, tc.zone))
+			require.NoError(t, err)
+			require.Len(t, buckets, len(tc.boundaries))
+			for i, b := range buckets {
+				assert.Equal(t, start, b.Start)
+				assert.Equal(t, tc.boundaries[i], b.End.Format(time.RFC3339))
+				assert.True(t, b.Start.Before(b.End))
+				start = b.End
+			}
+		})
+	}
+}
+
+func TestResolveQueryTodayAfterDateRollback(t *testing.T) {
+	now := mustRFC3339(t, "2010-11-07T02:45:00Z")
+	q, err := ResolveQuery(QueryInput{Timezone: "America/St_Johns"}, now)
+	require.NoError(t, err)
+	assert.Equal(t, "2010-11-07T02:30:00Z", q.RangeStart.Format(time.RFC3339))
+	assert.False(t, now.Before(q.RangeStart))
+	assert.True(t, now.Before(q.RangeEnd))
+}

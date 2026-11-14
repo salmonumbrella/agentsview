@@ -438,3 +438,44 @@ func TestQueryDialectPosition(t *testing.T) {
 		QueryDialect{name: "missing"}.Position("content", "'needle'")
 	})
 }
+
+func TestSessionDateBoundaryCivilMidnights(t *testing.T) {
+	for _, tc := range []struct{ zone, date, start, end string }{
+		{"America/Santiago", "2026-09-06", "2026-09-06T04:00:00Z", "2026-09-07T03:00:00Z"},
+		{"America/Havana", "2026-03-08", "2026-03-08T05:00:00Z", "2026-03-09T04:00:00Z"},
+		{"Asia/Jerusalem", "2000-10-06", "2000-10-05T21:00:00Z", "2000-10-06T22:00:00Z"},
+		{"Pacific/Apia", "2011-12-30", "2011-12-30T10:00:00Z", "2011-12-30T10:00:00Z"},
+	} {
+		t.Run(tc.zone, func(t *testing.T) {
+			for _, dialect := range []QueryDialect{SQLiteQueryDialect(), PostgresQueryDialect(), DuckDBQueryDialect(), ClickHouseQueryDialect()} {
+				where, args := BuildSessionFilterSQL(SessionFilter{DateFrom: tc.date, DateTo: tc.date, Timezone: tc.zone}, dialect)
+				if tc.start == tc.end {
+					assert.Empty(t, args)
+					assert.Contains(t, where, " AND "+dialect.FalseLiteral())
+				} else {
+					assert.Equal(t, []any{tc.start, tc.end}, args)
+				}
+			}
+		})
+	}
+}
+
+func TestSessionDateBoundarySkippedDateExcludesSpanningSessions(t *testing.T) {
+	d := testDB(t)
+	require.NoError(t, d.UpsertSession(t.Context(), Session{
+		ID: "span", Project: "p", Machine: "test", Agent: "claude", RelationshipType: "root", MessageCount: 2, UserMessageCount: 2,
+		StartedAt: new("2011-12-29T12:00:00Z"), EndedAt: new("2011-12-31T12:00:00Z"),
+	}))
+	for _, filter := range []SessionFilter{
+		{Date: "2011-12-30", Timezone: "Pacific/Apia"},
+		{DateFrom: "2011-12-30", DateTo: "2011-12-30", Timezone: "Pacific/Apia"},
+	} {
+		rows, err := d.ListSessions(t.Context(), filter)
+		require.NoError(t, err)
+		assert.Empty(t, rows.Sessions)
+	}
+	rows, err := d.ListSessions(t.Context(), SessionFilter{Date: "2011-12-31", Timezone: "Pacific/Apia"})
+	require.NoError(t, err)
+	require.Len(t, rows.Sessions, 1)
+	assert.Equal(t, "span", rows.Sessions[0].ID)
+}

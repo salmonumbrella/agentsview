@@ -9,6 +9,7 @@ import (
 	"go.kenn.io/agentsview/internal/activity"
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/export"
+	"go.kenn.io/agentsview/internal/timeutil"
 )
 
 const (
@@ -99,7 +100,7 @@ func (payload activityReportTokenPayload) selection() (resolvedActivitySelection
 		payload.Schema != export.ActivityReportSchemaVersion {
 		return resolvedActivitySelection{}, errors.New("unsupported activity report token version")
 	}
-	location, err := time.LoadLocation(payload.Query.Timezone)
+	location, err := timeutil.LoadTimezone(payload.Query.Timezone)
 	if err != nil {
 		return resolvedActivitySelection{}, fmt.Errorf("activity report token timezone: %w", err)
 	}

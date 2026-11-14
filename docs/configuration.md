@@ -2279,8 +2279,12 @@ Restart the daemon after changing this setting. When enabled:
 
 An hourly job builds one stored digest per completed local day, catching up
 within `backfill_days` (1–3650, default 7). It never builds today. Set
-`AGENTSVIEW_FRICTION_TZ` to override the configured timezone. Seat patterns label
-digest findings from session paths without changing the stored detections.
+`AGENTSVIEW_FRICTION_TZ` to override the configured timezone. Report flags, API
+timezone parameters, and this override accept `UTC` or an IANA name containing
+`/`, such as `America/New_York`. They reject `Local`, empty values, numeric
+offsets, and abbreviations. Saved `[friction] timezone` abbreviations still load with a
+warning for this release; replace them before the next release. Seat patterns
+label digest findings from session paths without changing the stored detections.
 `[friction.kata]` needs `[kata]` enabled on the hub; see
 [File patterns automatically](/docs/kata/#file-patterns-automatically).
 

@@ -12,12 +12,13 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
+
 	"go.kenn.io/agentsview/internal/activity"
 	"go.kenn.io/agentsview/internal/clickhouse"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/server"
-	"golang.org/x/term"
 )
 
 const (
@@ -640,6 +641,9 @@ func newUsageDailyCommand() *cobra.Command {
 		SilenceUsage: true,
 		Args:         cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateTimezoneFlag(cmd); err != nil {
+				return err
+			}
 			cfg.JSON = outputFormat(cmd) == "json"
 			cfg.OutputWriter = cmd.OutOrStdout()
 			cfg.ErrorWriter = cmd.ErrOrStderr()
@@ -654,7 +658,7 @@ func newUsageDailyCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&cfg.Breakdown, "breakdown", false, "Show per-model breakdown rows")
 	cmd.Flags().BoolVar(&cfg.Offline, "offline", false, "Use fallback pricing only")
 	cmd.Flags().BoolVar(&cfg.NoSync, "no-sync", false, "Skip on-demand sync before querying")
-	cmd.Flags().StringVar(&cfg.Timezone, "timezone", "", "IANA timezone for date bucketing")
+	cmd.Flags().StringVar(&cfg.Timezone, "timezone", "", "Timezone for date bucketing (UTC by default, or an IANA name)")
 	return cmd
 }
 
@@ -712,6 +716,9 @@ func newActivityReportCommand() *cobra.Command {
 		SilenceUsage: true,
 		Args:         cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateTimezoneFlag(cmd); err != nil {
+				return err
+			}
 			cfg.JSON = outputFormat(cmd) == "json"
 			cfg.OutputWriter = cmd.OutOrStdout()
 			cfg.ErrorWriter = cmd.ErrOrStderr()
@@ -722,7 +729,7 @@ func newActivityReportCommand() *cobra.Command {
 	cmd.Flags().StringVar(&cfg.Date, "date", "", "Anchor date for presets (YYYY-MM-DD)")
 	cmd.Flags().StringVar(&cfg.From, "from", "", "Start instant for custom range (RFC3339)")
 	cmd.Flags().StringVar(&cfg.To, "to", "", "End instant for custom range (RFC3339)")
-	cmd.Flags().StringVar(&cfg.Timezone, "timezone", "", "IANA timezone for range bucketing")
+	cmd.Flags().StringVar(&cfg.Timezone, "timezone", "", "Timezone for range bucketing (UTC by default, or an IANA name)")
 	cmd.Flags().StringVar(&cfg.Bucket, "bucket", "", "Bucket size: 5m, 15m, 1h, 1d, 1w")
 	cmd.Flags().StringVar(&cfg.Project, "project", "", "Filter by project")
 	cmd.Flags().StringVar(&cfg.Agent, "agent", "", "Filter by agent name")

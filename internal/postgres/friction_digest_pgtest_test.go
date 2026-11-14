@@ -287,3 +287,32 @@ func TestFrictionSubjectsSeekActivityAndMembership(t *testing.T) {
 		}
 	}
 }
+
+func TestFrictionCivilDateRollbackParity(t *testing.T) {
+	t.Parallel()
+	local, remote := openFrictionParityStores(t)
+	loc, err := time.LoadLocation("America/St_Johns")
+	require.NoError(t, err)
+	ended := "2010-11-07T02:45:00Z"
+	require.NoError(t, local.UpsertSession(t.Context(), db.Session{ID: "rollback", Project: "p", Machine: "machine", Agent: "claude", EndedAt: &ended, MessageCount: 1}))
+	require.NoError(t, local.UpdateSessionSignals(t.Context(), "rollback", db.SessionSignalUpdate{Friction: &db.SessionFrictionUpdate{RulesVersion: friction.RulesVersion, Hash: "rollback"}}))
+	_, err = remote.pg.ExecContext(t.Context(), `INSERT INTO sessions (id,project,machine,agent,ended_at,friction_rules_version) VALUES ('rollback','p','machine','claude',$1,$2)`, ended, friction.RulesVersion)
+	require.NoError(t, err)
+	for name, store := range map[string]interface {
+		FrictionPendingDates(context.Context, string, string, *time.Location) ([]string, error)
+		FrictionSubjectsForDate(context.Context, string, *time.Location, bool) ([]db.FrictionSubject, error)
+	}{"sqlite": local, "postgres": remote} {
+		t.Run(name, func(t *testing.T) {
+			dates, err := store.FrictionPendingDates(t.Context(), "2010-11-06", "2010-11-07", loc)
+			require.NoError(t, err)
+			assert.Equal(t, []string{"2010-11-07"}, dates)
+			subjects, err := store.FrictionSubjectsForDate(t.Context(), "2010-11-07", loc, false)
+			require.NoError(t, err)
+			require.Len(t, subjects, 1)
+			assert.Equal(t, "rollback", subjects[0].SubjectID)
+			subjects, err = store.FrictionSubjectsForDate(t.Context(), "2010-11-06", loc, false)
+			require.NoError(t, err)
+			assert.Empty(t, subjects)
+		})
+	}
+}

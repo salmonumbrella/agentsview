@@ -661,3 +661,19 @@ func TestFrictionSubjectsSeekActivityAndMembership(t *testing.T) {
 		})
 	}
 }
+
+func TestFrictionDateDiscoveryMatchesBoundsAfterDateRollback(t *testing.T) {
+	d := testDB(t)
+	loc, err := time.LoadLocation("America/St_Johns")
+	require.NoError(t, err)
+	seedFrictionSession(t, d, "rollback", "", "2010-11-07T02:45:00Z", nil)
+	dates, err := d.FrictionPendingDates(t.Context(), "2010-11-06", "2010-11-07", loc)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"2010-11-07"}, dates)
+	subjects, err := d.FrictionSubjectsForDate(t.Context(), "2010-11-07", loc, false)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"rollback"}, subjectIDs(subjects))
+	subjects, err = d.FrictionSubjectsForDate(t.Context(), "2010-11-06", loc, false)
+	require.NoError(t, err)
+	assert.Empty(t, subjects)
+}

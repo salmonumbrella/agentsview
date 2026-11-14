@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -79,6 +80,9 @@ func TestNewFrictionRunner(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("AGENTSVIEW_FRICTION_TZ", tt.env)
+			if tt.env == "" {
+				require.NoError(t, os.Unsetenv("AGENTSVIEW_FRICTION_TZ"))
+			}
 			r, err := newFrictionRunner(tt.cfg(), tt.store, time.Now)
 			require.NoError(t, err)
 			if tt.wantNil {
@@ -97,6 +101,7 @@ func TestNewFrictionRunner(t *testing.T) {
 
 func TestFrictionReviewIsOptIn(t *testing.T) {
 	t.Setenv("AGENTSVIEW_FRICTION_TZ", "")
+	require.NoError(t, os.Unsetenv("AGENTSVIEW_FRICTION_TZ"))
 	cfg, err := config.Default()
 	require.NoError(t, err)
 	d := dbtest.OpenTestDB(t)
@@ -112,6 +117,7 @@ func TestFrictionReviewIsOptIn(t *testing.T) {
 
 func TestFrictionReviewSkipsUsageOnlyArchive(t *testing.T) {
 	t.Setenv("AGENTSVIEW_FRICTION_TZ", "")
+	require.NoError(t, os.Unsetenv("AGENTSVIEW_FRICTION_TZ"))
 	d := dbtest.OpenTestDB(t)
 	ended := time.Now().UTC().AddDate(0, 0, -1).Format(time.RFC3339)
 	dbtest.SeedSession(t, d, "retained", "proj", func(s *db.Session) { s.EndedAt = &ended })
@@ -194,6 +200,7 @@ func (s pausedFrictionStore) FrictionSubjectsForDate(ctx context.Context, date s
 
 func TestLocalFrictionReviewNoSyncSharesResyncBarrier(t *testing.T) {
 	t.Setenv("AGENTSVIEW_FRICTION_TZ", "")
+	require.NoError(t, os.Unsetenv("AGENTSVIEW_FRICTION_TZ"))
 	d := dbtest.OpenTestDB(t)
 	ended := time.Now().UTC().AddDate(0, 0, -1).Format(time.RFC3339)
 	dbtest.SeedSession(t, d, "s", "proj", func(s *db.Session) { s.EndedAt = &ended })
@@ -305,6 +312,7 @@ func TestFrictionExclusiveKeepsDaemonAlive(t *testing.T) {
 func TestHubFrictionDefaultsToUTCDates(t *testing.T) {
 	t.Setenv("TZ", "Pacific/Honolulu")
 	t.Setenv("AGENTSVIEW_FRICTION_TZ", "")
+	require.NoError(t, os.Unsetenv("AGENTSVIEW_FRICTION_TZ"))
 	d := dbtest.OpenTestDB(t)
 	ended := "2026-09-21T12:00:00Z"
 	dbtest.SeedSession(t, d, "s", "proj", func(s *db.Session) { s.EndedAt = &ended })

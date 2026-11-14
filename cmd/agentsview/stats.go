@@ -17,9 +17,11 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/service"
+	"go.kenn.io/agentsview/internal/timeutil"
 )
 
 func newStatsCommand() *cobra.Command {
@@ -39,6 +41,9 @@ func newStatsCommand() *cobra.Command {
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateTimezoneFlag(cmd); err != nil {
+				return err
+			}
 			if err := validateStatsCLIWindow(since, until, timezone); err != nil {
 				return err
 			}
@@ -667,9 +672,24 @@ func validateStatsCLIWindow(since, until, timezone string) error {
 		}
 	}
 	if timezone != "" {
-		if _, err := time.LoadLocation(timezone); err != nil {
+		if _, err := timeutil.LoadTimezone(timezone); err != nil {
 			return cliValidationError(fmt.Errorf("invalid --timezone: %w", err), "use an IANA timezone such as America/New_York or UTC")
 		}
+	}
+	return nil
+}
+
+// validateTimezoneFlag preserves the distinction between omitted and empty flags.
+func validateTimezoneFlag(cmd *cobra.Command) error {
+	if !cmd.Flags().Changed("timezone") {
+		return nil
+	}
+	zone, err := cmd.Flags().GetString("timezone")
+	if err != nil {
+		return err
+	}
+	if _, err := timeutil.LoadTimezone(zone); err != nil {
+		return cliValidationError(err, "use --timezone UTC or an IANA name such as America/New_York")
 	}
 	return nil
 }

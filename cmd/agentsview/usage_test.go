@@ -663,7 +663,7 @@ func TestUsageDateForTimezoneFallsBackToUTC(t *testing.T) {
 	assert.Equal(t, "2026-07-04", usageDateForTimezone(now, "not/a-zone"))
 }
 
-func TestRunUsageDailyDefaultsToMappedLocalTimezone(t *testing.T) {
+func TestRunUsageDailyDefaultsToUTC(t *testing.T) {
 	t.Setenv("TZ", "America/New_York")
 	oldLocal := time.Local                                         //nolint:forbidigo // Exercise report formatting and date buckets in the local calendar timezone.
 	time.Local = time.FixedZone("Eastern Standard Time", -5*60*60) //nolint:forbidigo // Exercise report formatting and date buckets in the local calendar timezone.
@@ -679,7 +679,7 @@ func TestRunUsageDailyDefaultsToMappedLocalTimezone(t *testing.T) {
 	captureStdout(t, func() {
 		runUsageDaily(t.Context(), UsageDailyConfig{JSON: true, Offline: false})
 	})
-	assert.Equal(t, "America/New_York", gotTimezone)
+	assert.Equal(t, "UTC", gotTimezone)
 }
 
 func TestRunUsageStatuslineDefaultsToMappedLocalTimezone(t *testing.T) {

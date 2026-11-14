@@ -184,6 +184,16 @@ const (
 )
 
 func (s *Server) humaRequestInfoMiddleware(ctx huma.Context, next func(huma.Context)) {
+	// Huma treats an empty query value as omitted. Validate the wire values
+	// before defaulting so ?timezone= never silently becomes UTC.
+	requestURL := ctx.URL()
+	for _, zone := range requestURL.Query()["timezone"] {
+		if _, err := timeutil.LoadTimezone(zone); err != nil {
+			_ = huma.WriteErr(s.api, ctx, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
 	info := requestInfo{
 		RemoteAddr: ctx.RemoteAddr(),
 		Forwarded: ctx.Header("X-Forwarded-For") != "" ||

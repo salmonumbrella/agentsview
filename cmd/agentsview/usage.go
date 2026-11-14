@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/doordash-oss/oapi-codegen-dd/v3/pkg/runtime"
+
 	"go.kenn.io/agentsview/internal/apiclient"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
@@ -134,14 +135,14 @@ func resolveUsageWindow(
 func resolveUsageWindowPoint(
 	raw string, anchor time.Time, loc *time.Location,
 ) (time.Time, string, error) {
-	if t, err := time.ParseInLocation("2006-01-02", raw, loc); err == nil {
+	if t, _, err := timeutil.DateBounds(raw, loc); err == nil {
 		return t, raw, nil
 	}
 	t, err := db.ParseWindowPoint(raw, anchor)
 	if err != nil {
 		return time.Time{}, "", err
 	}
-	return t, t.In(loc).Format("2006-01-02"), nil
+	return t, timeutil.ReportDate(t, loc).String(), nil
 }
 
 func runUsageDaily(ctx context.Context, cfg UsageDailyConfig) error {
@@ -158,10 +159,10 @@ func runUsageDailyResult(ctx context.Context, cfg UsageDailyConfig) error {
 	}
 	tz := cfg.Timezone
 	if tz == "" {
-		tz = localTimezone()
+		tz = "UTC"
 	}
 
-	loc, err := time.LoadLocation(tz)
+	loc, err := timeutil.LoadTimezone(tz)
 	if err != nil {
 		return cliValidationError(fmt.Errorf("invalid --timezone: %w", err),
 			"Use --timezone with an IANA timezone such as UTC or America/New_York.")
@@ -315,11 +316,11 @@ type usageStatuslineReport struct {
 }
 
 func usageDateForTimezone(now time.Time, timezone string) string {
-	loc, err := time.LoadLocation(timezone)
+	loc, err := timeutil.LoadTimezone(timezone)
 	if err != nil {
 		loc = time.UTC
 	}
-	return now.In(loc).Format("2006-01-02")
+	return timeutil.ReportDate(now, loc).String()
 }
 
 func runUsageStatusline(ctx context.Context, cfg UsageStatuslineConfig) error {

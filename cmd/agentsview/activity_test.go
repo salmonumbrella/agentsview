@@ -47,9 +47,9 @@ func TestResolveCLIActivitySelection(t *testing.T) {
 		Preset: "day",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "America/New_York", query.Timezone)
-	assert.Equal(t, "America/New_York", filter.Timezone)
-	assert.Equal(t, "2026-03-08T05:00:00Z", query.RangeStart.Format(time.RFC3339))
+	assert.Equal(t, "UTC", query.Timezone)
+	assert.Equal(t, "UTC", filter.Timezone)
+	assert.Equal(t, "2026-03-09T00:00:00Z", query.RangeStart.Format(time.RFC3339))
 
 	query, filter, err = resolveCLIActivitySelection(ActivityReportConfig{
 		Preset: "day", Date: "2026-03-09", Timezone: "Europe/Berlin",
